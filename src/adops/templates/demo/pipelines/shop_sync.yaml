@@ -1,0 +1,12 @@
+name: shop_sync
+steps:
+  - name: sync_shop
+    source: shop
+    tables:
+      - name: customers
+        mode: full_refresh
+        primary_key: id
+      - name: orders
+        mode: incremental
+        primary_key: id
+        cursor: updated_at

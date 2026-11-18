@@ -1,0 +1,60 @@
+[project]
+name = "adops"
+dynamic = ["version"]
+description = "Self-hosted data pipelines: sync, transform and check data into a Postgres warehouse."
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = [
+    "dlt[postgres]>=1.32,<2",
+    # dagster and its integration libraries are released in lockstep; keep both minors pinned together.
+    "dagster>=1.13.30,<1.14",
+    "dagster-postgres>=0.29.30,<0.30",
+    "psycopg[binary]>=3.3,<4",
+    "typer>=0.29,<0.30",
+    "pydantic>=2.14,<3",
+    "pyyaml>=6.0,<7",
+    "python-dotenv>=1.2,<2",
+]
+
+[project.scripts]
+adops = "adops.interface.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2,<10",
+    "pytest-cov>=7.1,<8",
+    "dlt[duckdb]>=1.32,<2",
+    "ruff>=0.17.5,<0.18",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/adops/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/adops"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers"
+markers = ["e2e: runs the demo Project against real Postgres containers (needs Docker)"]
+
+[tool.coverage.run]
+branch = true
+source = ["adops"]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+exclude_also = ["if TYPE_CHECKING:"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]

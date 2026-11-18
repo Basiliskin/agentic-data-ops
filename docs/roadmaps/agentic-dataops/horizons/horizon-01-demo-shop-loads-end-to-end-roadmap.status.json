@@ -1,0 +1,399 @@
+{
+  "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-01-demo-shop-loads-end-to-end-roadmap.json",
+  "roadmapTask": "Build the first horizon of adops v1: the demo shop loads end-to-end (adops init --demo, docker compose up, adops run Syncs orders/customers into the Postgres Warehouse) with 100% line+branch coverage and Docker E2E in CI.",
+  "createdAt": "2026-11-17T10:20:02.221156+00:00",
+  "updatedAt": "2026-11-18T13:52:20Z",
+  "roadmapRevision": 1,
+  "phases": [
+    {
+      "phaseId": "package-skeleton-and-coverage-ci",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-17T22:51:55Z",
+      "baseRef": "64dedc9c9b0f83f5ee8d24d83ba01988e21fd2de",
+      "baseDirty": true,
+      "notes": "Dirty at start (untracked): GLOSSARY.md, docs/adr/, docs/roadmaps/. Changed: pyproject.toml, uv.lock, .python-version, LICENSE, .gitignore, src/adops/{__init__,domain/__init__,application/__init__,infrastructure/__init__,interface/__init__,interface/cli}.py, tests/unit/test_package.py, tests/unit/interface/test_cli.py, .github/workflows/ci.yml. Adds the uv/hatchling adops package (Python 3.12, Apache-2.0, version from src/adops/__init__.py), locked deps (dlt 1.32, dagster 1.13.30, dagster-postgres 0.29.30, psycopg 3.3.9; duckdb dev-only), coverage branch=true/source=adops/fail_under=100, Typer `adops --version`, and a CI unit job with SHA-pinned actions + uv 0.11.32. Gate-bite proof: the rubric one-line probe `if getenv(X): pass` does NOT fail coverage (coverage.py sees no branch on a one-line if); a two-line branch-only probe fails (exit 1, 3->exit) and passes with branch=false, proving the gate. Not yet proven on GitHub (nothing pushed). Compensation known: delete the files listed above (nothing committed yet; no later phase depends on them).",
+      "unplannedFiles": [
+        ".gitignore"
+      ],
+      "gateRun": "uv sync --locked: pass; uv lock --check: pass; uv run ruff check: pass; uv run pytest tests/unit --cov --cov-report=term-missing: pass (TOTAL 100%)",
+      "completedAt": "2026-11-17T22:55:11Z",
+      "gradeResult": {
+        "phaseId": "package-skeleton-and-coverage-ci",
+        "dimensionScores": [
+          {
+            "dimensionId": "locked-install-and-entrypoint",
+            "score": 9,
+            "pass": true,
+            "evidence": "sync --locked, lock --check, adops --version == __version__, Apache-2.0 metadata, duckdb dev-only all verified; nothing beyond the criteria."
+          },
+          {
+            "dimensionId": "coverage-gate-enforced",
+            "score": 9,
+            "pass": true,
+            "evidence": "branch=true, source=adops, fail_under=100, only TYPE_CHECKING excluded, no pragmas. Rubric one-line probe does not bite (coverage.py quirk, rubric defect); two-line branch probe and unimported module both fail the gate. Proof is manual, so 9."
+          },
+          {
+            "dimensionId": "ci-workflow-pinned-and-blocking",
+            "score": 9,
+            "pass": true,
+            "evidence": "PR + push-to-main triggers, SHA-pinned actions with tag comments, uv pinned, locked/ruff/pytest-cov as separate steps, no continue-on-error, least-privilege permissions. Never run on GitHub, so held at 9."
+          },
+          {
+            "dimensionId": "layer-package-layout",
+            "score": 9,
+            "pass": true,
+            "evidence": "Four layers importable, typer only in interface/cli.py, __init__ does not re-export CLI, CliRunner test asserts exit 0 and version."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "pipeline-model-and-validation",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-17T23:02:30Z",
+      "baseRef": "64dedc9c9b0f83f5ee8d24d83ba01988e21fd2de",
+      "baseDirty": true,
+      "notes": "already dirty at start (untracked): .github/,.gitignore,.python-version,GLOSSARY.md,LICENSE,docs/adr/,docs/roadmaps/,pyproject.toml,src/,tests/,uv.lock | Changed: src/adops/domain/{errors,secret_reference,environment,checks,pipeline,loader}.py; tests/unit/domain/{test_pipeline,test_environment,test_loader,test_checks,test_domain_purity}.py. Pure domain: pydantic models (Pipeline/SyncStep/SyncTable/SkipChecks, PostgresConnection/Environment/ProjectSettings, SecretReference), load_pipeline/load_project_settings/ensure_sources_defined with path: problem errors, Check catalog + evaluate_preflight_checks/evaluate_load_checks over SourceFacts/LoadFacts. skip_checks YAML shape is {checks: [...], reason: ...}. File list recalled (whole repo untracked at baseRef, so git diff cannot separate it). Rubric grep `environ` matches the domain term environment(s) only; no os.environ use.",
+      "unplannedFiles": [
+        "tests/unit/domain/test_domain_purity.py"
+      ],
+      "gateRun": "uv run ruff check: pass; uv run pytest tests/unit --cov --cov-report=term-missing: pass (109 tests, 100% line+branch)",
+      "completedAt": "2026-11-17T23:07:24Z",
+      "gradeResult": {
+        "phaseId": "pipeline-model-and-validation",
+        "dimensionScores": [
+          {
+            "dimensionId": "domain-layer-purity",
+            "score": 9,
+            "pass": true,
+            "evidence": "Forbidden-import/clock greps empty; `environ` grep matches only the domain word 'environment' (false positive); str/fact-object signatures; AST import test enforces ban but allows most stdlib (no 10)."
+          },
+          {
+            "dimensionId": "validation-rules-tested",
+            "score": 10,
+            "pass": true,
+            "evidence": "Every rule rejected with asserted path; malformed/list/scalar/empty roots tested; 100% line+branch. Beyond 9: control-char reader error and !!python tag refusal tested."
+          },
+          {
+            "dimensionId": "secret-free-error-messages",
+            "score": 9,
+            "pass": true,
+            "evidence": "include_input=False, line/col only for YAML, raised outside except (no cause/context), sentinel on str/repr/args, multi-problem. Not 10: lowercase password_env sentinel checked only on str."
+          },
+          {
+            "dimensionId": "secret-reference-holds-no-value",
+            "score": 10,
+            "pass": true,
+            "evidence": "Literal password rejected naming password_env (both blocks); SecretReference fields == {name}; all 8 models extra=forbid. Beyond 9: mapping form and pasword_env typo rejected."
+          },
+          {
+            "dimensionId": "check-rules-deterministic",
+            "score": 9,
+            "pass": true,
+            "evidence": "Pass/fail per Check, all boundaries, fixed order, frozen facts, cursor sentinel. Not 10: preflight determinism called once plain + once deep copy; mixed-type cursor comparison unhandled."
+          },
+          {
+            "dimensionId": "skip-checks-require-reason",
+            "score": 10,
+            "pass": true,
+            "evidence": "Missing/blank reason, unknown and wrong-mode names rejected with paths; skipped reported with verbatim reason; default none skipped. Beyond 9: empty checks list rejected, preflight skip tested."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "run-pipeline-use-case",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-18T12:39:34Z",
+      "baseRef": "64dedc9c9b0f83f5ee8d24d83ba01988e21fd2de",
+      "baseDirty": true,
+      "notes": "already dirty at start (untracked): whole repo, so file list comes from a src/tests checksum snapshot, not git diff | Changed: src/adops/application/{ports,run_pipeline,secrets}.py; tests/unit/application/{fakes,test_run_pipeline,test_secrets,test_application_purity}.py. Sync/Orchestrator Protocols, ResolvedConnection with masked repr, resolve_secret_references (empty = missing, all names sorted), run_pipeline -> RunPlan of PlannedStep callables (preflight -> Checks -> sync -> Checks, sync errors redacted into SyncFailedError), InOrderOrchestrator skips Steps after the first failure. Orchestrator default is None (ruff B008) rather than an InOrderOrchestrator() instance. Unknown Environment raises the domain PipelineValidationError. Rubric grep `environ` matches only environment_name/Environment.",
+      "unplannedFiles": [
+        "tests/unit/application/test_application_purity.py"
+      ],
+      "completedAt": "2026-11-18T12:43:52Z",
+      "gradeResult": {
+        "phaseId": "run-pipeline-use-case",
+        "dimensionScores": [
+          {
+            "dimensionId": "application-dependency-direction",
+            "score": 9,
+            "pass": true,
+            "evidence": "Import-ban grep empty; environ grep matches only 'environment'; env: Mapping (run_pipeline.py:128); AST purity test exists. Not 10: glob not rglob, other I/O-capable stdlib allowed."
+          },
+          {
+            "dimensionId": "missing-secret-reporting",
+            "score": 10,
+            "pass": true,
+            "evidence": "All names sorted+deduped in one error; empty-string policy tested; zero sync calls on missing secret. Above 9: no __cause__/__context__ asserted (test_secrets.py:39) and only used Sources' secrets required (test_run_pipeline.py:281-284)."
+          },
+          {
+            "dimensionId": "resolved-connection-masking",
+            "score": 9,
+            "pass": true,
+            "evidence": "Sentinel tests cover ResolvedConnection, RunPlan, RunResult, SyncFailedError, CheckFailedError, MissingSecretError. Not 10: _redact is exact-substring only (URL-encoded password would pass)."
+          },
+          {
+            "dimensionId": "step-order-and-failure-semantics",
+            "score": 9,
+            "pass": true,
+            "evidence": "Order, failed/skipped, sanitized error, unknown Environment tested; 100% line+branch. Not 10: non-StepError exceptions from a task (e.g. mixed-type cursor TypeError) escape the orchestrator."
+          },
+          {
+            "dimensionId": "sync-port-engine-neutral",
+            "score": 9,
+            "pass": true,
+            "evidence": "Engine-term grep empty; domain SourceFacts/LoadFacts types; runtime_checkable isinstance test. Not 10: no type checker verifies fake signatures."
+          },
+          {
+            "dimensionId": "checks-gate-each-step",
+            "score": 9,
+            "pass": true,
+            "evidence": "All six passCriteria hold (test_run_pipeline.py:99-249). Not 10: a raising domain Check rule is not turned into a check_failed/failed Step."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": "uv run ruff check: pass; uv run pytest tests/unit --cov --cov-report=term-missing: pass (136 tests, 100% line+branch); uv run pytest tests/unit/application --cov=adops.application --cov-branch: pass"
+    },
+    {
+      "phaseId": "dlt-sync-adapter",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-18T12:47:09Z",
+      "baseRef": "64dedc9c9b0f83f5ee8d24d83ba01988e21fd2de",
+      "baseDirty": true,
+      "notes": "Base dirty: whole project untracked since init commit (src/, tests/, docs/, pyproject.toml, uv.lock, .github/); phase changes are identified by path. | Changed: src/adops/infrastructure/dlt_sync.py (new), tests/unit/infrastructure/test_dlt_sync.py (new) — from a src/tests checksum snapshot, matches filesAffected. DltSync(project_dir, pipeline, source_kind, warehouse_kind): sources via SQLAlchemy engines (postgres+psycopg / sqlite), destination via warehouse_destination (postgres / duckdb); one dlt run per table so failures name the table; facts by read-only SQL through pipeline.sql_client(); errors redacted (passwords + any scheme:// URL) and raised outside except (no cause/context). Amendment 1: Source row count measured in sync into LoadFacts.source_rows (see amendments). | Graded by subagent: 9/10/9/9/9, all pass, one 10 kept (earned). No compensation defined.",
+      "amendments": [
+        {
+          "at": "2026-11-18T12:50:09Z",
+          "by": "execute",
+          "reason": "changes[5] put the Source row count in SourceFacts; the done domain phase defines SourceFacts(table_exists, columns) and carries source_rows on LoadFacts, so the adapter measures it in sync() just before the load. Same goal, same facts.",
+          "grounding": "src/adops/domain/checks.py: SourceFacts has no row count; LoadFacts.source_rows feeds _row_count_matches",
+          "before": {
+            "changes": [
+              "Implement `preflight`: read the Source catalog for each allowlisted table, its `primary_key` and `cursor` columns, and the Source row count for Full Refresh tables (SourceFacts). In `sync`, measure Warehouse row count and max cursor before the load and, after it, row count, max cursor, duplicate-key count and null-key count (LoadFacts). Use read-only SQL on the same connections and never log values."
+            ]
+          },
+          "after": {
+            "changes": [
+              "Implement `preflight`: read the Source catalog for each allowlisted table (existence and columns, so a missing `primary_key`/`cursor` shows) into SourceFacts. In `sync`, measure the Source row count of each Full Refresh table into LoadFacts.source_rows, and the Warehouse row count and max cursor before the load and, after it, row count, max cursor, duplicate-key count and null-key count (LoadFacts). Use read-only SQL on the same connections and never log values."
+            ]
+          }
+        }
+      ],
+      "unplannedFiles": [],
+      "completedAt": "2026-11-18T12:52:17Z",
+      "gradeResult": {
+        "phaseId": "dlt-sync-adapter",
+        "dimensionScores": [
+          {
+            "dimensionId": "incremental-loads-only-advanced-rows",
+            "score": 9,
+            "pass": true,
+            "evidence": "test_dlt_sync.py:135-152 asserts count 3+1, no duplicate ids, updated amount 99, rows_loaded 2 vs 3, fresh DltSync, state dir under .adops/dlt/adops_shop_orders; adapter uses incremental+merge+primary_key (dlt_sync.py:155-162)."
+          },
+          {
+            "dimensionId": "full-refresh-replaces",
+            "score": 10,
+            "pass": true,
+            "evidence": "Delete+update then destination == Source row set (test:99-110); raw_shop via information_schema, non-allowlisted table absent (:125-132); beyond a 9: second run also asserts rows_loaded 2, source_rows 2, before/after 3/2, proving no append."
+          },
+          {
+            "dimensionId": "credentials-and-sanitized-errors",
+            "score": 9,
+            "pass": true,
+            "evidence": "In-memory engine/credentials dict; SyncFailedError raised outside except (no cause/context); sentinel tests for preflight, sync source, full-refresh count, sync warehouse check str/repr/__cause__/__context__ and scan project files. Not 10: preflight test skips the working-dir scan; no successful Postgres-destination run checked (needs Docker)."
+          },
+          {
+            "dimensionId": "dlt-confined-and-docker-free",
+            "score": 9,
+            "pass": true,
+            "evidence": "dlt import only in dlt_sync.py; 23 passed, 100% line+branch, no pragma; no docker reference; destination mapping tested for postgres/duckdb/unknown. Not 10: no run with Docker stopped."
+          },
+          {
+            "dimensionId": "table-facts-measured-accurately",
+            "score": 9,
+            "pass": true,
+            "evidence": "Facts by explicit SQL (dlt_sync.py:198-217), information_schema first-run check without catch-all, quoted identifiers, null/dup counted separately; tests cover dup, null, clean, missing table/column, first run, empty source, before==previous after. Not 10: caplog test cannot see dlt's own logger (propagate=False); sa.table() quotes only when needed."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": "uv sync --locked: pass; uv run ruff check: pass; uv run pytest tests/unit --cov --cov-report=term-missing: pass (159 tests, 100% line+branch); uv run pytest tests/unit/infrastructure/test_dlt_sync.py --cov=adops.infrastructure.dlt_sync --cov-branch: pass (23 tests). Docker was running; tests have no Docker dependency (grep empty) but were not run with Docker stopped."
+    },
+    {
+      "phaseId": "dagster-orchestrator-adapter",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-18T12:57:37Z",
+      "baseRef": "64dedc9c9b0f83f5ee8d24d83ba01988e21fd2de",
+      "baseDirty": true,
+      "notes": "Base dirty: whole project untracked since init commit; phase changes identified by path (untracked-file snapshot taken at start). | Changed: src/adops/infrastructure/dagster_orchestrator.py (new), tests/unit/infrastructure/test_dagster_orchestrator.py (new), src/adops/application/run_pipeline.py (unplanned: _run_step renamed to public run_step so both orchestrators build StepReports the same way). compile_job(plan, sync, *, reports=None) builds one Nothing-chained op per Step; each op runs run_step, stores its StepReport via closure, emits every Check as JSON op metadata (Output on pass, Failure(metadata) on fail). DagsterOrchestrator.execute uses DagsterInstance.get() when DAGSTER_HOME is set, else ephemeral; execute_in_process(raise_on_error=False); Steps without a report are skipped. Non-StepError errors become FAILED with type name only. Invalid Dagster names raise JobCompileError. | Graded by subagent: 10/9/10/9/10/9, all pass, three 10s kept (earned). No compensation defined.",
+      "unplannedFiles": [
+        "src/adops/application/run_pipeline.py"
+      ],
+      "completedAt": "2026-11-18T13:03:16Z",
+      "gradeResult": {
+        "phaseId": "dagster-orchestrator-adapter",
+        "dimensionScores": [
+          {
+            "dimensionId": "no-secret-in-run-storage",
+            "score": 10,
+            "pass": true,
+            "evidence": "Sentinel scan of run_config, tags and every all_logs record for success and failing-first-step runs; above 9: also byte-scans every file under DAGSTER_HOME with password and cursor sentinels; ops are Out(Nothing)."
+          },
+          {
+            "dimensionId": "failure-skips-downstream",
+            "score": 9,
+            "pass": true,
+            "evidence": "Recording fake has exactly 1 call; Step 1 FAILED, Step 2 SKIPPED; sanitized SyncFailedError text without dagster._core/Traceback; raise_on_error=False spied. Not 10: direct skip test covers only a 2-Step plan."
+          },
+          {
+            "dimensionId": "compiled-job-shape",
+            "score": 10,
+            "pass": true,
+            "evidence": "Asserts job name, node names and full upstream map for 3 Steps; above 9: reserved-word name case plus pinned JobCompileError message format."
+          },
+          {
+            "dimensionId": "instance-selection-and-recording",
+            "score": 9,
+            "pass": true,
+            "evidence": "Autouse tmp DAGSTER_HOME; run recorded with SUCCESS via DagsterInstance.get(); ephemeral spied with empty cwd; os.environ unchanged. Not 10: relies on Dagster default sqlite storage, no explicit dagster.yaml."
+          },
+          {
+            "dimensionId": "dagster-confined-to-adapter",
+            "score": 10,
+            "pass": true,
+            "evidence": "Greps clean, 180 tests at 100% line+branch; above 9: AST test pins the set of Dagster importers permanently."
+          },
+          {
+            "dimensionId": "check-results-as-op-metadata",
+            "score": 9,
+            "pass": true,
+            "evidence": "All 13 table.check entries stored on success; fail entry via Failure(metadata); skipped with reason; parity with InOrderOrchestrator in 4 scenarios; metadata free of sentinels. Not 10: skip reason only inside the message text."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": "ruff check: pass; pytest tests/unit --cov --cov-report=term-missing: pass (180 tests, 100% line+branch)"
+    },
+    {
+      "phaseId": "init-demo-project-scaffold",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-18T13:12:10Z",
+      "baseRef": "64dedc9c9b0f83f5ee8d24d83ba01988e21fd2de",
+      "baseDirty": true,
+      "notes": "Already dirty at start (all untracked, pre-first-commit): .github/ .gitignore .python-version GLOSSARY.md LICENSE docs/adr/ docs/roadmaps/ pyproject.toml src/ tests/ uv.lock; per-file hashes snapshotted to tell this phase's changes apart. | Changed: src/adops/interface/{cli,init_command,validate_command}.py, src/adops/templates/{__init__.py,demo/*,plain/adops.yaml}, tests/unit/interface/test_{init,validate}_command.py, .github/workflows/ci.yml. adops init [PATH] [--demo] copies templates via importlib.resources (refuses non-empty target before writing); adops validate runs domain loaders + ensure_sources_defined per Environment offline and lists skips as 'table: check skipped — reason'; CI step checks templates ship in the wheel. Manual: wheel-installed init --demo -> compose up --wait healthy x2, 20/100 rows, identical md5 across fresh starts; Dagster connects via dagster.yaml. | Graded first pass (10/9/9/10/10). Compensation: remove init/validate commands and src/adops/templates; only the run/E2E phase reads them.",
+      "unplannedFiles": [
+        ".github/workflows/ci.yml",
+        "src/adops/templates/__init__.py",
+        "src/adops/templates/plain/adops.yaml"
+      ],
+      "gateRun": "uv sync --locked: pass; uv run ruff check: pass; uv run pytest tests/unit --cov: pass (100% line+branch); uv build --wheel + unzip -l template check: pass; manual: docker compose up --wait x2 healthy, deterministic seed",
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-18T13:18:33Z",
+          "gate": "uv run pytest tests/unit --cov",
+          "detail": "FAIL Required test coverage of 100.0% not reached (validate_command.py 51->53: valid Pipeline with invalid adops.yaml)",
+          "resolvedBy": "gate-fix",
+          "resolution": "added test_valid_pipeline_still_lists_skips_when_settings_are_invalid"
+        }
+      ],
+      "completedAt": "2026-11-18T13:19:29Z",
+      "gradeResult": {
+        "phaseId": "init-demo-project-scaffold",
+        "dimensionScores": [
+          {
+            "dimensionId": "scaffold-internally-consistent",
+            "score": 10,
+            "pass": true,
+            "evidence": "Automated cross-file variable test plus loader test, and adops.yaml ports asserted equal to .env.example SHOP_PORT/WAREHOUSE_PORT (test_init_command.py:94-99)"
+          },
+          {
+            "dimensionId": "demo-stack-healthy-and-deterministic",
+            "score": 9,
+            "pass": true,
+            "evidence": "Pinned postgres:17-alpine, TCP pg_isready, ports from .env bound to 127.0.0.1, row-number-derived seed; checksum evidence reported, not automated"
+          },
+          {
+            "dimensionId": "safe-target-folder-handling",
+            "score": 9,
+            "pass": true,
+            "evidence": "Refusal before any write, byte snapshot unchanged, .gitignore content, plain listing, no .py; test_init_writes_no_tool_code lacks exit_code assertion"
+          },
+          {
+            "dimensionId": "templates-ship-in-wheel",
+            "score": 10,
+            "pass": true,
+            "evidence": "importlib.resources; CI step fails if any template is missing from the wheel; 100% line+branch on interface"
+          },
+          {
+            "dimensionId": "validate-offline-and-lists-skips",
+            "score": 10,
+            "pass": true,
+            "evidence": "No-network fixture, exact sorted skip output repeated identically, sentinel/traceback checks, plus invalid-settings, missing-source, missing/non-UTF-8 file cases"
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "run-command-and-demo-e2e",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-18T13:45:55Z",
+      "baseRef": "64dedc9c9b0f83f5ee8d24d83ba01988e21fd2de",
+      "baseDirty": true,
+      "notes": "Repo entirely untracked at start (all earlier phases uncommitted); phase changes identified by a file-hash snapshot taken at start. | Changed: src/adops/interface/{run_command,cli}.py, tests/unit/interface/test_run_command.py, tests/e2e/test_demo_sync.py, .github/workflows/ci.yml, pyproject.toml (e2e marker). adops run PIPELINE [--env] [--project] composes DltSync + DagsterOrchestrator into run_pipeline; .env under os.environ; with dagster.yaml, DAGSTER_HOME + .env overlaid on os.environ only for the run (Dagster resolves dagster.yaml env: from os.environ) and restored; prints step/rows/check lines; known errors one line, unexpected errors type-only, exit 1. Docker E2E (one ordered scenario on a unique compose project, down -v in finally; fails instead of skipping when CI is set) passed locally in 14s. Not done: no PR run yet (repo is uncommitted); making e2e a required check is a GitHub branch-protection setting outside the repo. | Graded first pass (10/10/9/8/10). Compensation: remove the e2e job from ci.yml and run_command.py + its cli registration; earlier phases stay valid.",
+      "unplannedFiles": [
+        "pyproject.toml"
+      ],
+      "gateRun": "uv sync --locked: pass; uv run ruff check: pass; uv run pytest tests/unit --cov: pass (100% line+branch, run_command.py 100%); uv build --wheel + template check: pass; CI=true uv run pytest tests/e2e -m e2e: pass (real Docker demo, 11s, no containers left); probe: no docker + CI=true -> error, no CI -> skip",
+      "completedAt": "2026-11-18T13:52:20Z",
+      "gradeResult": {
+        "phaseId": "run-command-and-demo-e2e",
+        "dimensionScores": [
+          {
+            "dimensionId": "e2e-incremental-no-duplicates",
+            "score": 10,
+            "pass": true,
+            "evidence": "All 4 criteria met; run 2 delta asserted as exactly 2 rows, so an inclusive-cursor boundary reload (3 rows) would also fail."
+          },
+          {
+            "dimensionId": "cli-errors-sanitized",
+            "score": 10,
+            "pass": true,
+            "evidence": "All error paths unit-tested via assert_clean_failure; unexpected-exception failureExample has its own sentinel test; E2E scans output of every run incl. failing one. Gap: dagster_meta scan omits DAGSTER_PG_PASSWORD."
+          },
+          {
+            "dimensionId": "composition-and-env-precedence",
+            "score": 9,
+            "pass": true,
+            "evidence": "All 5 criteria met. Held at 9: no test that os.environ is restored when the run raises with dagster.yaml present; the whole merged env (not only DAGSTER_HOME) is overlaid on os.environ during the run."
+          },
+          {
+            "dimensionId": "e2e-ci-job-required-and-hermetic",
+            "score": 8,
+            "pass": true,
+            "evidence": "Bullets 1-4 met (pinned actions, marker registered, fails not skips under CI, down -v in finally with unique -p). Bullet 5 unmet: no real PR run yet; required-check is branch protection, unproven."
+          },
+          {
+            "dimensionId": "e2e-checks-guard-real-run",
+            "score": 10,
+            "pass": true,
+            "evidence": "All 5 criteria met; order-102 canary inserted before DROP proves the whole Step was blocked, and the secret/row-value scan runs on the failing run output too."
+          }
+        ],
+        "overallPass": true
+      }
+    }
+  ]
+}

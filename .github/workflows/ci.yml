@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.11.32"
+      - name: Install from lockfile
+        run: uv sync --locked
+      - name: Lint
+        run: uv run ruff check
+      - name: Unit tests with coverage gate
+        run: uv run pytest tests/unit --cov --cov-report=term-missing
+      - name: Project templates ship in the wheel
+        run: |
+          uv build --wheel
+          listing=$(unzip -l dist/*.whl)
+          for file in .env.example gitignore adops.yaml dagster.yaml docker-compose.yml \
+                      pipelines/shop_sync.yaml seed/01_shop.sql; do
+            grep -qF "adops/templates/demo/$file" <<< "$listing" || { echo "missing $file"; exit 1; }
+          done
+          grep -qF "adops/templates/plain/adops.yaml" <<< "$listing" || { echo "missing plain/adops.yaml"; exit 1; }
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.11.32"
+      - name: Install from lockfile
+        run: uv sync --locked
+      - name: Demo Project end to end in Docker
+        run: uv run pytest tests/e2e -m e2e

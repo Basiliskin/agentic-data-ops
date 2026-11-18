@@ -1,0 +1,11 @@
+# Passwords are never written here: each *_env names a variable set in .env.
+environments:
+  dev:
+    warehouse:
+      type: postgres
+      host: localhost
+      port: 5432
+      database: warehouse
+      user: warehouse
+      password_env: WAREHOUSE_PASSWORD
+    sources: {}

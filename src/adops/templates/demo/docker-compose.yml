@@ -1,0 +1,47 @@
+services:
+  shop:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: shop
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: ${SHOP_PASSWORD:?set SHOP_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${SHOP_PORT:?set SHOP_PORT in .env}:5432"
+    volumes:
+      - ./seed:/docker-entrypoint-initdb.d:ro
+      - shop_data:/var/lib/postgresql/data
+    healthcheck: &pg_ready
+      # Checking over TCP waits for the seed scripts: Postgres listens on the socket only while they run.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  warehouse:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: warehouse
+      POSTGRES_USER: warehouse
+      POSTGRES_PASSWORD: ${WAREHOUSE_PASSWORD:?set WAREHOUSE_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${WAREHOUSE_PORT:?set WAREHOUSE_PORT in .env}:5432"
+    volumes:
+      - warehouse_data:/var/lib/postgresql/data
+    healthcheck: *pg_ready
+
+  dagster_meta:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${DAGSTER_PG_DB:?set DAGSTER_PG_DB in .env}
+      POSTGRES_USER: ${DAGSTER_PG_USER:?set DAGSTER_PG_USER in .env}
+      POSTGRES_PASSWORD: ${DAGSTER_PG_PASSWORD:?set DAGSTER_PG_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${DAGSTER_PG_PORT:?set DAGSTER_PG_PORT in .env}:5432"
+    volumes:
+      - dagster_meta_data:/var/lib/postgresql/data
+    healthcheck: *pg_ready
+
+volumes:
+  shop_data:
+  warehouse_data:
+  dagster_meta_data:
