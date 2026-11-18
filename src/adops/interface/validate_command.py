@@ -8,10 +8,12 @@ import typer
 from adops.domain.environment import ProjectSettings
 from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import ensure_sources_defined, load_pipeline, load_project_settings
-from adops.domain.pipeline import Pipeline
+from adops.domain.pipeline import Pipeline, SyncStep
+from adops.domain.transform import TransformStep
 
 SETTINGS_FILE = "adops.yaml"
 PIPELINES_DIR = "pipelines"
+DBT_PROJECT_FILE = "dbt_project.yml"
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,7 @@ def validate_project(project: Path, pipeline: str | None) -> Report:
             continue
         if settings is not None:
             _check_sources(relative, loaded, settings, report)
+        _check_dbt_projects(project, relative, loaded, report)
         report.skipped.extend(_skipped_checks(loaded))
     return report
 
@@ -88,9 +91,21 @@ def _check_sources(
             )
 
 
+def _check_dbt_projects(project: Path, relative: Path, pipeline: Pipeline, report: Report) -> None:
+    for step in pipeline.steps:
+        if not isinstance(step, TransformStep):
+            continue
+        dbt_project_file = Path(step.project) / DBT_PROJECT_FILE
+        if not (project / dbt_project_file).is_file():
+            report.problems.append(
+                f"{relative}: Step {step.name}: {dbt_project_file.as_posix()} not found"
+            )
+
+
 def _skipped_checks(pipeline: Pipeline) -> list[str]:
     tables = sorted(
-        (table for step in pipeline.steps for table in step.tables), key=lambda t: t.name
+        (table for step in pipeline.steps if isinstance(step, SyncStep) for table in step.tables),
+        key=lambda t: t.name,
     )
     return [
         f"{table.name}: {check} skipped — {table.skip_checks.reason}"

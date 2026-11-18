@@ -1,2 +1,4 @@
 .env
 .adops/
+dbt/target/
+dbt/logs/

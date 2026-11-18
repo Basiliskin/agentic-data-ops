@@ -65,7 +65,7 @@ def status_of(table: SyncTable, check: CheckName, facts: LoadFacts) -> CheckStat
     ],
 )
 def test_source_tables_exist(table, facts, status, detail):
-    (result,) = evaluate_preflight_checks(table, facts)
+    result, _ = evaluate_preflight_checks(table, facts)
 
     assert (result.check, result.table, result.status) == (
         CheckName.SOURCE_TABLES_EXIST,
@@ -221,12 +221,69 @@ def test_source_tables_exist_can_be_skipped():
         update={"skip_checks": SkipChecks(checks=["source_tables_exist"], reason="view")}
     )
 
-    (result,) = evaluate_preflight_checks(table, SourceFacts(False, frozenset()))
+    result, _ = evaluate_preflight_checks(table, SourceFacts(False, frozenset()))
 
     assert (result.status, result.message) == (
         CheckStatus.SKIPPED,
         "customers: source_tables_exist skipped — view",
     )
+
+
+def test_preflight_yields_source_tables_exist_then_source_not_empty():
+    results = evaluate_preflight_checks(FULL, SourceFacts(True, frozenset({"id"}), row_count=3))
+
+    assert [r.check for r in results] == ["source_tables_exist", "source_not_empty"]
+
+
+@pytest.mark.parametrize("table", [FULL, INCREMENTAL])
+@pytest.mark.parametrize(
+    ("row_count", "status"),
+    [(0, CheckStatus.FAIL), (1, CheckStatus.PASS), (None, CheckStatus.PASS)],
+)
+def test_source_not_empty_fails_only_on_a_measured_empty_table(table, row_count, status):
+    facts = SourceFacts(True, frozenset({"id", "updated_at"}), row_count=row_count)
+
+    assert statuses(evaluate_preflight_checks(table, facts))["source_not_empty"] is status
+
+
+def test_an_empty_source_table_fails_with_a_fixed_message():
+    facts = SourceFacts(True, frozenset({"id"}), row_count=0)
+
+    _, result = evaluate_preflight_checks(FULL, facts)
+
+    assert result.message == (
+        "customers: source_not_empty failed — table customers is empty in the Source"
+    )
+
+
+def test_a_table_missing_from_the_source_is_not_also_reported_empty():
+    results = evaluate_preflight_checks(FULL, SourceFacts(False, frozenset()))
+
+    assert statuses(results) == {
+        "source_tables_exist": CheckStatus.FAIL,
+        "source_not_empty": CheckStatus.PASS,
+    }
+
+
+def test_source_not_empty_can_be_skipped_with_its_reason():
+    table = INCREMENTAL.model_copy(
+        update={"skip_checks": SkipChecks(checks=["source_not_empty"], reason="filled weekly")}
+    )
+
+    _, result = evaluate_preflight_checks(
+        table, SourceFacts(True, frozenset({"id", "updated_at"}), row_count=0)
+    )
+
+    assert (result.status, result.message) == (
+        CheckStatus.SKIPPED,
+        "orders: source_not_empty skipped — filled weekly",
+    )
+
+
+@pytest.mark.parametrize("table", [FULL, INCREMENTAL])
+def test_source_not_empty_applies_to_every_mode_as_a_preflight_check(table):
+    assert CheckName.SOURCE_NOT_EMPTY in table.applicable_checks()
+    assert CheckName.SOURCE_NOT_EMPTY not in statuses(evaluate_load_checks(table, load_facts()))
 
 
 @pytest.mark.parametrize("table", [FULL, INCREMENTAL])

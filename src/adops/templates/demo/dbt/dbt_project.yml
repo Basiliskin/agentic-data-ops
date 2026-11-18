@@ -1,0 +1,9 @@
+name: shop
+version: "1.0"
+config-version: 2
+profile: adops
+model-paths: ["models"]
+
+models:
+  shop:
+    +materialized: table

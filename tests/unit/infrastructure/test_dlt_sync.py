@@ -7,8 +7,22 @@ import duckdb
 import pytest
 import sqlalchemy as sa
 
-from adops.application.ports import ResolvedConnection, Sync
-from adops.application.run_pipeline import SyncFailedError
+from adops.application.ports import (
+    ResolvedConnection,
+    SourceUnreachable,
+    StepStatus,
+    Sync,
+    WarehouseUnreachable,
+)
+from adops.application.run_pipeline import (
+    PlannedStep,
+    SourceUnreachableError,
+    StepError,
+    SyncFailedError,
+    WarehouseUnreachableError,
+    run_step,
+)
+from adops.domain.checks import CheckName, CheckStatus
 from adops.domain.pipeline import SyncStep
 from adops.domain.schema_snapshot import (
     TableShape,
@@ -18,9 +32,11 @@ from adops.domain.schema_snapshot import (
 from adops.infrastructure.dlt_sync import (
     DltSync,
     UnknownConnectionKindError,
+    _silence_dlt_logger,
     source_engine,
     warehouse_destination,
 )
+from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
 
 SENTINEL_PASSWORD = "s3cr3t-dlt-sentinel"
 SENTINEL_CURSOR = 918273645
@@ -177,6 +193,7 @@ def test_incremental_facts_carry_before_and_after_counts_and_cursor(shop):
 def test_empty_source_table_reports_zero_rows_and_no_cursor(shop):
     empty = step({**INCREMENTAL_ORDERS, "name": "empty_orders"})
 
+    assert shop.adapter().preflight(empty, shop.source)["empty_orders"].row_count == 0
     result = shop.sync(empty)
 
     facts = result.load_facts["empty_orders"]
@@ -303,6 +320,7 @@ def test_a_table_never_loaded_reports_no_nulls_and_no_newest_value(shop):
         ],
     }
 
+    assert shop.adapter().preflight(step(empty), shop.source)["empty_orders"].row_count == 0
     facts = shop.sync(step(empty)).load_facts["empty_orders"]
 
     assert facts.null_counts == {"updated_at": 0}
@@ -317,7 +335,7 @@ def test_freshness_of_a_text_column_fails_without_showing_a_value(shop):
         with_events(shop).sync(step(events))
 
     assert str(raised.value) == (
-        "Step orders, table events: UnsupportedFreshnessColumnError: "
+        "Pipeline shop, Step orders, table events: "
         "freshness column note holds str values, not timestamps"
     )
     assert ROW_VALUE not in str(raised.value)
@@ -340,6 +358,80 @@ def test_preflight_reports_missing_tables_and_columns_without_loading(shop):
     assert facts["refunds"].columns == frozenset()
     assert not shop.warehouse_path.exists()
     assert not (shop.project / ".adops").exists()
+
+
+def test_preflight_counts_source_rows_in_every_mode_without_judging_them(shop):
+    allowlist = step(
+        INCREMENTAL_ORDERS,
+        FULL_REFRESH_CUSTOMERS,
+        {**INCREMENTAL_ORDERS, "name": "empty_orders"},
+        {**FULL_REFRESH_CUSTOMERS, "name": "refunds"},
+    )
+
+    facts = shop.adapter().preflight(allowlist, shop.source)
+
+    assert {table: f.row_count for table, f in facts.items()} == {
+        "orders": 3,
+        "customers": 3,
+        "empty_orders": 0,
+        "refunds": None,
+    }
+
+
+class NoSnapshots:
+    def load(self, *args: object) -> None:
+        return None
+
+    def save(self, *args: object) -> None:
+        pass
+
+
+class FixedNow:
+    def now(self) -> datetime:
+        return datetime(2031, 1, 1, tzinfo=UTC)
+
+
+def run_through_step(shop: Shop, sync_step: SyncStep):
+    planned = PlannedStep(sync_step, shop.source, shop.warehouse, "shop", NoSnapshots(), FixedNow())
+    return run_step(planned, shop.adapter())
+
+
+EMPTY_ORDERS_BY_MODE = [
+    {**INCREMENTAL_ORDERS, "name": "empty_orders"},
+    {**FULL_REFRESH_CUSTOMERS, "name": "empty_orders"},
+]
+
+
+@pytest.mark.parametrize("table", EMPTY_ORDERS_BY_MODE, ids=["incremental", "full_refresh"])
+def test_an_empty_source_table_halts_its_step_in_every_mode(shop, table):
+    report = run_through_step(shop, step(table))
+
+    assert report.status is StepStatus.CHECK_FAILED
+    assert report.error == "Pipeline shop, Step orders, table empty_orders: Source table is empty"
+    assert not shop.warehouse_path.exists()
+
+
+@pytest.mark.parametrize("table", EMPTY_ORDERS_BY_MODE, ids=["incremental", "full_refresh"])
+def test_a_skipped_source_not_empty_loads_an_empty_table(shop, table):
+    skip = {"checks": ["source_not_empty"], "reason": "filled only at month end"}
+
+    report = run_through_step(shop, step({**table, "skip_checks": skip}))
+
+    assert report.status is StepStatus.PASSED
+    assert report.rows_loaded == {"empty_orders": 0}
+    (skipped,) = [c for c in report.checks if c.check == CheckName.SOURCE_NOT_EMPTY]
+    assert skipped.status is CheckStatus.SKIPPED
+
+
+@pytest.mark.parametrize(
+    "table", [INCREMENTAL_ORDERS, FULL_REFRESH_CUSTOMERS], ids=["incremental", "full_refresh"]
+)
+def test_a_non_empty_source_table_passes_source_not_empty_in_every_mode(shop, table):
+    report = run_through_step(shop, step(table))
+
+    assert report.status is StepStatus.PASSED
+    (check,) = [c for c in report.checks if c.check == CheckName.SOURCE_NOT_EMPTY]
+    assert check.status is CheckStatus.PASS
 
 
 def test_preflight_reports_normalized_column_types_compiled_by_the_dialect(shop):
@@ -386,19 +478,32 @@ def test_preflight_twice_on_an_unchanged_source_gives_equal_shapes(shop):
     )
 
 
-def test_sync_of_a_missing_table_fails_naming_step_and_table(shop):
+def test_sync_of_a_missing_table_fails_with_a_fixed_message(shop):
     with pytest.raises(SyncFailedError) as raised:
         shop.sync(step({**FULL_REFRESH_CUSTOMERS, "name": "refunds"}, name="money"))
 
-    assert str(raised.value).startswith("Step money, table refunds: ")
+    assert str(raised.value) == "Pipeline shop, Step money, table refunds: load failed"
+    assert_no_secret(raised.value)
 
 
-def assert_no_secret(error: SyncFailedError) -> None:
+DRIVER_TEXT = (
+    "127.0.0.1:1",
+    "port 1",
+    "OperationalError",
+    "psycopg",
+    "Failing row contains",
+    "Traceback",
+)
+
+
+def assert_no_secret(error: Exception) -> None:
     assert error.__cause__ is None
     assert error.__context__ is None
     for text in (str(error), repr(error)):
         assert SENTINEL_PASSWORD not in text
         assert "postgresql://" not in text
+        for driver_text in DRIVER_TEXT:
+            assert driver_text not in text
 
 
 def assert_project_holds_no_secret(project: Path) -> None:
@@ -407,49 +512,43 @@ def assert_project_holds_no_secret(project: Path) -> None:
     assert not [path for path in files if SENTINEL_PASSWORD.encode() in path.read_bytes()]
 
 
-def test_preflight_connection_failure_hides_the_password(shop):
+def test_preflight_against_an_unreachable_source_names_the_table(shop):
     adapter = DltSync(shop.project, "shop", warehouse_kind="duckdb")
 
-    with pytest.raises(SyncFailedError) as raised:
+    with pytest.raises(SourceUnreachable) as raised:
         adapter.preflight(step(INCREMENTAL_ORDERS), unreachable_postgres())
 
-    assert str(raised.value).startswith("Step orders, table orders: OperationalError")
+    assert raised.value.table == "orders"
     assert_no_secret(raised.value)
 
 
-def test_sync_source_failure_hides_the_password_everywhere(shop):
+@pytest.mark.parametrize(
+    ("table", "name"),
+    [(INCREMENTAL_ORDERS, "orders"), (FULL_REFRESH_CUSTOMERS, "customers")],
+    ids=["incremental", "full_refresh"],
+)
+def test_sync_against_an_unreachable_source_names_the_table(shop, table, name):
     adapter = DltSync(shop.project, "shop", warehouse_kind="duckdb")
 
-    with pytest.raises(SyncFailedError) as raised:
-        adapter.sync(step(INCREMENTAL_ORDERS), unreachable_postgres(), shop.warehouse)
+    with pytest.raises(SourceUnreachable) as raised:
+        adapter.sync(step(table), unreachable_postgres(), shop.warehouse)
 
-    assert str(raised.value).startswith("Step orders, table orders: ")
+    assert raised.value.table == name
     assert_no_secret(raised.value)
     assert_project_holds_no_secret(shop.project)
 
 
-def test_sync_full_refresh_source_count_failure_hides_the_password(shop):
-    adapter = DltSync(shop.project, "shop", warehouse_kind="duckdb")
-
-    with pytest.raises(SyncFailedError) as raised:
-        adapter.sync(step(FULL_REFRESH_CUSTOMERS), unreachable_postgres(), shop.warehouse)
-
-    assert str(raised.value).startswith("Step orders, table customers: OperationalError")
-    assert_no_secret(raised.value)
-
-
-def test_sync_warehouse_failure_hides_the_password_everywhere(shop):
+def test_sync_against_an_unreachable_warehouse_raises_warehouse_unreachable(shop):
     adapter = DltSync(shop.project, "shop", source_kind="sqlite")
 
-    with pytest.raises(SyncFailedError) as raised:
+    with pytest.raises(WarehouseUnreachable) as raised:
         adapter.sync(step(INCREMENTAL_ORDERS), shop.source, unreachable_postgres())
 
-    assert str(raised.value).startswith("Step orders, table orders: ")
     assert_no_secret(raised.value)
     assert_project_holds_no_secret(shop.project)
 
 
-def test_connection_urls_in_error_text_are_masked(shop, monkeypatch):
+def test_preflight_error_text_is_replaced_by_a_fixed_message(shop, monkeypatch):
     def leak(*_):
         raise RuntimeError("could not reach postgresql://shop:hunter2@db:5432/shop")
 
@@ -458,7 +557,86 @@ def test_connection_urls_in_error_text_are_masked(shop, monkeypatch):
     with pytest.raises(SyncFailedError) as raised:
         shop.adapter().preflight(step(INCREMENTAL_ORDERS), shop.source)
 
-    assert str(raised.value) == "Step orders, table orders: RuntimeError: could not reach ***"
+    assert str(raised.value) == "Pipeline shop, Step orders, table orders: preflight failed"
+    assert_no_secret(raised.value)
+
+
+def test_step_against_an_unreachable_source_fails_with_source_unreachable_error(shop):
+    planned = PlannedStep(
+        step(INCREMENTAL_ORDERS),
+        unreachable_postgres(),
+        shop.warehouse,
+        "shop",
+        NoSnapshots(),
+        FixedNow(),
+    )
+
+    with pytest.raises(SourceUnreachableError) as raised:
+        planned(DltSync(shop.project, "shop", warehouse_kind="duckdb"))
+
+    assert type(raised.value) is SourceUnreachableError
+    assert str(raised.value) == "Pipeline shop, Step orders, table orders: Source is unreachable"
+    assert_no_secret(raised.value)
+
+
+@pytest.mark.parametrize("first_contact", ["snapshot store", "sync"])
+def test_step_against_an_unreachable_warehouse_fails_with_warehouse_unreachable_error(
+    shop, first_contact
+):
+    store = NoSnapshots()
+    if first_contact == "snapshot store":
+        store = WarehouseSnapshotStore(shop.project, "postgres")
+    planned = PlannedStep(
+        step(INCREMENTAL_ORDERS), shop.source, unreachable_postgres(), "shop", store, FixedNow()
+    )
+
+    with pytest.raises(WarehouseUnreachableError) as raised:
+        planned(DltSync(shop.project, "shop", source_kind="sqlite"))
+
+    assert type(raised.value) is WarehouseUnreachableError
+    assert str(raised.value) == "Pipeline shop, Step orders: Warehouse is unreachable"
+    assert_no_secret(raised.value)
+    assert_project_holds_no_secret(shop.project)
+
+
+def force_not_null_violation(shop: Shop) -> SyncStep:
+    orders = step(INCREMENTAL_ORDERS)
+    shop.sync(orders)
+    shop.warehouse_execute("ALTER TABLE raw_shop.orders ALTER COLUMN amount SET NOT NULL")
+    shop.execute(f"INSERT INTO orders VALUES (4, {SENTINEL_CURSOR}, NULL)")
+    return orders
+
+
+def test_a_failed_load_is_load_failed_not_unreachable_and_dlt_prints_nothing(shop, capfd):
+    orders = force_not_null_violation(shop)
+    capfd.readouterr()
+
+    with pytest.raises(StepError) as raised:
+        PlannedStep(orders, shop.source, shop.warehouse, "shop", NoSnapshots(), FixedNow())(
+            shop.adapter()
+        )
+
+    out, err = capfd.readouterr()
+    assert type(raised.value) is SyncFailedError
+    assert str(raised.value) == "Pipeline shop, Step orders, table orders: load failed"
+    assert_no_secret(raised.value)
+    assert str(SENTINEL_CURSOR) not in str(raised.value)
+    for text in (out, err):
+        assert "Failing row contains" not in text
+        assert "NOT NULL" not in text
+        assert "Traceback" not in text
+        assert "ERROR" not in text
+        assert str(SENTINEL_CURSOR) not in text
+
+
+def test_silencing_dlt_leaves_the_root_logger_alone():
+    dlt_logger = logging.getLogger("dlt")
+
+    assert isinstance(dlt_logger.handlers[0], logging.NullHandler)
+    assert not [h for h in dlt_logger.handlers if type(h) is logging.StreamHandler]
+    assert not dlt_logger.propagate
+    assert logging.root.manager.disable == logging.NOTSET
+    assert not [h for h in logging.getLogger().handlers if type(h) is logging.NullHandler]
 
 
 def test_cursor_values_are_never_logged(shop, caplog):
@@ -538,14 +716,36 @@ def test_make_columns_nullable_before_any_load_does_nothing(shop):
     assert not shop.warehouse_path.exists() or not_null_columns(shop, "orders") == set()
 
 
-def test_make_columns_nullable_failure_is_redacted(shop):
+def test_make_columns_nullable_against_an_unreachable_warehouse(shop):
     orders = step(INCREMENTAL_ORDERS)
     adapter = DltSync(shop.project, "shop", source_kind="sqlite", warehouse_kind="postgres")
 
-    with pytest.raises(SyncFailedError) as error:
-        adapter.make_columns_nullable(
-            orders, orders.tables[0], unreachable_postgres(), ["amount"]
-        )
+    with pytest.raises(WarehouseUnreachable) as raised:
+        adapter.make_columns_nullable(orders, orders.tables[0], unreachable_postgres(), ["amount"])
 
-    assert str(error.value).startswith("Step orders, table orders: ")
-    assert SENTINEL_PASSWORD not in str(error.value)
+    assert_no_secret(raised.value)
+
+
+def test_make_columns_nullable_failure_has_a_fixed_message(shop, monkeypatch):
+    def leak(*_):
+        raise RuntimeError(f"cannot alter: {SENTINEL_PASSWORD}")
+
+    monkeypatch.setattr("adops.infrastructure.dlt_sync._drop_not_null", leak)
+    orders = step(INCREMENTAL_ORDERS)
+
+    with pytest.raises(SyncFailedError) as raised:
+        shop.adapter().make_columns_nullable(orders, orders.tables[0], shop.warehouse, ["amount"])
+
+    assert str(raised.value) == (
+        "Pipeline shop, Step orders, table orders: making columns nullable failed"
+    )
+    assert_no_secret(raised.value)
+
+
+def test_silencing_replaces_a_handler_dlt_installed_first(monkeypatch):
+    dlt_logger = logging.getLogger("dlt")
+    monkeypatch.setattr(dlt_logger, "handlers", [logging.StreamHandler()])
+
+    _silence_dlt_logger()
+
+    assert [type(handler) for handler in dlt_logger.handlers] == [logging.NullHandler]

@@ -15,6 +15,8 @@ dependencies = [
     "pydantic>=2.14,<3",
     "pyyaml>=6.0,<7",
     "python-dotenv>=1.2,<2",
+    "dbt-core==1.12.7",
+    "dbt-postgres==1.11.0",
 ]
 
 [project.scripts]
@@ -25,6 +27,7 @@ dev = [
     "pytest>=9.2,<10",
     "pytest-cov>=7.1,<8",
     "dlt[duckdb]>=1.32,<2",
+    "dbt-duckdb>=1.10,<2",
     "ruff>=0.17.5,<0.18",
 ]
 

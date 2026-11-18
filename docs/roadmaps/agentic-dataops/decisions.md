@@ -12,3 +12,10 @@
 - 2026-11-18 | horizon 2 | Steps run in linear YAML order; 'downstream' means every later Step — because no Step graph exists yet
 - 2026-11-18 | horizon 2 | Domain code never reads the clock; 'now' comes from an injected Clock port — because freshness verdicts must be deterministic
 - 2026-11-18 | horizon 2 | Horizon 2 finishes the Check system only; horizon 3 does dbt Transform, then dedicated errors, then DuckDB — because the user chose that order
+- 2026-11-18 | horizon 3 | Empty Source table is a built-in skippable Check source_not_empty raising EmptySourceTableError (a CheckFailedError) — because the user wants it to stop, but skippable with a reason
+- 2026-11-18 | horizon 3 | The Transform engine is bound into its planned Step at plan build; StepTask and the Orchestrator stay unchanged — so no engine or credential travels through Dagster run config
+- 2026-11-18 | horizon 3 | A dbt warn is a passing Check with a message; dbt tests get no skip_checks — because severity is already configured in dbt itself
+- 2026-11-18 | horizon 3 | dbt-duckdb is a dev-only test stand-in so real-dbt unit tests run without Docker; dbt-core 1.12.7 and dbt-postgres 1.11.0 are runtime deps
+- 2026-11-18 | horizon 3 | adops validate checks only that <project>/dbt_project.yml exists; it does not run dbt parse in horizon 3 — user choice
+- 2026-11-18 | horizon 3 | Failed dlt loads get fixed sanitized messages ('load failed') and the dlt logger is silenced — fixed in horizon 3, not deferred
+- 2026-11-18 | horizon 3 | DuckDB Warehouse moves to horizon 4 — horizon 3 holds dbt Transform plus dedicated errors, user kept both in one 6-phase horizon

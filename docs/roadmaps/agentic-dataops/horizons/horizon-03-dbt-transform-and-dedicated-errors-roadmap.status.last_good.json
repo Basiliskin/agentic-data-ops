@@ -1,0 +1,366 @@
+{
+  "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-03-dbt-transform-and-dedicated-errors-roadmap.json",
+  "roadmapTask": "Horizon 3: add a dbt Transform Step to the demo — dbt runs through dbtRunner behind a Transform port, dbt test results reported as Checks, a failing dbt test stops later Steps, proven in the Docker E2E — then dedicated errors for an unreachable Source, an unreachable Warehouse and an empty Source table",
+  "createdAt": "2026-11-18T16:52:26Z",
+  "updatedAt": "2026-11-18T18:11:57Z",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "add-transform-step-and-check-rule",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-18T16:52:26Z",
+      "baseRef": "44c7405817e3d153a58f9c540c3870fc140dcc67",
+      "baseDirty": true,
+      "notes": "dirty at start: docs/roadmaps/agentic-dataops/{blockers,decisions,discoveries,state}.md and horizon-03 roadmap .json/.md (untracked) | changed: src/adops/domain/{transform.py (new), names.py (new), pipeline.py, loader.py}, tests/unit/domain/{test_transform.py (new), test_loader.py}. TransformStep + DbtTestStatus/DbtTestFacts + evaluate_dbt_tests in transform.py; Pipeline.steps is a discriminated Step union defaulting to sync; loader strips Step tags after steps[i] and ensure_sources_defined narrows to SyncStep. names.py holds IDENTIFIER (moved from pipeline.py) to avoid a pipeline<->transform import cycle.",
+      "failures": [
+        {
+          "at": "2026-11-18T16:55:27Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run ruff check",
+          "detail": "E501 Line too long (101 > 100) --> src/adops/domain/loader.py:89:101",
+          "resolvedBy": "gate-fix",
+          "resolution": "Shortened the _without_union_tags comment in loader.py to fit 100 chars"
+        }
+      ],
+      "unplannedFiles": [
+        "src/adops/domain/names.py"
+      ],
+      "gateRun": "uv sync --locked: pass; uv run ruff check: pass (after fix); uv run pytest tests/unit --cov (100% line+branch, 411 passed): pass; uv build --wheel + template grep: pass; uv run pytest tests/e2e -m e2e: pass",
+      "completedAt": "2026-11-18T16:57:56Z",
+      "gradeResult": {
+        "phaseId": "add-transform-step-and-check-rule",
+        "dimensionScores": [
+          {
+            "dimensionId": "dbt-status-verdict-mapping",
+            "score": 9,
+            "pass": true,
+            "evidence": "all statuses + failures=None pinned by exact-message tests; not 10: count not pluralized, check key switches to unique_id on name collision"
+          },
+          {
+            "dimensionId": "step-union-backward-compat",
+            "score": 10,
+            "pass": true,
+            "evidence": "non-str tags and model-instance input pinned with exact equality"
+          },
+          {
+            "dimensionId": "loader-error-path-shape",
+            "score": 10,
+            "pass": true,
+            "evidence": "user keys literally named sync/transform in tag position asserted to survive"
+          },
+          {
+            "dimensionId": "domain-deliverable-free-of-technical-concerns",
+            "score": 9,
+            "pass": true,
+            "evidence": "clean domain; not 10: application/interface still read .source/.tables on every Step (phases 2 and 4 cover them)"
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "add-transform-port-and-run-transform-steps",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-18T17:20:50Z",
+      "baseRef": "44c7405817e3d153a58f9c540c3870fc140dcc67",
+      "baseDirty": true,
+      "notes": "Already dirty at start (horizon-03 planning + phase add-transform-step-and-check-rule, uncommitted): docs/roadmaps/agentic-dataops/{blockers,decisions,discoveries,state}.md, horizon-03 roadmap files, src/adops/domain/{loader,pipeline,names,transform}.py, tests/unit/domain/{test_loader,test_transform}.py | changed: src/adops/application/{ports.py, run_pipeline.py, accept_schema.py}, tests/unit/application/{fakes.py, test_run_pipeline.py, test_accept_schema.py}. ports: Transform Protocol + TransformResult(tests, crashed, failed_models). run_pipeline: TransformFailedError (fixed message + model names), PlannedTransformStep (crash/broken model checked before evaluate_dbt_tests; an engine exception becomes a crashed result with no text kept, so the Sync redacting guard is not reused — nothing to redact), _raise_if_failed lifted to module level, run_pipeline/_build_plan take transform=None, Source secrets resolved for Sync Steps only, missing engine raises PipelineValidationError at plan build. accept_schema._only_step_with ignores Transform Steps. | grade: no 10s demoted (each 10 cites the rubric 10-bar evidence).",
+      "unplannedFiles": [
+        "tests/unit/application/test_accept_schema.py"
+      ],
+      "completedAt": "2026-11-18T17:25:01Z",
+      "gradeResult": {
+        "phaseId": "add-transform-port-and-run-transform-steps",
+        "dimensions": [
+          {
+            "dimensionId": "transform-failure-precedence",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "Crash/failed_models checked before evaluate_dbt_tests (run_pipeline.py:175-180); 13-row precedence matrix incl. crash with zero tests pins every combination (test_run_pipeline.py:791)."
+          },
+          {
+            "dimensionId": "later-steps-skipped-after-transform",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "sync/transform/sync Pipeline: skipping observed for both check_failed and failed, earlier Sync keeps rows_loaded, Transform-first runs without a Sync result."
+          },
+          {
+            "dimensionId": "plan-binding-and-secret-scope",
+            "score": 9,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "Engine and Warehouse bound at plan build; missing engine raises PipelineValidationError before any Step; Source secrets resolved only for Sync Steps (proven by a Transform-only run without Source secrets, not a recording resolver); orchestrator signatures and Dagster tests unchanged."
+          },
+          {
+            "dimensionId": "application-acts-on-domain-verdicts",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "TransformResult has no free-text field; verdict from evaluate_dbt_tests only; TransformFailedError raised outside except, exact-message test with __cause__/__context__ None."
+          }
+        ],
+        "overallPass": true,
+        "summary": "All four dimensions pass; gap: Source-secret scoping proven indirectly. Contract note: engine call uses a drop-all-text catch instead of the Sync redacting guard."
+      },
+      "gateRun": "uv sync --locked: pass; uv run ruff check: pass; uv run pytest tests/unit --cov (435 passed, 100% line+branch): pass; uv build --wheel + template grep: pass; uv run pytest tests/e2e -m e2e (1 passed): pass"
+    },
+    {
+      "phaseId": "add-dbt-and-dbtrunner-transform-adapter",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-18T17:28:10Z",
+      "baseRef": "44c7405817e3d153a58f9c540c3870fc140dcc67",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/accept_schema.py,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/domain/loader.py,src/adops/domain/pipeline.py,tests/unit/application/fakes.py,tests/unit/application/test_accept_schema.py,tests/unit/application/test_run_pipeline.py,tests/unit/domain/test_loader.py,docs/roadmaps/agentic-dataops/horizons/horizon-03-dbt-transform-and-dedicated-errors-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-03-dbt-transform-and-dedicated-errors-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-03-dbt-transform-and-dedicated-errors-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-03-dbt-transform-and-dedicated-errors-roadmap.status.last_good.json,src/adops/domain/names.py,src/adops/domain/transform.py,tests/unit/domain/test_transform.py | changed: pyproject.toml, uv.lock, src/adops/infrastructure/dbt_transform.py (new), tests/unit/infrastructure/test_dbt_transform.py (new). DbtTransform runs dbtRunner build with profile/target/logs in a temp dir, password via scoped ADOPS_DBT_WAREHOUSE_PASSWORD env var, maps results to TransformResult (no dbt text); 13 real-dbt tests on DuckDB incl. twice-in-process, Dagster run, import scan. Runner is injectable (used for raise path + temp-dir scan). dbt-duckdb resolved, no fallback.",
+      "unplannedFiles": [],
+      "completedAt": "2026-11-18T17:36:34Z",
+      "gradeResult": {
+        "phaseId": "add-dbt-and-dbtrunner-transform-adapter",
+        "dimensionScores": [
+          {
+            "dimensionId": "pinned-real-dbtrunner-semantics",
+            "score": 10,
+            "pass": true,
+            "evidence": "All scenarios real dbtRunner on DuckDB; exact counts (fail 3, warn 2), broken model failed_models+skipped/None, crash equals CRASHED. Above 9: also pins dbt unit-test failure -> failed_models and unique_id prefixes."
+          },
+          {
+            "dimensionId": "no-secret-or-artefact-on-disk",
+            "score": 9,
+            "pass": true,
+            "evidence": "env_var-only profile tested; full os.environ restore incl. raise path (ExplodingRunner); no target/logs/profiles.yml/dbt_packages in project; temp-dir byte scan. Short of 10: scan only on passing build and DuckDB profile."
+          },
+          {
+            "dimensionId": "in-process-reentrancy-and-dagster",
+            "score": 10,
+            "pass": true,
+            "evidence": "fail-then-pass twice in one process with environ restored; Dagster run asserts CHECK_FAILED and exact check set, scans run_config/tags/logs. Above 9: byte-scans every file under DAGSTER_HOME."
+          },
+          {
+            "dimensionId": "dbt-confined-to-infrastructure",
+            "score": 9,
+            "pass": true,
+            "evidence": "AST scan covers import and from; runtime/dev deps placed correctly, uv tree --no-dev has no dbt-duckdb; _measure copies no dbt text, sentinel test. Short of 10: dep placement not enforced by a test."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": [
+        "g1 uv sync --locked: pass",
+        "g2 uv run ruff check: pass (after 1 E501 fix during implementation)",
+        "g3 pytest tests/unit --cov: pass, 448 passed, 100%",
+        "g5 pytest tests/e2e -m e2e: pass",
+        "test_dbt_transform.py run twice: pass"
+      ]
+    },
+    {
+      "phaseId": "add-demo-dbt-project-and-docker-test",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-18T17:42:08Z",
+      "baseRef": "44c7405817e3d153a58f9c540c3870fc140dcc67",
+      "baseDirty": true,
+      "notes": "Already dirty at start (earlier horizon-3 phases, uncommitted): docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,pyproject.toml,src/adops/application/accept_schema.py,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/domain/loader.py,src/adops/domain/pipeline.py,tests/unit/application/fakes.py,tests/unit/application/test_accept_schema.py,tests/unit/application/test_run_pipeline.py,tests/unit/domain/test_loader.py,uv.lock,docs/roadmaps/agentic-dataops/horizons/horizon-03-dbt-transform-and-dedicated-errors-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-03-dbt-transform-and-dedicated-errors-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-03-dbt-transform-and-dedicated-errors-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-03-dbt-transform-and-dedicated-errors-roadmap.status.last_good.json,src/adops/domain/names.py,src/adops/domain/transform.py,src/adops/infrastructure/dbt_transform.py,tests/unit/domain/test_transform.py,tests/unit/infrastructure/test_dbt_transform.py || Changed (by content hash vs start): .github/workflows/ci.yml, src/adops/interface/{run_command,validate_command}.py, src/adops/templates/demo/{gitignore,pipelines/shop_sync.yaml}, src/adops/templates/demo/dbt/{dbt_project.yml,models/sources.yml,models/schema.yml,models/customers.sql,models/orders.sql,models/customer_orders.sql}, tests/e2e/test_demo_sync.py, tests/unit/interface/test_{init,run,validate}_command.py, tests/unit/domain/test_loader.py (unplanned: its demo-pipeline test pinned all-Sync Steps; narrowed to: the untyped first Step loads as Sync). Change: demo ships a dbt project (tests on thin customers/orders models per amendment 1) and a transform_shop Step; adops run wires DbtTransform via build_transform; adops validate checks <step.project>/dbt_project.yml and skips Transform Steps in the skip listing; E2E adds an orphan-order relationships failure (count 1) + recovery and asserts transform_shop passed/skipped per run. Amendment 1: added models/customers.sql + models/orders.sql.",
+      "amendments": [
+        {
+          "at": "2026-11-18T17:46:40Z",
+          "by": "execute",
+          "reason": "The contract puts sources in sources.yml and their column tests in schema.yml. dbt only accepts a source's column tests in the file that declares the source, and DbtTransform reports a source test under the source name (raw_shop) because attached_node is None and depends_on is sorted. Putting the tests on two thin models over raw_shop keeps them in schema.yml and reports them under customers/orders.",
+          "grounding": "Ran DbtTransform with dbt-duckdb on a source-tested project: every test came back with table='raw_shop'; the relationships test's depends_on.nodes = [raw_shop.customers, raw_shop.orders]. The same check on the model-tested demo project returned customers/customers/orders with failures=1.",
+          "before": {
+            "filesAffected": [
+              "src/adops/templates/demo/dbt/dbt_project.yml",
+              "src/adops/templates/demo/dbt/models/sources.yml",
+              "src/adops/templates/demo/dbt/models/customer_orders.sql",
+              "src/adops/templates/demo/dbt/models/schema.yml",
+              "src/adops/templates/demo/gitignore",
+              "src/adops/templates/demo/pipelines/shop_sync.yaml",
+              "src/adops/interface/run_command.py",
+              "src/adops/interface/validate_command.py",
+              "tests/unit/interface/test_init_command.py",
+              "tests/unit/interface/test_run_command.py",
+              "tests/unit/interface/test_validate_command.py",
+              "tests/e2e/test_demo_sync.py",
+              ".github/workflows/ci.yml"
+            ],
+            "changes": [
+              "Add src/adops/templates/demo/dbt/ with these files: dbt_project.yml; models/sources.yml, hand-written for schema raw_shop with tables customers and orders; models/customer_orders.sql, orders joined to customers on customer_id; models/schema.yml, with unique and not_null on customers.id and a `relationships` test from orders.customer_id to customers.id. Put no not_null test on customer_id. Ship no profiles.yml and no .py file, and add dbt `target/` and `logs/` to the demo gitignore as a safety net.",
+              "Append a Transform Step `transform_shop` (`type: transform`, `project: dbt`) after `sync_shop` in shop_sync.yaml.",
+              "In run_command.py, add a `build_transform(project) -> Transform` factory that returns DbtTransform(project), and pass it to run_pipeline. dbt Checks print in the existing `  check <table> <check>: <status>` format.",
+              "In validate_command.py, skip Transform Steps in `_skipped_checks`. For each Transform Step, report a clear error when `<project>/<step.project>/dbt_project.yml` is missing. Never invoke dbt.",
+              "Add every new demo file to DEMO_FILES in test_init_command.py and narrow its `steps[0].tables` assertion to the Sync Step. Add each new path to the wheel-template grep for-loop in .github/workflows/ci.yml. Add unit tests for build_transform, the validate path check and the Transform skip.",
+              "Docker test, first and second runs: also assert `step transform_shop: passed` and passing dbt Check lines.",
+              "Docker test, new failing scenario before the Breaking Change step (before `ALTER TABLE orders DROP COLUMN customer_id`): insert into the Source an order (id 150) whose customer_id 999 matches no customer. Only dbt checks this, because the Sync declares no Check on customer_id and the Source has no foreign key. Run and assert: exit 1; `step sync_shop: passed`; `step transform_shop: check_failed`; the relationships Check line reports fail with a failure count of 1 measured on Postgres; no secret or row value in the output. Then point order 150 at customer 1 with a newer updated_at, so the incremental Sync updates the Warehouse row, re-run, and assert the Transform passes. Raise the later order-count assertions by one for order 150.",
+              "Docker test, after the Breaking Change: the Breaking Change run and the not_null(email) run assert `step transform_shop: skipped`. Decision: after accept-schema, the Warehouse keeps customer_id as a nullable column, and new orders carry NULL there. dbt's relationships test ignores NULLs, so the post-accept run asserts `step transform_shop: passed`. The final DROP TABLE customers run asserts `step transform_shop: skipped`."
+            ]
+          },
+          "after": {
+            "filesAffected": [
+              "src/adops/templates/demo/dbt/dbt_project.yml",
+              "src/adops/templates/demo/dbt/models/sources.yml",
+              "src/adops/templates/demo/dbt/models/customer_orders.sql",
+              "src/adops/templates/demo/dbt/models/customers.sql",
+              "src/adops/templates/demo/dbt/models/orders.sql",
+              "src/adops/templates/demo/dbt/models/schema.yml",
+              "src/adops/templates/demo/gitignore",
+              "src/adops/templates/demo/pipelines/shop_sync.yaml",
+              "src/adops/interface/run_command.py",
+              "src/adops/interface/validate_command.py",
+              "tests/unit/interface/test_init_command.py",
+              "tests/unit/interface/test_run_command.py",
+              "tests/unit/interface/test_validate_command.py",
+              "tests/e2e/test_demo_sync.py",
+              ".github/workflows/ci.yml"
+            ],
+            "changes": [
+              "Add src/adops/templates/demo/dbt/ with these files: dbt_project.yml (all models materialized as tables); models/sources.yml, hand-written for schema raw_shop with tables customers and orders; models/customers.sql and models/orders.sql, thin selects over those two sources; models/customer_orders.sql, orders joined to customers on customer_id; models/schema.yml, with unique and not_null on the customers model's id and a `relationships` test from the orders model's customer_id to customers.id. Put no not_null test on customer_id. Ship no profiles.yml and no .py file, and add dbt `target/` and `logs/` to the demo gitignore as a safety net.",
+              "Append a Transform Step `transform_shop` (`type: transform`, `project: dbt`) after `sync_shop` in shop_sync.yaml.",
+              "In run_command.py, add a `build_transform(project) -> Transform` factory that returns DbtTransform(project), and pass it to run_pipeline. dbt Checks print in the existing `  check <table> <check>: <status>` format.",
+              "In validate_command.py, skip Transform Steps in `_skipped_checks`. For each Transform Step, report a clear error when `<project>/<step.project>/dbt_project.yml` is missing. Never invoke dbt.",
+              "Add every new demo file to DEMO_FILES in test_init_command.py and narrow its `steps[0].tables` assertion to the Sync Step. Add each new path to the wheel-template grep for-loop in .github/workflows/ci.yml. Add unit tests for build_transform, the validate path check and the Transform skip.",
+              "Docker test, first and second runs: also assert `step transform_shop: passed` and passing dbt Check lines.",
+              "Docker test, new failing scenario before the Breaking Change step (before `ALTER TABLE orders DROP COLUMN customer_id`): insert into the Source an order (id 150) whose customer_id 999 matches no customer. Only dbt checks this, because the Sync declares no Check on customer_id and the Source has no foreign key. Run and assert: exit 1; `step sync_shop: passed`; `step transform_shop: check_failed`; the relationships Check line reports fail with a failure count of 1 measured on Postgres; no secret or row value in the output. Then point order 150 at customer 1 with a newer updated_at, so the incremental Sync updates the Warehouse row, re-run, and assert the Transform passes. Raise the later order-count assertions by one for order 150.",
+              "Docker test, after the Breaking Change: the Breaking Change run and the not_null(email) run assert `step transform_shop: skipped`. Decision: after accept-schema, the Warehouse keeps customer_id as a nullable column, and new orders carry NULL there. dbt's relationships test ignores NULLs, so the post-accept run asserts `step transform_shop: passed`. The final DROP TABLE customers run asserts `step transform_shop: skipped`."
+            ]
+          }
+        }
+      ],
+      "unplannedFiles": [
+        "tests/unit/domain/test_loader.py"
+      ],
+      "gateRun": [
+        "g1 uv sync --locked: pass",
+        "g2 uv run ruff check: pass",
+        "g3 pytest tests/unit --cov: pass, 457 passed, 100% line+branch",
+        "g4 uv build --wheel + template grep (13 demo files): pass",
+        "g5 pytest tests/e2e -m e2e: pass, 1 passed in 52s on Docker Postgres"
+      ],
+      "failures": [
+        {
+          "at": "2026-11-18T17:47:43Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run pytest tests/unit --cov",
+          "detail": "FAILED tests/unit/domain/test_loader.py::test_the_demo_pipeline_without_step_types_loads_as_sync_steps",
+          "resolvedBy": "gate-fix",
+          "resolution": "Test pinned all demo Steps as Sync; narrowed to: the untyped first Step loads as SyncStep, transform_shop as TransformStep"
+        }
+      ],
+      "completedAt": "2026-11-18T17:48:54Z",
+      "gradeResult": {
+        "phaseId": "add-demo-dbt-project-and-docker-test",
+        "dimensionScores": [
+          {
+            "dimensionId": "demo-dbt-project-scaffold",
+            "score": 9,
+            "pass": true,
+            "evidence": "All 6 dbt files ship, DEMO_FILES exact, wheel + CI grep list them, no profiles.yml/.py, schema tests pinned by exact-dict test, transform_shop after sync_shop, gitignore entries asserted."
+          },
+          {
+            "dimensionId": "e2e-dbt-check-scenarios",
+            "score": 9,
+            "pass": true,
+            "evidence": "Every specified run asserts its transform_shop status; orphan run asserts exit 1, check_failed, relationships fail, 1 failing rows, no 999/secrets, independent Postgres orphan count; recovery bumps updated_at; counts raised. Count checked by substring."
+          },
+          {
+            "dimensionId": "validate-checks-path-without-dbt",
+            "score": 10,
+            "pass": true,
+            "evidence": "Exact error line with relative path asserted, dbtRunner+DbtTransform.run patched to raise on full demo, skip listing exact; above-the-bar: empty dbt/ folder test locks out the rubric failure example."
+          },
+          {
+            "dimensionId": "interface-composition-boundary",
+            "score": 9,
+            "pass": true,
+            "evidence": "Only DbtTransform import in interface/, build_transform unit-tested and identity-passed to run_pipeline, anchored check-line regex over mixed Sync+dbt run, no transform/warehouse keys in run config."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "add-empty-source-table-check",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-18T17:49:52Z",
+      "baseRef": "44c7405817e3d153a58f9c540c3870fc140dcc67",
+      "baseDirty": true,
+      "notes": "Already dirty at start (earlier horizon-3 phases, uncommitted): .github/workflows/ci.yml,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,pyproject.toml,src/adops/application/accept_schema.py,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/domain/loader.py,src/adops/domain/pipeline.py,src/adops/interface/run_command.py,src/adops/interface/validate_command.py,src/adops/templates/demo/gitignore,src/adops/templates/demo/pipelines/shop_sync.yaml,tests/e2e/test_demo_sync.py,tests/unit/application/fakes.py,tests/unit/application/test_accept_schema.py,tests/unit/application/test_run_pipeline.py,tests/unit/domain/test_loader.py,tests/unit/interface/test_init_command.py,tests/unit/interface/test_run_command.py,tests/unit/interface/test_validate_command.py,uv.lock,docs/roadmaps/agentic-dataops/horizons/horizon-03-dbt-transform-and-dedicated-errors-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-03-dbt-transform-and-dedicated-errors-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-03-dbt-transform-and-dedicated-errors-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-03-dbt-transform-and-dedicated-errors-roadmap.status.last_good.json,src/adops/domain/names.py,src/adops/domain/transform.py,src/adops/infrastructure/dbt_transform.py,src/adops/templates/demo/dbt/,tests/unit/domain/test_transform.py,tests/unit/infrastructure/test_dbt_transform.py. Working-tree snapshot at start: git stash create f34cd5fe57fcde98e5998aec48ab1c4f438db71e (diff against it to isolate this phase). Changed (vs snapshot): src/adops/domain/checks.py, src/adops/application/run_pipeline.py, src/adops/infrastructure/dlt_sync.py, tests/unit/domain/test_checks.py, tests/unit/application/test_run_pipeline.py, tests/unit/infrastructure/test_dlt_sync.py, tests/e2e/test_demo_sync.py, plus unplanned tests/unit/domain/test_pipeline.py, tests/unit/infrastructure/test_dagster_orchestrator.py (pinned check lists gained source_not_empty) and tests/unit/interface/test_validate_command.py (validate lists a source_not_empty skip). Change: SourceFacts.row_count measured by DltSync preflight in every mode; pure preflight rule source_not_empty (in PREFLIGHT_CHECKS and both CHECKS_BY_MODE) fails on row_count == 0; PlannedStep raises EmptySourceTableError(CheckFailedError) with a fixed message when every failed preflight Check is source_not_empty. The two empty_orders adapter tests keep their load-fact assertions (they need an empty Source to reach the never-loaded Warehouse branch) and now also assert preflight row_count == 0.",
+      "unplannedFiles": [
+        "tests/unit/domain/test_pipeline.py",
+        "tests/unit/infrastructure/test_dagster_orchestrator.py",
+        "tests/unit/interface/test_validate_command.py"
+      ],
+      "gateRun": [
+        "g1 uv sync --locked: pass",
+        "g2 uv run ruff check: pass",
+        "g3 pytest tests/unit --cov: pass, 484 passed, 100% line+branch",
+        "g4 uv build --wheel + template grep: pass",
+        "g5 pytest tests/e2e -m e2e: pass, 1 passed in 53s on Docker Postgres"
+      ],
+      "completedAt": "2026-11-18T17:57:26Z",
+      "gradeResult": {
+        "phaseId": "add-empty-source-table-check",
+        "dimensionScores": [
+          {
+            "dimensionId": "slice-layer-boundaries",
+            "score": 8,
+            "pass": true,
+            "evidence": "Adapter only assigns row_count; verdict only in checks._empty_in_source; PlannedStep picks error by check name. run_pipeline import block gained CheckName (same module), a literal deviation from bullet 4."
+          },
+          {
+            "dimensionId": "skip-with-reason-opt-out",
+            "score": 9,
+            "pass": true,
+            "evidence": "Skip passes with SKIPPED+reason in run_pipeline and real-adapter tests; empty reason rejected; dedicated validate listing test; mode membership asserted. No direct PREFLIGHT_CHECKS membership assertion."
+          },
+          {
+            "dimensionId": "row-count-measured-in-every-mode",
+            "score": 8,
+            "pass": true,
+            "evidence": "Both modes halt on real sqlite; None passes; non-empty passes in both modes. The two empty_orders tests were kept and gained a row_count==0 assertion but neither expects the halt nor seeds rows."
+          },
+          {
+            "dimensionId": "empty-table-error-shape",
+            "score": 10,
+            "pass": true,
+            "evidence": "Exact message, no cause/context, CheckFailedError subclass, CHECK_FAILED, assert_no_secret_in. Above a 9: exact message asserted end-to-end through real DltSync in both modes, and a test pins that mixed failures keep the generic CheckFailedError."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "replace-raw-sync-error-text-with-fixed-messages",
+      "status": "awaiting-verification",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-18T18:03:19Z",
+      "baseRef": "44c7405817e3d153a58f9c540c3870fc140dcc67",
+      "baseDirty": true,
+      "notes": "Already dirty at start (horizon 3 earlier phases, uncommitted): .github/workflows/ci.yml,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,pyproject.toml,src/adops/application/accept_schema.py,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/domain/checks.py,src/adops/domain/loader.py,src/adops/domain/pipeline.py,src/adops/infrastructure/dlt_sync.py,src/adops/interface/run_command.py,src/adops/interface/validate_command.py,src/adops/templates/demo/gitignore,src/adops/templates/demo/pipelines/shop_sync.yaml,tests/e2e/test_demo_sync.py,tests/unit/application/fakes.py,tests/unit/application/test_accept_schema.py,tests/unit/application/test_run_pipeline.py,tests/unit/domain/test_checks.py,tests/unit/domain/test_loader.py,tests/unit/domain/test_pipeline.py,tests/unit/infrastructure/test_dagster_orchestrator.py,tests/unit/infrastructure/test_dlt_sync.py,tests/unit/interface/test_init_command.py,tests/unit/interface/test_run_command.py,tests/unit/interface/test_validate_command.py,uv.lock,docs/roadmaps/agentic-dataops/horizons/horizon-03-dbt-transform-and-dedicated-errors-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-03-dbt-transform-and-dedicated-errors-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-03-dbt-transform-and-dedicated-errors-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-03-dbt-transform-and-dedicated-errors-roadmap.status.last_good.json,src/adops/domain/names.py,src/adops/domain/transform.py,src/adops/infrastructure/dbt_transform.py,src/adops/templates/demo/dbt/,tests/unit/domain/test_transform.py,tests/unit/infrastructure/test_dbt_transform.py || Changed: src/adops/application/ports.py, src/adops/application/run_pipeline.py, src/adops/infrastructure/dlt_sync.py, src/adops/infrastructure/schema_snapshot_store.py, tests/unit/application/test_run_pipeline.py, tests/unit/infrastructure/test_dlt_sync.py, tests/unit/infrastructure/test_schema_snapshot_store.py. Adds SourceUnreachable/WarehouseUnreachable markers (connect-time probes only) mapped to SourceUnreachableError/WarehouseUnreachableError in PlannedStep._guard; StepErrors from the Sync now pass through unwrapped; adapter failures carry fixed text (load failed / preflight failed / making columns nullable failed; our own freshness-type message is kept); dlt logger gets a lone NullHandler, propagate=False, level CRITICAL+1. No unplanned files.",
+      "gateRun": "g1 uv sync --locked: pass; g2 uv run ruff check: pass; g3 uv run pytest tests/unit --cov: pass (500 passed, 100%); g4 uv build --wheel + template grep: pass; g5 uv run pytest tests/e2e -m e2e: pass",
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-18T18:11:57Z",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "FAIL Required test coverage of 100.0% not reached (dlt_sync.py:43 removeHandler loop uncovered)",
+          "resolvedBy": "gate-fix",
+          "resolution": "added a test that pre-installs a StreamHandler on the dlt logger and checks _silence_dlt_logger replaces it"
+        }
+      ]
+    }
+  ]
+}

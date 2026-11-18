@@ -87,15 +87,18 @@ COLUMNS = {
 
 EXPECTED_CHECKS = {
     "customers.source_tables_exist",
+    "customers.source_not_empty",
     "customers.primary_key_unique",
     "customers.primary_key_not_null",
     "customers.row_count_matches",
     "orders.source_tables_exist",
+    "orders.source_not_empty",
     "orders.primary_key_unique",
     "orders.primary_key_not_null",
     "orders.no_row_loss",
     "orders.cursor_not_backwards",
     "order_items.source_tables_exist",
+    "order_items.source_not_empty",
     "order_items.primary_key_unique",
     "order_items.primary_key_not_null",
     "order_items.row_count_matches",

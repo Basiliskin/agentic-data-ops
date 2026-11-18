@@ -3,7 +3,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from adops.application.ports import ResolvedConnection, SchemaSnapshotStore
+from adops.application.ports import ResolvedConnection, SchemaSnapshotStore, WarehouseUnreachable
 from adops.domain.schema_snapshot import TableShape
 from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
 
@@ -125,3 +125,33 @@ def test_stored_row_holds_only_names_and_types_and_no_credential(tmp_path):
         "_pipelines_dir": tmp_path / ".adops" / "dlt",
         "_warehouse_kind": "duckdb",
     }
+
+
+UNREACHABLE = ResolvedConnection(
+    host="127.0.0.1", port=1, database="warehouse", user="adops", password="s3cr3t-store-sentinel"
+)
+
+
+def assert_holds_no_driver_text(error: Exception) -> None:
+    assert error.__cause__ is None and error.__context__ is None
+    for text in (str(error), repr(error)):
+        for leak in ("s3cr3t-store-sentinel", "127.0.0.1", "port 1", "OperationalError"):
+            assert leak not in text
+
+
+def test_load_from_an_unreachable_warehouse_raises_warehouse_unreachable(tmp_path):
+    store = WarehouseSnapshotStore(tmp_path, "postgres")
+
+    with pytest.raises(WarehouseUnreachable) as raised:
+        store.load(UNREACHABLE, "shop", "shop", "orders")
+
+    assert_holds_no_driver_text(raised.value)
+
+
+def test_save_to_an_unreachable_warehouse_raises_warehouse_unreachable(tmp_path):
+    store = WarehouseSnapshotStore(tmp_path, "postgres")
+
+    with pytest.raises(WarehouseUnreachable) as raised:
+        store.save(UNREACHABLE, "shop", "shop", "orders", ORDERS)
+
+    assert_holds_no_driver_text(raised.value)

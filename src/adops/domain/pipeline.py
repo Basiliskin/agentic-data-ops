@@ -13,8 +13,8 @@ from pydantic import (
 
 from adops.domain.checks import CHECKS_BY_MODE, CheckName, SyncMode
 from adops.domain.errors import RuleViolation
-
-IDENTIFIER = r"^[a-z][a-z0-9_]*$"
+from adops.domain.names import IDENTIFIER
+from adops.domain.transform import TransformStep
 
 
 class _DeclaredCheckBase(BaseModel):
@@ -186,16 +186,35 @@ class SyncStep(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    type: Literal["sync"] = "sync"
     name: str = Field(pattern=IDENTIFIER)
     source: str = Field(min_length=1)
     tables: list[SyncTable] = Field(min_length=1)
+
+
+STEP_TYPES = ("sync", "transform")
+
+
+def _step_type(value: Any) -> str | None:
+    tag = value.get("type", "sync") if isinstance(value, dict) else getattr(value, "type", None)
+    return tag if isinstance(tag, str) else None
+
+
+Step = Annotated[
+    Annotated[SyncStep, Tag("sync")] | Annotated[TransformStep, Tag("transform")],
+    Discriminator(
+        _step_type,
+        custom_error_type="step_type",
+        custom_error_message="type must be one of: " + ", ".join(STEP_TYPES),
+    ),
+]
 
 
 class Pipeline(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     name: str = Field(pattern=IDENTIFIER)
-    steps: list[SyncStep] = Field(min_length=1)
+    steps: list[Step] = Field(min_length=1)
 
     @model_validator(mode="after")
     def _unique_step_names(self) -> "Pipeline":

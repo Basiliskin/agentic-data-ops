@@ -198,3 +198,12 @@ def test_nothing_is_made_nullable_without_a_dropped_column(previous):
 
     assert sync.nullable == []
     assert accepted.nullable_columns == ()
+
+
+def test_a_transform_step_in_the_pipeline_is_not_a_candidate():
+    pipeline = PIPELINE + """  - {name: transform, type: transform, project: dbt}
+"""
+
+    accepted = accept(table="products", pipeline=pipeline)
+
+    assert accepted.step == "products"

@@ -17,6 +17,7 @@ RUN = ("run", "shop_sync")
 SEED_EMAIL = "customer7@example.com"
 CUSTOMER_CHECKS = (
     "source_tables_exist",
+    "source_not_empty",
     "primary_key_unique",
     "primary_key_not_null",
     "row_count_matches",
@@ -24,12 +25,20 @@ CUSTOMER_CHECKS = (
 )
 ORDER_CHECKS = (
     "source_tables_exist",
+    "source_not_empty",
     "primary_key_unique",
     "primary_key_not_null",
     "no_row_loss",
     "cursor_not_backwards",
     "min_rows",
 )
+RELATIONSHIPS = "relationships_orders_customer_id__id__ref_customers_"
+DBT_CHECKS = (
+    ("customers", "unique_customers_id"),
+    ("customers", "not_null_customers_id"),
+    ("orders", RELATIONSHIPS),
+)
+ORPHAN_CUSTOMER_ID = "999"
 
 
 def docker_available() -> bool:
@@ -114,6 +123,16 @@ def assert_all_checks_pass(output):
     assert "check orders row_count_matches" not in output
 
 
+def assert_transform_passed(output):
+    assert "step transform_shop: passed" in output
+    for table, check in DBT_CHECKS:
+        assert f"  check {table} {check}: pass" in output
+
+
+def analytics_rows(env):
+    return warehouse(env, "SELECT count(*) FROM analytics.customer_orders")[0][0]
+
+
 def test_demo_incremental_breaking_change_and_missing_table(demo):
     project, env = demo
 
@@ -122,8 +141,10 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
     assert code == 0, output
     assert "step sync_shop: passed — customers 20 rows, orders 100 rows" in output
     assert_all_checks_pass(output)
+    assert_transform_passed(output)
     assert_no_secret_or_row_value(output, env)
     assert counts(env) == {"customers": 20, "orders": 100}
+    assert analytics_rows(env) == 100
     assert dagster_meta(env, "SELECT count(*) FROM runs WHERE status = 'SUCCESS'")[0][0] >= 1
 
     shop(
@@ -138,12 +159,56 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
     assert code == 0, output
     assert "step sync_shop: passed — customers 20 rows, orders 2 rows" in output
     assert_all_checks_pass(output)
+    assert_transform_passed(output)
     assert_no_secret_or_row_value(output, env)
     assert counts(env) == {"customers": 20, "orders": 101}
+    assert analytics_rows(env) == 101
     [(amount,)] = warehouse(env, "SELECT amount FROM raw_shop.orders WHERE id = 5")
     assert amount == Decimal("999.99")
     duplicates = "SELECT id FROM raw_shop.orders GROUP BY id HAVING count(*) > 1"
     assert warehouse(env, duplicates) == []
+
+    shop(
+        env,
+        f"INSERT INTO orders VALUES (150, {ORPHAN_CUSTOMER_ID}, 7.00,"
+        " TIMESTAMPTZ '2026-03-02 00:00:00+00')",
+    )
+
+    code, output = adops_run(project, *RUN)
+
+    assert code == 1, output
+    assert "step sync_shop: passed — customers 20 rows, orders 1 rows" in output
+    assert_all_checks_pass(output)
+    assert "step transform_shop: check_failed" in output
+    assert "  check customers unique_customers_id: pass" in output
+    assert f"  check orders {RELATIONSHIPS}: fail" in output
+    assert f"orders: dbt test {RELATIONSHIPS} failed — 1 failing rows" in output
+    assert "dbt run failed" not in output
+    assert_no_secret_or_row_value(output, env)
+    assert ORPHAN_CUSTOMER_ID not in output
+    assert counts(env) == {"customers": 20, "orders": 102}
+    orphans = (
+        "SELECT count(*) FROM raw_shop.orders o"
+        " WHERE NOT EXISTS (SELECT 1 FROM raw_shop.customers c WHERE c.id = o.customer_id)"
+    )
+    assert warehouse(env, orphans) == [(1,)]
+
+    shop(
+        env,
+        "UPDATE orders SET customer_id = 1, updated_at = TIMESTAMPTZ '2026-03-03 00:00:00+00'"
+        " WHERE id = 150",
+    )
+
+    code, output = adops_run(project, *RUN)
+
+    assert code == 0, output
+    assert "step sync_shop: passed — customers 20 rows, orders 1 rows" in output
+    assert_all_checks_pass(output)
+    assert_transform_passed(output)
+    assert_no_secret_or_row_value(output, env)
+    assert counts(env) == {"customers": 20, "orders": 102}
+    assert warehouse(env, orphans) == [(0,)]
+    assert analytics_rows(env) == 102
 
     shop(
         env,
@@ -156,6 +221,7 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
 
     assert code == 1, output
     assert "Breaking Change in orders: customer_id dropped" in output
+    assert "step transform_shop: skipped" in output
     assert_no_secret_or_row_value(output, env)
     assert counts(env) == before_halt
 
@@ -171,8 +237,9 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
 
     assert code == 0, output
     assert_all_checks_pass(output)
+    assert_transform_passed(output)
     assert_no_secret_or_row_value(output, env)
-    assert counts(env) == {"customers": 20, "orders": 102}
+    assert counts(env) == {"customers": 20, "orders": 103}
 
     shop(env, "UPDATE customers SET email = NULL WHERE id = 7")
 
@@ -182,6 +249,7 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
     assert "  check customers not_null(email): fail" in output
     assert "customers: not_null(email) failed — 1 rows with no value" in output
     assert "Breaking Change" not in output
+    assert "step transform_shop: skipped" in output
     assert_no_secret_or_row_value(output, env)
     for nulled_row_value in ("(7,", "2026-01-01 07:00", "2026, 1, 1, 7"):
         assert nulled_row_value not in output
@@ -192,6 +260,7 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
 
     assert code == 0, output
     assert_all_checks_pass(output)
+    assert_transform_passed(output)
     assert_no_secret_or_row_value(output, env)
     nulls = "SELECT count(*) FROM raw_shop.customers WHERE email IS NULL"
     assert warehouse(env, nulls) == [(0,)]
@@ -207,8 +276,9 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
     assert code == 1, output
     assert "  check customers source_tables_exist: fail" in output
     assert "customers: source_tables_exist failed — table not found in the Source" in output
+    assert "step transform_shop: skipped" in output
     assert_no_secret_or_row_value(output, env)
-    assert counts(env) == {"customers": 20, "orders": 102}
+    assert counts(env) == {"customers": 20, "orders": 103}
 
     for name in ("SHOP_PASSWORD", "WAREHOUSE_PASSWORD"):
         leaks = (

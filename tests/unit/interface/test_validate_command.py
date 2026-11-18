@@ -3,6 +3,7 @@ import socket
 import pytest
 from typer.testing import CliRunner
 
+from adops.infrastructure import dbt_transform
 from adops.interface import cli
 
 runner = CliRunner()
@@ -68,6 +69,69 @@ def test_demo_project_validates_offline_without_env_file(tmp_path, monkeypatch, 
     assert result.output == "ok\n"
 
 
+TRANSFORM_STEP = "  - name: transform_shop\n    type: transform\n    project: dbt\n"
+
+
+@pytest.fixture
+def dbt_never_runs(monkeypatch):
+    def refuse(*args, **kwargs):
+        raise AssertionError("validate must not run dbt")
+
+    monkeypatch.setattr(dbt_transform, "dbtRunner", refuse)
+    monkeypatch.setattr(dbt_transform.DbtTransform, "run", refuse)
+
+
+@pytest.mark.usefixtures("no_network", "dbt_never_runs")
+def test_demo_with_its_dbt_project_validates_without_running_dbt(tmp_path):
+    runner.invoke(cli.app, ["init", str(tmp_path), "--demo"])
+
+    result = validate("--project", str(tmp_path))
+
+    assert result.exit_code == 0, result.output
+    assert result.output == "ok\n"
+
+
+@pytest.mark.usefixtures("dbt_never_runs")
+def test_missing_dbt_project_file_names_the_step_and_the_relative_path(tmp_path):
+    runner.invoke(cli.app, ["init", str(tmp_path), "--demo"])
+    (tmp_path / "dbt" / "dbt_project.yml").unlink()
+
+    result = validate("--project", str(tmp_path))
+
+    assert result.exit_code == 1
+    assert result.output.splitlines() == [
+        "pipelines/shop_sync.yaml: Step transform_shop: dbt/dbt_project.yml not found"
+    ]
+    assert str(tmp_path) not in result.output
+
+
+def test_dbt_folder_without_dbt_project_file_is_reported(project):
+    (project / "dbt").mkdir()
+    write_pipeline(
+        project, "shop_sync", pipeline_yaml("shop_sync", table_yaml("orders")) + TRANSFORM_STEP
+    )
+
+    result = validate("--project", str(project))
+
+    assert result.exit_code == 1
+    assert "Step transform_shop: dbt/dbt_project.yml not found" in result.output
+
+
+def test_transform_step_is_left_out_of_the_skipped_checks(project):
+    (project / "dbt").mkdir()
+    (project / "dbt" / "dbt_project.yml").write_text("name: shop\n")
+    tables = table_yaml("orders", skip_yaml(["row_count_matches"]))
+    write_pipeline(project, "shop_sync", pipeline_yaml("shop_sync", tables) + TRANSFORM_STEP)
+
+    result = validate("--project", str(project))
+
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines() == [
+        "orders: row_count_matches skipped — kept for audit",
+        "ok",
+    ]
+
+
 def test_validate_defaults_to_the_current_folder(project, monkeypatch):
     write_pipeline(project, "a", pipeline_yaml("a", table_yaml("orders")))
     monkeypatch.chdir(project)
@@ -106,6 +170,19 @@ def test_skipped_checks_are_listed_in_pipeline_table_check_order(project):
         "ok",
     ]
     assert second.output == first.output
+
+
+def test_a_skipped_source_not_empty_is_listed_with_its_reason(project):
+    tables = table_yaml("returns", skip_yaml(["source_not_empty"], "filled only at month end"))
+    write_pipeline(project, "shop", pipeline_yaml("shop", tables))
+
+    result = validate("--project", str(project))
+
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines() == [
+        "returns: source_not_empty skipped — filled only at month end",
+        "ok",
+    ]
 
 
 def test_one_named_pipeline_is_validated_alone(project):

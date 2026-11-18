@@ -1,0 +1,17 @@
+version: 2
+
+models:
+  - name: customers
+    columns:
+      - name: id
+        data_tests:
+          - unique
+          - not_null
+  - name: orders
+    columns:
+      - name: customer_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('customers')
+                field: id

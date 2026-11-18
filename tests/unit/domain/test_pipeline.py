@@ -166,7 +166,8 @@ def test_unknown_check_name_is_rejected_listing_the_allowed_names_without_echoin
 
     assert problem == (
         "steps[0].tables[0].skip_checks.checks[1]: must be a Check declared on this table or one"
-        " of: source_tables_exist, primary_key_unique, primary_key_not_null, row_count_matches"
+        " of: source_tables_exist, source_not_empty, primary_key_unique, primary_key_not_null,"
+        " row_count_matches"
     )
     assert "LEAK-7c1e" not in problem
 
@@ -197,6 +198,7 @@ def test_skipping_a_check_that_does_not_apply_to_the_mode_is_rejected(mode, chec
             SyncMode.FULL_REFRESH,
             (
                 "source_tables_exist",
+                "source_not_empty",
                 "primary_key_unique",
                 "primary_key_not_null",
                 "row_count_matches",
@@ -206,6 +208,7 @@ def test_skipping_a_check_that_does_not_apply_to_the_mode_is_rejected(mode, chec
             SyncMode.INCREMENTAL,
             (
                 "source_tables_exist",
+                "source_not_empty",
                 "primary_key_unique",
                 "primary_key_not_null",
                 "no_row_loss",

@@ -7,6 +7,7 @@ from typing import Protocol, runtime_checkable
 from adops.domain.checks import CheckResult, LoadFacts, SourceFacts
 from adops.domain.pipeline import SyncStep, SyncTable
 from adops.domain.schema_snapshot import TableShape
+from adops.domain.transform import DbtTestFacts, TransformStep
 
 MASK = "***"
 
@@ -26,6 +27,18 @@ class ResolvedConnection:
             f"ResolvedConnection(host={self.host!r}, port={self.port!r}, "
             f"database={self.database!r}, user={self.user!r}, password={MASK!r})"
         )
+
+
+class SourceUnreachable(Exception):
+    """A Sync could not connect to the Source; it names the table and holds no driver text."""
+
+    def __init__(self, table: str) -> None:
+        super().__init__(table)
+        self.table = table
+
+
+class WarehouseUnreachable(Exception):
+    """An adapter could not connect to the Warehouse; it holds no driver text."""
 
 
 @dataclass(frozen=True)
@@ -55,6 +68,22 @@ class Sync(Protocol):
     ) -> None:
         """Let loaded columns that the Source no longer has hold NULL in the Warehouse."""
         ...
+
+
+@dataclass(frozen=True)
+class TransformResult:
+    """What one dbt build measured; it carries model and test names only, never dbt's text."""
+
+    tests: tuple[DbtTestFacts, ...]
+    crashed: bool
+    failed_models: tuple[str, ...]
+
+
+@runtime_checkable
+class Transform(Protocol):
+    """Runs a Transform Step's dbt models and tests in the Warehouse and reports what happened."""
+
+    def run(self, step: TransformStep, warehouse: ResolvedConnection) -> TransformResult: ...
 
 
 @runtime_checkable
@@ -105,7 +134,7 @@ class StepOutcome:
 
 
 class StepTask(Protocol):
-    """One Step, ready to run: preflight, sync, then Checks. Raises StepError on failure."""
+    """One Step, ready to run, with everything it needs bound in. Raises StepError on failure."""
 
     @property
     def name(self) -> str: ...

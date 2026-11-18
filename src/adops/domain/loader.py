@@ -5,7 +5,7 @@ from pydantic import BaseModel, ValidationError
 
 from adops.domain.environment import Environment, ProjectSettings
 from adops.domain.errors import Location, PipelineValidationError, RuleViolation
-from adops.domain.pipeline import DECLARED_CHECK_TYPES, Pipeline
+from adops.domain.pipeline import DECLARED_CHECK_TYPES, STEP_TYPES, Pipeline, SyncStep
 
 ROOT = "(root)"
 
@@ -22,7 +22,7 @@ def ensure_sources_defined(pipeline: Pipeline, environment: Environment) -> None
     problems = [
         f"{format_path(('steps', index, 'source'))}: no Source with this name in the Environment"
         for index, step in enumerate(pipeline.steps)
-        if step.source not in environment.sources
+        if isinstance(step, SyncStep) and step.source not in environment.sources
     ]
     if problems:
         raise PipelineValidationError(problems)
@@ -82,10 +82,17 @@ def _describe(error: ValidationError) -> list[str]:
     return lines
 
 
+_UNION_TAGS = {"steps": STEP_TYPES, "checks": DECLARED_CHECK_TYPES}
+
+
 def _without_union_tags(location: Location) -> Location:
-    # pydantic inserts the matched tag after `checks[k]`; it is not a key in the YAML.
+    # pydantic inserts the matched tag after `steps[i]` and `checks[k]`; it is not a YAML key.
     return tuple(
         part
         for index, part in enumerate(location)
-        if not (index >= 2 and location[index - 2] == "checks" and part in DECLARED_CHECK_TYPES)
+        if not (index >= 2 and _is_union_tag(location[index - 2], location[index - 1], part))
     )
+
+
+def _is_union_tag(list_name: str | int, list_index: str | int, part: str | int) -> bool:
+    return isinstance(list_index, int) and part in _UNION_TAGS.get(str(list_name), ())

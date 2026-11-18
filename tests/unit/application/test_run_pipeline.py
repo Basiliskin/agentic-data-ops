@@ -9,8 +9,10 @@ from fakes import (
     TABLE_TYPES,
     WAREHOUSE_PASSWORD,
     FakeSnapshotStore,
+    FakeTransform,
     FixedClock,
     RecordingSync,
+    dbt_test,
     facts_with_types,
     healthy_load,
 )
@@ -22,16 +24,24 @@ from adops.application.ports import (
     RunPlan,
     RunResult,
     SchemaSnapshotStore,
+    SourceUnreachable,
     StepStatus,
     Sync,
+    TransformResult,
+    WarehouseUnreachable,
 )
 from adops.application.run_pipeline import (
     BreakingChangeError,
     CheckFailedError,
+    EmptySourceTableError,
     InOrderOrchestrator,
     PlannedStep,
+    PlannedTransformStep,
+    SourceUnreachableError,
     StepError,
     SyncFailedError,
+    TransformFailedError,
+    WarehouseUnreachableError,
     run_pipeline,
 )
 from adops.application.secrets import MissingSecretError
@@ -52,10 +62,13 @@ def run(
     snapshot_store=None,
     clock=None,
     pipeline=PIPELINE,
+    transform=None,
 ) -> RunResult:
     store = FakeSnapshotStore() if snapshot_store is None else snapshot_store
     clock = FixedClock() if clock is None else clock
-    return run_pipeline(pipeline, SETTINGS, environment, env, sync, store, clock, orchestrator)
+    return run_pipeline(
+        pipeline, SETTINGS, environment, env, sync, store, clock, orchestrator, transform
+    )
 
 
 def statuses(result: RunResult) -> list[tuple[str, StepStatus]]:
@@ -128,7 +141,8 @@ def test_failing_preflight_stops_before_any_sync_and_skips_later_steps():
     ]
     failed = result.steps[0].checks
     assert [(c.check, c.table, c.status) for c in failed] == [
-        (CheckName.SOURCE_TABLES_EXIST, "customers", CheckStatus.FAIL)
+        (CheckName.SOURCE_TABLES_EXIST, "customers", CheckStatus.FAIL),
+        (CheckName.SOURCE_NOT_EMPTY, "customers", CheckStatus.PASS),
     ]
     assert "customers" in failed[0].message
     assert result.steps[0].rows_loaded == {}
@@ -150,6 +164,117 @@ def test_table_missing_from_preflight_report_counts_as_not_in_source():
     assert checks_of(result, "orders")[CheckName.SOURCE_TABLES_EXIST].status is CheckStatus.FAIL
     assert checks_of(result, "order_items")[CheckName.SOURCE_TABLES_EXIST].status is (
         CheckStatus.PASS
+    )
+
+
+def empty(table: str) -> SourceFacts:
+    types = TABLE_TYPES[table]
+    return SourceFacts(True, frozenset(types), types, row_count=0)
+
+
+def planned_orders_step(pipeline: str = PIPELINE) -> PlannedStep:
+    return PlannedStep(
+        load_pipeline(pipeline).steps[1],
+        ResolvedConnection("h", 1, "d", "u", SOURCE_PASSWORD),
+        ResolvedConnection("h", 1, "d", "u", WAREHOUSE_PASSWORD),
+        "shop",
+        FakeSnapshotStore(),
+        FixedClock(),
+    )
+
+
+SKIP_EMPTY_ORDER_ITEMS = PIPELINE.replace(
+    "checks: [row_count_matches]", "checks: [row_count_matches, source_not_empty]"
+)
+
+
+def test_an_empty_source_table_halts_its_step_before_any_sync_and_skips_later_steps():
+    sync = RecordingSync(source_facts={"customers": empty("customers")})
+
+    result = run(sync)
+
+    assert sync.calls == [("preflight", "customers")]
+    assert statuses(result) == [
+        ("customers", StepStatus.CHECK_FAILED),
+        ("orders", StepStatus.SKIPPED),
+        ("products", StepStatus.SKIPPED),
+    ]
+    assert checks_of(result, "customers")[CheckName.SOURCE_NOT_EMPTY].status is CheckStatus.FAIL
+    assert (
+        result.steps[0].error
+        == "Pipeline shop, Step customers, table customers: Source table is empty"
+    )
+
+
+def test_empty_source_table_error_is_a_sanitized_check_failure():
+    sync = RecordingSync(source_facts={"order_items": empty("order_items")})
+
+    with pytest.raises(EmptySourceTableError) as raised:
+        planned_orders_step()(sync)
+
+    error = raised.value
+    assert str(error) == "Pipeline shop, Step orders, table order_items: Source table is empty"
+    assert error.__cause__ is None and error.__context__ is None
+    assert isinstance(error, CheckFailedError)
+    assert (error.table, error.rows_loaded) == ("order_items", {})
+    assert [c.check for c in error.checks if c.status is CheckStatus.FAIL] == [
+        CheckName.SOURCE_NOT_EMPTY
+    ]
+    assert_no_secret_in(str(error), repr(error), *(c.message for c in error.checks))
+
+
+def test_a_skipped_source_not_empty_lets_an_empty_table_pass_and_reports_the_skip():
+    sync = RecordingSync(source_facts={"order_items": empty("order_items")})
+
+    result = run(sync, pipeline=SKIP_EMPTY_ORDER_ITEMS)
+
+    assert result.succeeded
+    assert ("sync", "orders") in sync.calls
+    skipped = checks_of(result, "order_items")[CheckName.SOURCE_NOT_EMPTY]
+    assert skipped.status is CheckStatus.SKIPPED
+    assert skipped.message == (
+        "order_items: source_not_empty skipped — the Source table is appended to while it is copied"
+    )
+
+
+def test_skipping_source_not_empty_without_a_reason_is_rejected_before_any_step_runs():
+    no_reason = SKIP_EMPTY_ORDER_ITEMS.replace(
+        "reason: the Source table is appended to while it is copied", 'reason: ""'
+    )
+    sync = RecordingSync(source_facts={"order_items": empty("order_items")})
+
+    with pytest.raises(PipelineValidationError) as raised:
+        run(sync, pipeline=no_reason)
+
+    assert "skip_checks.reason" in str(raised.value)
+    assert sync.calls == []
+
+
+@pytest.mark.parametrize("row_count", [1, None])
+def test_a_non_empty_or_uncounted_source_table_passes_source_not_empty(row_count):
+    types = TABLE_TYPES["orders"]
+    sync = RecordingSync(
+        source_facts={"orders": SourceFacts(True, frozenset(types), types, row_count)}
+    )
+
+    result = run(sync)
+
+    assert result.succeeded
+    assert checks_of(result, "orders")[CheckName.SOURCE_NOT_EMPTY].status is CheckStatus.PASS
+
+
+def test_an_empty_table_beside_a_missing_one_gives_the_general_check_failure():
+    sync = RecordingSync(
+        source_facts={"orders": empty("orders"), "order_items": SourceFacts(False, frozenset())}
+    )
+
+    with pytest.raises(CheckFailedError) as raised:
+        planned_orders_step()(sync)
+
+    assert type(raised.value) is CheckFailedError
+    assert str(raised.value) == (
+        "Step orders: Checks failed: orders: source_not_empty failed — table orders is empty in"
+        " the Source; order_items: source_tables_exist failed — table not found in the Source"
     )
 
 
@@ -579,6 +704,7 @@ def test_declared_checks_are_reported_after_the_built_in_ones_with_their_names()
     assert result.succeeded
     assert [(c.check, c.status) for c in result.steps[0].checks] == [
         (CheckName.SOURCE_TABLES_EXIST, CheckStatus.PASS),
+        (CheckName.SOURCE_NOT_EMPTY, CheckStatus.PASS),
         (CheckName.PRIMARY_KEY_UNIQUE, CheckStatus.PASS),
         (CheckName.PRIMARY_KEY_NOT_NULL, CheckStatus.PASS),
         (CheckName.ROW_COUNT_MATCHES, CheckStatus.PASS),
@@ -647,3 +773,296 @@ def test_declared_check_without_a_measured_fact_fails_instead_of_passing():
         "customers: not_null(email) failed — the null count was not measured"
     )
     assert store.saves == []
+
+
+SYNC_TRANSFORM_SYNC = """
+name: shop
+steps:
+  - name: customers
+    source: shop
+    tables:
+      - {name: customers, mode: full_refresh, primary_key: id}
+  - name: transform
+    type: transform
+    project: dbt
+  - name: products
+    source: shop
+    tables:
+      - {name: products, mode: full_refresh, primary_key: sku}
+"""
+
+TRANSFORM_ONLY = """
+name: shop
+steps:
+  - {name: transform, type: transform, project: dbt}
+"""
+
+WAREHOUSE_ONLY_ENV = {"WAREHOUSE_PASSWORD": WAREHOUSE_PASSWORD}
+
+
+def transform_result(*tests, crashed=False, failed_models=()) -> TransformResult:
+    return TransformResult(tests=tests, crashed=crashed, failed_models=failed_models)
+
+
+def planned_transform(transform: FakeTransform) -> PlannedTransformStep:
+    step = load_pipeline(TRANSFORM_ONLY).steps[0]
+    warehouse = ResolvedConnection("h", 1, "d", "u", WAREHOUSE_PASSWORD)
+    return PlannedTransformStep(step, warehouse, "shop", transform)  # type: ignore[arg-type]
+
+
+def test_passing_dbt_tests_are_reported_as_checks_of_the_transform_step():
+    transform = FakeTransform(
+        transform_result(dbt_test("not_null_customer_orders_id"), dbt_test("unique_orders_id"))
+    )
+
+    result = run(RecordingSync(), pipeline=SYNC_TRANSFORM_SYNC, transform=transform)
+
+    assert result.succeeded
+    transform_step = result.steps[1]
+    assert transform_step.status is StepStatus.PASSED
+    assert [(c.table, c.check, c.status) for c in transform_step.checks] == [
+        ("customer_orders", "not_null_customer_orders_id", CheckStatus.PASS),
+        ("customer_orders", "unique_orders_id", CheckStatus.PASS),
+    ]
+    assert transform_step.rows_loaded == {}
+
+
+def test_the_transform_engine_gets_the_resolved_warehouse_of_the_environment():
+    transform = FakeTransform()
+
+    run(RecordingSync(), pipeline=SYNC_TRANSFORM_SYNC, transform=transform)
+
+    [(step, warehouse)] = transform.calls
+    assert step == "transform"
+    assert (warehouse.host, warehouse.port, warehouse.database) == ("localhost", 5433, "warehouse")
+    assert warehouse.password == WAREHOUSE_PASSWORD
+
+
+def test_failing_dbt_test_fails_its_checks_and_skips_every_later_step():
+    sync = RecordingSync()
+    transform = FakeTransform(
+        transform_result(dbt_test("not_null_customer_orders_id", status="fail", failures=2))
+    )
+
+    result = run(sync, pipeline=SYNC_TRANSFORM_SYNC, transform=transform)
+
+    assert statuses(result) == [
+        ("customers", StepStatus.PASSED),
+        ("transform", StepStatus.CHECK_FAILED),
+        ("products", StepStatus.SKIPPED),
+    ]
+    [check] = result.steps[1].checks
+    assert check.status is CheckStatus.FAIL
+    assert check.message == (
+        "customer_orders: dbt test not_null_customer_orders_id failed — 2 failing rows"
+    )
+    assert result.steps[1].error == "Step transform: Checks failed: " + check.message
+    assert result.steps[0].rows_loaded == {"customers": 3}
+    assert ("preflight", "products") not in sync.calls
+    assert ("sync", "products") not in sync.calls
+
+
+@pytest.mark.parametrize(
+    ("measured", "error"),
+    [
+        (transform_result(crashed=True), "Pipeline shop, Step transform: dbt run failed"),
+        (
+            transform_result(dbt_test("unique_orders_id"), failed_models=("customer_orders",)),
+            "Pipeline shop, Step transform: dbt run failed (models: customer_orders)",
+        ),
+    ],
+    ids=["crash-without-tests", "broken-model-with-passing-tests"],
+)
+def test_crash_or_broken_model_fails_the_step_and_skips_every_later_step(measured, error):
+    sync = RecordingSync()
+
+    result = run(sync, pipeline=SYNC_TRANSFORM_SYNC, transform=FakeTransform(measured))
+
+    assert statuses(result) == [
+        ("customers", StepStatus.PASSED),
+        ("transform", StepStatus.FAILED),
+        ("products", StepStatus.SKIPPED),
+    ]
+    assert result.steps[1].error == error
+    assert result.steps[1].checks == ()
+    assert ("sync", "products") not in sync.calls
+
+
+@pytest.mark.parametrize(
+    ("tests", "crashed", "failed_models", "expected"),
+    [
+        ((), False, (), None),
+        (("pass",), False, (), None),
+        (("warn",), False, (), None),
+        (("fail",), False, (), CheckFailedError),
+        (("error",), False, (), CheckFailedError),
+        (("skipped",), False, (), CheckFailedError),
+        ((), True, (), TransformFailedError),
+        (("pass",), True, (), TransformFailedError),
+        (("fail",), True, (), TransformFailedError),
+        ((), False, ("customer_orders",), TransformFailedError),
+        (("pass",), False, ("customer_orders",), TransformFailedError),
+        (("fail",), False, ("customer_orders",), TransformFailedError),
+        (("fail",), True, ("customer_orders",), TransformFailedError),
+    ],
+)
+def test_a_crash_or_broken_model_outranks_whatever_the_tests_say(
+    tests, crashed, failed_models, expected
+):
+    facts = tuple(dbt_test(f"t{i}", status=status) for i, status in enumerate(tests))
+    step = planned_transform(
+        FakeTransform(transform_result(*facts, crashed=crashed, failed_models=failed_models))
+    )
+
+    if expected is None:
+        assert len(step(RecordingSync()).checks) == len(tests)
+    else:
+        with pytest.raises(expected):
+            step(RecordingSync())
+
+
+def test_an_engine_error_fails_with_the_fixed_message_and_keeps_none_of_its_text():
+    transform = FakeTransform(fail_with=RuntimeError(f"password {WAREHOUSE_PASSWORD} rejected"))
+
+    with pytest.raises(TransformFailedError) as raised:
+        planned_transform(transform)(RecordingSync())
+
+    assert str(raised.value) == "Pipeline shop, Step transform: dbt run failed"
+    assert raised.value.__cause__ is None and raised.value.__context__ is None
+
+
+def test_a_failed_transform_run_reports_no_warehouse_password_anywhere():
+    transforms = [
+        FakeTransform(fail_with=RuntimeError(f"auth failed: {WAREHOUSE_PASSWORD}")),
+        FakeTransform(transform_result(dbt_test("not_null_id", status="fail"))),
+        FakeTransform(transform_result(failed_models=("customer_orders",))),
+    ]
+
+    for transform in transforms:
+        result = run(RecordingSync(), pipeline=SYNC_TRANSFORM_SYNC, transform=transform)
+
+        assert not result.succeeded
+        texts = [repr(result), str(result)]
+        texts += [step.error or "" for step in result.steps]
+        texts += [check.message for step in result.steps for check in step.checks]
+        assert_no_secret_in(*texts)
+
+
+def test_a_transform_step_without_an_engine_is_rejected_before_any_step_runs():
+    sync = RecordingSync()
+
+    with pytest.raises(PipelineValidationError) as raised:
+        run(sync, pipeline=SYNC_TRANSFORM_SYNC, transform=None)
+
+    assert raised.value.problems == (
+        "steps[1]: a Transform Step needs a Transform engine, and none is set",
+    )
+    assert sync.calls == []
+
+
+def test_a_transform_step_needs_no_source_secret_and_no_earlier_sync():
+    sync = RecordingSync()
+    transform = FakeTransform(transform_result(dbt_test("unique_orders_id")))
+
+    result = run(sync, env=WAREHOUSE_ONLY_ENV, pipeline=TRANSFORM_ONLY, transform=transform)
+
+    assert statuses(result) == [("transform", StepStatus.PASSED)]
+    assert sync.calls == []
+    assert [step for step, _ in transform.calls] == ["transform"]
+
+
+def test_a_transform_step_first_runs_before_the_sync_that_follows_it():
+    sync = RecordingSync()
+    transform = FakeTransform()
+    pipeline = (
+        TRANSFORM_ONLY
+        + """  - name: products
+    source: shop
+    tables:
+      - {name: products, mode: full_refresh, primary_key: sku}
+"""
+    )
+
+    result = run(sync, pipeline=pipeline, transform=transform)
+
+    assert statuses(result) == [
+        ("transform", StepStatus.PASSED),
+        ("products", StepStatus.PASSED),
+    ]
+    assert transform.calls and sync.calls[0] == ("preflight", "products")
+
+
+def orders_step(store: FakeSnapshotStore | None = None) -> PlannedStep:
+    return PlannedStep(
+        load_pipeline(PIPELINE).steps[1],
+        ResolvedConnection("h", 1, "d", "u", SOURCE_PASSWORD),
+        ResolvedConnection("h", 1, "d", "u", WAREHOUSE_PASSWORD),
+        "shop",
+        store or FakeSnapshotStore(),
+        FixedClock(),
+    )
+
+
+def assert_unchained(error: Exception) -> None:
+    assert error.__cause__ is None and error.__context__ is None
+
+
+@pytest.mark.parametrize("stage", ["preflight", "sync"])
+def test_source_unreachable_marker_becomes_source_unreachable_error(stage):
+    marker = {"orders": SourceUnreachable("order_items")}
+    sync = RecordingSync(**{f"fail_{stage}_of": marker})
+
+    with pytest.raises(SourceUnreachableError) as raised:
+        orders_step()(sync)
+
+    assert type(raised.value) is SourceUnreachableError
+    assert str(raised.value) == (
+        "Pipeline shop, Step orders, table order_items: Source is unreachable"
+    )
+    assert raised.value.table == "order_items"
+    assert_unchained(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("sync_kwargs", "store_kwargs"),
+    [
+        ({"fail_sync_of": {"orders": WarehouseUnreachable()}}, {}),
+        ({}, {"fail_load": WarehouseUnreachable()}),
+        ({}, {"fail_save": WarehouseUnreachable()}),
+    ],
+    ids=["sync", "snapshot load", "snapshot save"],
+)
+def test_warehouse_unreachable_marker_becomes_warehouse_unreachable_error(
+    sync_kwargs, store_kwargs
+):
+    with pytest.raises(WarehouseUnreachableError) as raised:
+        orders_step(FakeSnapshotStore(**store_kwargs))(RecordingSync(**sync_kwargs))
+
+    assert type(raised.value) is WarehouseUnreachableError
+    assert str(raised.value) == "Pipeline shop, Step orders: Warehouse is unreachable"
+    assert_unchained(raised.value)
+
+
+def test_an_unreachable_source_fails_its_step_and_skips_later_steps():
+    sync = RecordingSync(fail_preflight_of={"customers": SourceUnreachable("customers")})
+
+    result = run(sync)
+
+    assert statuses(result) == [
+        ("customers", StepStatus.FAILED),
+        ("orders", StepStatus.SKIPPED),
+        ("products", StepStatus.SKIPPED),
+    ]
+    assert result.steps[0].error == (
+        "Pipeline shop, Step customers, table customers: Source is unreachable"
+    )
+
+
+def test_a_step_error_from_the_sync_keeps_its_own_message():
+    failed = SyncFailedError("Pipeline shop, Step orders, table orders: load failed")
+
+    with pytest.raises(SyncFailedError) as raised:
+        orders_step()(RecordingSync(fail_sync_of={"orders": failed}))
+
+    assert raised.value is failed
+    assert str(raised.value) == "Pipeline shop, Step orders, table orders: load failed"

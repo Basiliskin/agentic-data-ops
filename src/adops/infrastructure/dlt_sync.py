@@ -1,4 +1,6 @@
-from collections.abc import Callable, Collection, Mapping, Sequence
+import logging
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from pathlib import Path
@@ -11,8 +13,13 @@ from dlt.common.normalizers.naming.snake_case import NamingConvention
 from dlt.destinations.sql_client import SqlClientBase
 from dlt.sources.sql_database import sql_table
 
-from adops.application.ports import MASK, ResolvedConnection, SyncResult
-from adops.application.run_pipeline import URL_PATTERN, SyncFailedError
+from adops.application.ports import (
+    ResolvedConnection,
+    SourceUnreachable,
+    SyncResult,
+    WarehouseUnreachable,
+)
+from adops.application.run_pipeline import SyncFailedError
 from adops.domain.checks import LoadFacts, SourceFacts, SyncMode
 from adops.domain.pipeline import (
     AcceptedValuesCheck,
@@ -25,6 +32,21 @@ from adops.domain.pipeline import (
 from adops.domain.schema_snapshot import DLT_COLUMN_PREFIX, normalize_column_type
 
 NAMING = NamingConvention()
+
+
+def _silence_dlt_logger() -> None:
+    # dlt logs load failures with tracebacks and row values to its own stderr handler
+    # (propagate=False). It reuses the first handler it finds, so a lone NullHandler keeps
+    # it quiet even after dlt resets the level on every pipeline.
+    dlt_logger = logging.getLogger("dlt")
+    for handler in dlt_logger.handlers[:]:
+        dlt_logger.removeHandler(handler)
+    dlt_logger.addHandler(logging.NullHandler())
+    dlt_logger.propagate = False
+    dlt_logger.setLevel(logging.CRITICAL + 1)
+
+
+_silence_dlt_logger()
 
 
 class UnknownConnectionKindError(ValueError):
@@ -108,8 +130,8 @@ class DltSync:
         facts: dict[str, SourceFacts] = {}
         try:
             for table in step.tables:
-                facts[table.name] = _guarded(
-                    step, table, (source,), _source_facts, engine, table.name
+                facts[table.name] = self._guarded(
+                    step, table, "preflight failed", _source_facts, engine, table
                 )
         finally:
             engine.dispose()
@@ -124,8 +146,8 @@ class DltSync:
         load_facts: dict[str, LoadFacts] = {}
         try:
             for table in step.tables:
-                rows_loaded[table.name], load_facts[table.name] = _guarded(
-                    step, table, (source, warehouse), _load_table, pipeline, engine, table
+                rows_loaded[table.name], load_facts[table.name] = self._guarded(
+                    step, table, "load failed", _load_table, pipeline, engine, table
                 )
         finally:
             engine.dispose()
@@ -139,7 +161,25 @@ class DltSync:
         columns: Collection[str],
     ) -> None:
         pipeline = self._warehouse_pipeline(step, warehouse)
-        _guarded(step, table, (warehouse,), _drop_not_null, pipeline, table, columns)
+        self._guarded(
+            step, table, "making columns nullable failed", _drop_not_null, pipeline, table, columns
+        )
+
+    def _guarded[T](
+        self, step: SyncStep, table: SyncTable, failed: str, call: Callable[..., T], *args: Any
+    ) -> T:
+        try:
+            return call(*args)
+        except (SourceUnreachable, WarehouseUnreachable):
+            raise
+        except UnsupportedFreshnessColumnError as error:
+            reason = error.reason
+        except Exception:
+            reason = failed
+        # Driver text can hold host:port, secrets and row values, so none of it is kept.
+        raise SyncFailedError(
+            f"Pipeline {self._pipeline}, Step {step.name}, table {table.name}: {reason}"
+        )
 
     def _warehouse_pipeline(self, step: SyncStep, warehouse: ResolvedConnection) -> dlt.Pipeline:
         return dlt.pipeline(
@@ -153,6 +193,7 @@ class DltSync:
 def _load_table(
     pipeline: dlt.Pipeline, engine: sa.Engine, table: SyncTable
 ) -> tuple[int, LoadFacts]:
+    _reach_source(engine, table)
     source_rows = None
     if table.mode is SyncMode.FULL_REFRESH:
         source_rows = _source_row_count(engine, table.name)
@@ -192,7 +233,32 @@ def _resource(engine: sa.Engine, table: SyncTable) -> Any:
     )
 
 
-def _source_facts(engine: sa.Engine, table: str) -> SourceFacts:
+def _reach_source(engine: sa.Engine, table: SyncTable) -> None:
+    try:
+        engine.connect().close()
+    except Exception:
+        pass
+    else:
+        return
+    raise SourceUnreachable(table.name)
+
+
+@contextmanager
+def warehouse_client(pipeline: dlt.Pipeline) -> Iterator[SqlClientBase[Any]]:
+    """Opens the Warehouse sql_client, turning a failed connect into WarehouseUnreachable."""
+    with ExitStack() as stack:
+        try:
+            client = stack.enter_context(pipeline.sql_client())
+        except Exception:
+            client = None
+        if client is None:
+            raise WarehouseUnreachable()
+        yield client
+
+
+def _source_facts(engine: sa.Engine, sync_table: SyncTable) -> SourceFacts:
+    _reach_source(engine, sync_table)
+    table = sync_table.name
     inspector = sa.inspect(engine)
     if not inspector.has_table(table):
         return SourceFacts(table_exists=False, columns=frozenset())
@@ -208,6 +274,7 @@ def _source_facts(engine: sa.Engine, table: str) -> SourceFacts:
             column["name"]: normalize_column_type(column["type"].compile(dialect=engine.dialect))
             for column in columns
         },
+        row_count=_source_row_count(engine, table),
     )
 
 
@@ -234,9 +301,9 @@ type _MeasuredCheck = NotNullCheck | AcceptedValuesCheck | FreshnessCheck
 
 class UnsupportedFreshnessColumnError(TypeError):
     def __init__(self, column: str, value: object) -> None:
-        super().__init__(
-            f"freshness column {column} holds {type(value).__name__} values, not timestamps"
-        )
+        kind = type(value).__name__
+        self.reason = f"freshness column {column} holds {kind} values, not timestamps"
+        super().__init__(self.reason)
 
 
 def _measure_warehouse(
@@ -244,7 +311,7 @@ def _measure_warehouse(
 ) -> _Measurement:
     name = NAMING.normalize_table_identifier(table.name)
     measured = [check for check in declared if isinstance(check, _MEASURED_CHECKS)]
-    with pipeline.sql_client() as client:
+    with warehouse_client(pipeline) as client:
         exists = client.execute_sql(
             "SELECT count(*) FROM information_schema.tables "
             "WHERE table_schema = %s AND table_name = %s",
@@ -324,7 +391,7 @@ def _as_datetime(column: str, value: object) -> datetime | None:
 def _drop_not_null(pipeline: dlt.Pipeline, table: SyncTable, columns: Collection[str]) -> None:
     name = NAMING.normalize_table_identifier(table.name)
     wanted = {NAMING.normalize_identifier(column) for column in columns}
-    with pipeline.sql_client() as client:
+    with warehouse_client(pipeline) as client:
         _drop_not_null_in_dataset(client, name, wanted)
         # Merge loads land in the staging copy first, which carries the same NOT NULL.
         with client.with_staging_dataset():
@@ -344,25 +411,3 @@ def _drop_not_null_in_dataset(client: SqlClientBase[Any], table: str, columns: s
             f"ALTER TABLE {qualified} ALTER COLUMN {client.escape_column_name(column)} "
             "DROP NOT NULL"
         )
-
-
-def _guarded[T](
-    step: SyncStep,
-    table: SyncTable,
-    connections: tuple[ResolvedConnection, ...],
-    call: Callable[..., T],
-    *args: Any,
-) -> T:
-    try:
-        return call(*args)
-    except Exception as error:
-        message = _redact(f"{type(error).__name__}: {error}", connections)
-    # Raised outside `except` so the original error, which may hold a secret, is not chained.
-    raise SyncFailedError(f"Step {step.name}, table {table.name}: {message}")
-
-
-def _redact(text: str, connections: tuple[ResolvedConnection, ...]) -> str:
-    for connection in connections:
-        if connection.password:
-            text = text.replace(connection.password, MASK)
-    return URL_PATTERN.sub(MASK, text)

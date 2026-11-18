@@ -9,7 +9,7 @@ from dlt.destinations.sql_client import SqlClientBase
 
 from adops.application.ports import ResolvedConnection
 from adops.domain.schema_snapshot import TableShape
-from adops.infrastructure.dlt_sync import warehouse_destination
+from adops.infrastructure.dlt_sync import warehouse_client, warehouse_destination
 
 SNAPSHOT_SCHEMA = "adops"
 SNAPSHOT_TABLE = "_adops_schema_snapshots"
@@ -70,7 +70,7 @@ class WarehouseSnapshotStore:
             destination=warehouse_destination(self._warehouse_kind, warehouse),
             dataset_name=SNAPSHOT_SCHEMA,
         )
-        with pipeline.sql_client() as client:
+        with warehouse_client(pipeline) as client:
             if not client.has_dataset():
                 client.create_dataset()
             qualified = client.make_qualified_table_name(SNAPSHOT_TABLE)

@@ -15,6 +15,7 @@ CursorValue = int | float | Decimal | str | date | datetime
 
 class CheckName(StrEnum):
     SOURCE_TABLES_EXIST = "source_tables_exist"
+    SOURCE_NOT_EMPTY = "source_not_empty"
     PRIMARY_KEY_UNIQUE = "primary_key_unique"
     PRIMARY_KEY_NOT_NULL = "primary_key_not_null"
     ROW_COUNT_MATCHES = "row_count_matches"
@@ -27,17 +28,19 @@ class SyncMode(StrEnum):
     INCREMENTAL = "incremental"
 
 
-PREFLIGHT_CHECKS = (CheckName.SOURCE_TABLES_EXIST,)
+PREFLIGHT_CHECKS = (CheckName.SOURCE_TABLES_EXIST, CheckName.SOURCE_NOT_EMPTY)
 
 CHECKS_BY_MODE: dict[SyncMode, tuple[CheckName, ...]] = {
     SyncMode.FULL_REFRESH: (
         CheckName.SOURCE_TABLES_EXIST,
+        CheckName.SOURCE_NOT_EMPTY,
         CheckName.PRIMARY_KEY_UNIQUE,
         CheckName.PRIMARY_KEY_NOT_NULL,
         CheckName.ROW_COUNT_MATCHES,
     ),
     SyncMode.INCREMENTAL: (
         CheckName.SOURCE_TABLES_EXIST,
+        CheckName.SOURCE_NOT_EMPTY,
         CheckName.PRIMARY_KEY_UNIQUE,
         CheckName.PRIMARY_KEY_NOT_NULL,
         CheckName.NO_ROW_LOSS,
@@ -67,6 +70,7 @@ class SourceFacts:
     table_exists: bool
     columns: frozenset[str]
     column_types: Mapping[str, str] = field(default_factory=dict)
+    row_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -86,7 +90,9 @@ class LoadFacts:
 
 
 def evaluate_preflight_checks(table: SyncTable, source_facts: SourceFacts) -> list[CheckResult]:
-    return _evaluate(table, PREFLIGHT_CHECKS, lambda check: _missing_in_source(table, source_facts))
+    return _evaluate(
+        table, PREFLIGHT_CHECKS, lambda check: _PREFLIGHT_RULES[check](table, source_facts)
+    )
 
 
 def evaluate_load_checks(table: SyncTable, load_facts: LoadFacts) -> list[CheckResult]:
@@ -144,6 +150,18 @@ def _missing_in_source(table: SyncTable, facts: SourceFacts) -> str | None:
     if missing:
         return "missing columns in the Source: " + ", ".join(missing)
     return None
+
+
+def _empty_in_source(table: SyncTable, facts: SourceFacts) -> str | None:
+    if facts.row_count == 0:
+        return f"table {table.name} is empty in the Source"
+    return None
+
+
+_PREFLIGHT_RULES: dict[CheckName, Callable[[SyncTable, SourceFacts], str | None]] = {
+    CheckName.SOURCE_TABLES_EXIST: _missing_in_source,
+    CheckName.SOURCE_NOT_EMPTY: _empty_in_source,
+}
 
 
 def _primary_key_unique(facts: LoadFacts) -> str | None:

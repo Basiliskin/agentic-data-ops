@@ -1,5 +1,9 @@
-import pytest
+from pathlib import Path
 
+import pytest
+import yaml
+
+import adops
 from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import (
     ensure_sources_defined,
@@ -7,6 +11,8 @@ from adops.domain.loader import (
     load_pipeline,
     load_project_settings,
 )
+from adops.domain.pipeline import Pipeline, SyncStep
+from adops.domain.transform import TransformStep
 
 SENTINEL = "LEAK-9f3a"
 
@@ -171,3 +177,127 @@ def test_malformed_declared_checks_are_reported_at_yaml_paths_without_values(che
 
     assert error.problems[0] == problem
     assert_secret_free(error)
+
+
+DEMO_PIPELINE = Path(adops.__file__).parent / "templates/demo/pipelines/shop_sync.yaml"
+
+MIXED = """
+name: shop
+steps:
+  - name: sync_shop
+    source: shop
+    tables: [{name: customers, mode: full_refresh, primary_key: id}]
+  - type: transform
+    name: model_shop
+    project: dbt
+"""
+
+
+def test_the_demo_pipeline_without_step_types_loads_as_sync_steps():
+    text = DEMO_PIPELINE.read_text()
+    sync, transform = load_pipeline(text).steps
+
+    assert "type" not in yaml.safe_load(text)["steps"][0]
+    assert isinstance(sync, SyncStep)
+    assert isinstance(transform, TransformStep)
+
+
+def test_sync_and_transform_steps_load_side_by_side():
+    text = MIXED.replace("  - name: sync_shop", "  - type: sync\n    name: sync_shop")
+
+    sync, transform = load_pipeline(text).steps
+
+    assert isinstance(sync, SyncStep)
+    assert sync.type == "sync"
+    assert transform == TransformStep(type="transform", name="model_shop", project="dbt")
+
+
+def test_steps_given_as_models_are_accepted():
+    sync = SyncStep(
+        name="sync_shop",
+        source="shop",
+        tables=[{"name": "t", "mode": "full_refresh", "primary_key": "id"}],
+    )
+    transform = TransformStep(type="transform", name="model_shop", project="dbt")
+
+    assert Pipeline(name="shop", steps=[sync, transform]).steps == [sync, transform]
+
+
+@pytest.mark.parametrize("step_type", [SENTINEL, "5", "[transform]"])
+def test_an_unknown_step_type_is_rejected_without_echoing_the_step(step_type):
+    text = MIXED.replace("type: transform", f"type: {step_type}").replace(
+        "project: dbt", f"project: {SENTINEL}-project"
+    )
+
+    error = raised_by(load_pipeline, text)
+
+    assert error.problems == ("steps[1]: type must be one of: sync, transform",)
+    assert_secret_free(error)
+
+
+def test_a_sync_and_a_transform_step_may_not_share_a_name():
+    text = MIXED.replace("name: model_shop", "name: sync_shop")
+
+    assert raised_by(load_pipeline, text).problems == (
+        "steps[0].name: another Step already has this name",
+        "steps[1].name: another Step already has this name",
+    )
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "problem"),
+    [
+        ("    project: dbt\n", "", "steps[1].project: Field required"),
+        ("name: model_shop", "name: Model-Shop", "steps[1].name: String should match pattern"),
+        ("project: dbt", "project: ''", "steps[1].project: String should have at least 1"),
+        (
+            "mode: full_refresh, primary_key: id",
+            f"mode: {SENTINEL}, primary_key: id",
+            "steps[0].tables[0].mode: Input should be 'full_refresh' or 'incremental'",
+        ),
+    ],
+)
+def test_step_errors_are_reported_at_yaml_paths_without_the_step_type(old, new, problem):
+    error = raised_by(load_pipeline, MIXED.replace(old, new))
+
+    assert error.problems[0].startswith(problem)
+    assert_secret_free(error)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "problem"),
+    [
+        (
+            "    source: shop\n",
+            "    source: shop\n    sync: x\n",
+            "steps[0].sync: Extra inputs are not permitted",
+        ),
+        (
+            "primary_key: id}",
+            "primary_key: id, transform: x}",
+            "steps[0].tables[0].transform: Extra inputs are not permitted",
+        ),
+        (
+            "    project: dbt\n",
+            "    project: dbt\n    transform: x\n",
+            "steps[1].transform: Extra inputs are not permitted",
+        ),
+    ],
+)
+def test_user_keys_named_like_a_step_type_stay_in_the_path(old, new, problem):
+    assert raised_by(load_pipeline, MIXED.replace(old, new)).problems == (problem,)
+
+
+def test_transform_steps_need_no_source_in_the_environment():
+    environment = load_project_settings(SETTINGS).environments["dev"]
+
+    assert ensure_sources_defined(load_pipeline(MIXED), environment) is None
+
+
+def test_a_missing_source_is_still_found_next_to_a_transform_step():
+    environment = load_project_settings(SETTINGS).environments["dev"]
+    pipeline = load_pipeline(MIXED.replace("source: shop", "source: crm"))
+
+    error = raised_by(lambda p: ensure_sources_defined(p, environment), pipeline)
+
+    assert error.problems == ("steps[0].source: no Source with this name in the Environment",)

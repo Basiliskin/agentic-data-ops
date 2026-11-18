@@ -27,7 +27,9 @@ jobs:
           uv build --wheel
           listing=$(unzip -l dist/*.whl)
           for file in .env.example gitignore adops.yaml dagster.yaml docker-compose.yml \
-                      pipelines/shop_sync.yaml seed/01_shop.sql; do
+                      pipelines/shop_sync.yaml seed/01_shop.sql dbt/dbt_project.yml \
+                      dbt/models/sources.yml dbt/models/schema.yml dbt/models/customers.sql \
+                      dbt/models/orders.sql dbt/models/customer_orders.sql; do
             grep -qF "adops/templates/demo/$file" <<< "$listing" || { echo "missing $file"; exit 1; }
           done
           grep -qF "adops/templates/plain/adops.yaml" <<< "$listing" || { echo "missing plain/adops.yaml"; exit 1; }

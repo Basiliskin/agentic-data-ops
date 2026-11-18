@@ -19,5 +19,6 @@
 - 2026-11-18 | horizon 2 | Will a dbt build plus the failure scenarios fit the 20-minute Docker E2E job?
 - 2026-11-18 | horizon 2 | Do dlt destination connection failures surface a stable exception type to classify as 'Warehouse unreachable'?
 - 2026-11-18 | horizon 2 | Do dlt duckdb type mapping and identifier normalization differ enough from Postgres to break sources.yml, models or declared-Check measurements?
-- 2026-11-18 | horizon 2 | Which horizon redacts dlt load-failure output (row values, tracebacks) so a failed load never prints Source data?
+- 2026-11-18 | horizon 2 | Which horizon redacts dlt load-failure output (row values, tracebacks) so a failed load never prints Source data? — resolved by decision 2026-11-18
 - 2026-11-18 | horizon 2 | When a Source column drops NOT NULL, the Warehouse column keeps it and the next load fails with a raw constraint error (row values on Postgres) — relax it automatically, or report it as a Breaking Change?
+- 2026-11-18 | horizon 3 | DbtTransform reports a dbt source test under the source name, not its table; fix _tested_model (e.g. from test_metadata model kwarg) before users write source tests

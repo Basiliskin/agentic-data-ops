@@ -14,3 +14,6 @@ steps:
         cursor: updated_at
         checks:
           - {type: min_rows, count: 1}
+  - name: transform_shop
+    type: transform
+    project: dbt

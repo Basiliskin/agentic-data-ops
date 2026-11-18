@@ -1,4 +1,5 @@
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,13 +16,17 @@ from adops.application.ports import (
     SchemaSnapshotStore,
     Sync,
     SyncResult,
+    Transform,
+    TransformResult,
 )
 from adops.application.run_pipeline import InOrderOrchestrator
 from adops.domain.checks import LoadFacts, SourceFacts
 from adops.domain.pipeline import SyncStep
 from adops.domain.schema_snapshot import TableShape
+from adops.domain.transform import DbtTestFacts, DbtTestStatus, TransformStep
 from adops.infrastructure.clock import SystemClock
 from adops.infrastructure.dagster_orchestrator import DagsterOrchestrator, JobCompileError
+from adops.infrastructure.dbt_transform import DbtTransform
 from adops.infrastructure.dlt_sync import DltSync
 from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
 from adops.interface import cli, run_command
@@ -53,6 +58,12 @@ steps:
         mode: incremental
         primary_key: id
         cursor: updated_at
+"""
+
+TRANSFORM_STEP = """
+  - name: transform_shop
+    type: transform
+    project: dbt
 """
 
 COLUMNS = {"customers": frozenset({"id"}), "orders": frozenset({"id", "updated_at"})}
@@ -149,6 +160,28 @@ def orchestrator(monkeypatch):
     return fake
 
 
+@dataclass
+class FakeTransform:
+    tests: tuple[DbtTestFacts, ...] = ()
+    warehouses: list[ResolvedConnection] = field(default_factory=list)
+
+    def run(self, step: TransformStep, warehouse: ResolvedConnection) -> TransformResult:
+        self.warehouses.append(warehouse)
+        return TransformResult(tests=self.tests, crashed=False, failed_models=())
+
+
+def dbt_test(name: str, table: str, status: DbtTestStatus, failures: int) -> DbtTestFacts:
+    return DbtTestFacts(f"test.shop.{name}.0", name, table, status, failures)
+
+
+@pytest.fixture
+def transform(project, monkeypatch):
+    (project / "pipelines" / "shop_sync.yaml").write_text(PIPELINE + TRANSFORM_STEP)
+    fake = FakeTransform()
+    monkeypatch.setattr(run_command, "build_transform", lambda project_dir: fake)
+    return fake
+
+
 def invoke(project, *args):
     return runner.invoke(cli.app, ["run", "shop_sync", "--project", str(project), *args])
 
@@ -182,6 +215,43 @@ def test_missing_source_table_fails_its_check_and_names_the_table(project, sync)
     assert "step sync_shop: check_failed" in result.output
     assert "  check customers source_tables_exist: fail" in result.output
     assert "customers: source_tables_exist failed — table not found" in result.output
+
+
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_dbt_checks_print_in_the_sync_check_line_format(project, transform):
+    transform.tests = (
+        dbt_test("unique_customers_id", "customers", DbtTestStatus.PASS, 0),
+        dbt_test("relationships_orders_customer_id", "orders", DbtTestStatus.FAIL, 1),
+    )
+
+    result = invoke(project)
+
+    assert_clean_failure(result)
+    lines = result.output.splitlines()
+    assert "step sync_shop: passed — customers 20 rows, orders 2 rows" in lines
+    assert "step transform_shop: check_failed" in lines
+    assert "  check customers unique_customers_id: pass" in lines
+    assert "  check orders relationships_orders_customer_id: fail" in lines
+    check_lines = [line for line in lines if line.startswith("  check ")]
+    assert all(re.match(r"^  check \S+ \S+: (pass|fail)$", line) for line in check_lines)
+    assert "orders: dbt test relationships_orders_customer_id failed — 1 failing rows" in (
+        result.output
+    )
+    assert [w.password for w in transform.warehouses] == [SENTINEL]
+
+
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_passing_transform_step_follows_the_sync_step(project, transform):
+    transform.tests = (dbt_test("not_null_customers_id", "customers", DbtTestStatus.PASS, 0),)
+
+    result = invoke(project)
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert lines.index("step transform_shop: passed") > lines.index(
+        "step sync_shop: passed — customers 20 rows, orders 2 rows"
+    )
+    assert "  check customers not_null_customers_id: pass" in lines
 
 
 @pytest.mark.usefixtures("orchestrator")
@@ -338,6 +408,29 @@ def test_run_passes_the_built_clock_to_the_pipeline(project, monkeypatch):
     assert received == [clock] and received[0] is clock
 
 
+@pytest.mark.usefixtures("sync", "orchestrator", "snapshot_store")
+def test_run_passes_the_transform_built_for_the_project_to_the_pipeline(project, monkeypatch):
+    built: list[FakeTransform] = []
+    built_for: list[Path] = []
+    received: list[object] = []
+
+    def build(project_dir: Path) -> FakeTransform:
+        built_for.append(project_dir)
+        built.append(FakeTransform())
+        return built[-1]
+
+    def capture(*args: object) -> RunResult:
+        received.append(args[8])
+        return RunResult("shop_sync", "dev", ())
+
+    monkeypatch.setattr(run_command, "build_transform", build)
+    monkeypatch.setattr(run_command, "run_pipeline", capture)
+
+    assert invoke(project).exit_code == 0
+    assert received == built and received[0] is built[0]
+    assert built_for == [project.resolve()]
+
+
 def test_first_run_records_a_snapshot_for_every_table(project, sync, orchestrator, snapshot_store):
     assert invoke(project).exit_code == 0
 
@@ -353,7 +446,11 @@ def test_real_adapters_are_built_for_the_project(tmp_path, monkeypatch):
     orchestrator = run_command.build_orchestrator()
     store = run_command.build_snapshot_store(tmp_path)
     clock = run_command.build_clock()
+    transform = run_command.build_transform(tmp_path)
 
+    assert isinstance(transform, DbtTransform)
+    assert isinstance(transform, Transform)
+    assert transform.project_root == tmp_path
     assert isinstance(sync, DltSync)
     assert isinstance(sync, Sync)
     assert isinstance(orchestrator, DagsterOrchestrator)

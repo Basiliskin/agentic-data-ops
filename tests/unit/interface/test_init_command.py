@@ -6,6 +6,8 @@ from dotenv import dotenv_values
 from typer.testing import CliRunner
 
 from adops.domain.loader import ensure_sources_defined, load_pipeline, load_project_settings
+from adops.domain.pipeline import SyncStep
+from adops.domain.transform import TransformStep
 from adops.interface import cli
 
 runner = CliRunner()
@@ -15,6 +17,12 @@ DEMO_FILES = {
     ".gitignore",
     "adops.yaml",
     "dagster.yaml",
+    "dbt/dbt_project.yml",
+    "dbt/models/customer_orders.sql",
+    "dbt/models/customers.sql",
+    "dbt/models/orders.sql",
+    "dbt/models/schema.yml",
+    "dbt/models/sources.yml",
     "docker-compose.yml",
     "pipelines/shop_sync.yaml",
     "seed/01_shop.sql",
@@ -76,7 +84,38 @@ def test_demo_pipeline_and_settings_pass_the_domain_loaders(demo):
     pipeline = load_pipeline((demo / "pipelines" / "shop_sync.yaml").read_text())
 
     ensure_sources_defined(pipeline, settings.environments["dev"])
-    assert [table.name for table in pipeline.steps[0].tables] == ["customers", "orders"]
+    sync, transform = pipeline.steps
+    assert isinstance(sync, SyncStep)
+    assert [table.name for table in sync.tables] == ["customers", "orders"]
+    assert transform == TransformStep(type="transform", name="transform_shop", project="dbt")
+    assert (demo / transform.project / "dbt_project.yml").is_file()
+
+
+def test_demo_dbt_project_reads_raw_shop_and_ships_no_profile(demo):
+    sources = yaml.safe_load((demo / "dbt" / "models" / "sources.yml").read_text())
+    [source] = sources["sources"]
+
+    assert (source["name"], source["schema"]) == ("raw_shop", "raw_shop")
+    assert [table["name"] for table in source["tables"]] == ["customers", "orders"]
+    assert not (demo / "dbt" / "profiles.yml").exists()
+    ignored = (demo / ".gitignore").read_text().splitlines()
+    assert {"dbt/target/", "dbt/logs/"} <= set(ignored)
+
+
+def test_demo_dbt_tests_check_customer_ids_and_order_customers_only(demo):
+    schema = yaml.safe_load((demo / "dbt" / "models" / "schema.yml").read_text())
+    tests = {
+        (model["name"], column["name"]): column["data_tests"]
+        for model in schema["models"]
+        for column in model.get("columns", [])
+    }
+
+    assert tests == {
+        ("customers", "id"): ["unique", "not_null"],
+        ("orders", "customer_id"): [
+            {"relationships": {"arguments": {"to": "ref('customers')", "field": "id"}}}
+        ],
+    }
 
 
 def test_every_variable_the_demo_reads_is_in_env_example(demo):

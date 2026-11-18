@@ -7,12 +7,20 @@ from typing import Annotated, NoReturn
 import typer
 from dotenv import dotenv_values
 
-from adops.application.ports import Clock, Orchestrator, RunResult, SchemaSnapshotStore, Sync
+from adops.application.ports import (
+    Clock,
+    Orchestrator,
+    RunResult,
+    SchemaSnapshotStore,
+    Sync,
+    Transform,
+)
 from adops.application.run_pipeline import run_pipeline
 from adops.application.secrets import MissingSecretError
 from adops.domain.errors import PipelineValidationError
 from adops.infrastructure.clock import SystemClock
 from adops.infrastructure.dagster_orchestrator import DagsterOrchestrator, JobCompileError
+from adops.infrastructure.dbt_transform import DbtTransform
 from adops.infrastructure.dlt_sync import DltSync
 from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
 
@@ -42,12 +50,16 @@ def build_orchestrator() -> Orchestrator:
     return DagsterOrchestrator()
 
 
+def build_transform(project: Path) -> Transform:
+    return DbtTransform(project)
+
+
 def run(
     pipeline: Annotated[str, typer.Argument(help="Pipeline name (pipelines/<name>.yaml).")],
     env: Annotated[str, typer.Option("--env", help="Environment from adops.yaml.")] = "dev",
     project: Annotated[Path, typer.Option(help="Project folder.")] = Path("."),
 ) -> None:
-    """Run a Pipeline: sync its tables into the Warehouse and run its Checks.
+    """Run a Pipeline: sync its tables into the Warehouse, run its dbt Transforms and its Checks.
 
     Variables in the Project's .env are used unless the same name is set in your shell.
     """
@@ -83,6 +95,7 @@ def run_project(project: Path, pipeline: str, environment: str) -> RunResult:
             build_snapshot_store(project),
             build_clock(),
             build_orchestrator(),
+            build_transform(project),
         )
 
 

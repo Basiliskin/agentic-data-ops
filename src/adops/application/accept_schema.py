@@ -69,7 +69,11 @@ def _dropped_columns(previous: TableShape | None, current: TableShape) -> tuple[
 
 
 def _only_step_with(pipeline: Pipeline, table: str) -> SyncStep:
-    steps = [step for step in pipeline.steps if any(t.name == table for t in step.tables)]
+    steps = [
+        step
+        for step in pipeline.steps
+        if isinstance(step, SyncStep) and any(t.name == table for t in step.tables)
+    ]
     if not steps:
         raise PipelineValidationError([f"{table}: no Step in Pipeline {pipeline.name} copies it"])
     if len(steps) > 1:

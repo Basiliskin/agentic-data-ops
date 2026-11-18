@@ -2,10 +2,11 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from adops.application.ports import ResolvedConnection, SyncResult
+from adops.application.ports import ResolvedConnection, SyncResult, TransformResult
 from adops.domain.checks import LoadFacts, SourceFacts
 from adops.domain.pipeline import SyncStep, SyncTable
 from adops.domain.schema_snapshot import TableShape
+from adops.domain.transform import DbtTestFacts, DbtTestStatus, TransformStep
 
 SOURCE_PASSWORD = "s3cr3t-source-sentinel"
 WAREHOUSE_PASSWORD = "s3cr3t-warehouse-sentinel"
@@ -202,3 +203,26 @@ class FixedClock:
     def now(self) -> datetime:
         self.reads += 1
         return self.moment
+
+
+def dbt_test(
+    name: str, table: str = "customer_orders", status: str = "pass", failures: int | None = 0
+) -> DbtTestFacts:
+    return DbtTestFacts(f"test.demo.{name}", name, table, DbtTestStatus(status), failures)
+
+
+@dataclass
+class FakeTransform:
+    """A Transform that reports a fixed result, or raises, and records what it was given."""
+
+    result: TransformResult = field(
+        default_factory=lambda: TransformResult(tests=(), crashed=False, failed_models=())
+    )
+    fail_with: Exception | None = None
+    calls: list[tuple[str, ResolvedConnection]] = field(default_factory=list)
+
+    def run(self, step: TransformStep, warehouse: ResolvedConnection) -> TransformResult:
+        self.calls.append((step.name, warehouse))
+        if self.fail_with is not None:
+            raise self.fail_with
+        return self.result
