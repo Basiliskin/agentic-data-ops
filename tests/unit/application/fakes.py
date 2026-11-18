@@ -1,9 +1,11 @@
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from adops.application.ports import ResolvedConnection, SyncResult
 from adops.domain.checks import LoadFacts, SourceFacts
-from adops.domain.pipeline import SyncStep
+from adops.domain.pipeline import SyncStep, SyncTable
+from adops.domain.schema_snapshot import TableShape
 
 SOURCE_PASSWORD = "s3cr3t-source-sentinel"
 WAREHOUSE_PASSWORD = "s3cr3t-warehouse-sentinel"
@@ -76,12 +78,18 @@ steps:
         primary_key: sku
 """
 
-TABLE_COLUMNS = {
-    "customers": frozenset({"id", "email"}),
-    "orders": frozenset({"id", "updated_at"}),
-    "order_items": frozenset({"id", "order_id"}),
-    "products": frozenset({"sku"}),
+TABLE_TYPES = {
+    "customers": {"id": "integer", "email": "character varying"},
+    "orders": {"id": "integer", "updated_at": "timestamp with time zone"},
+    "order_items": {"id": "integer", "order_id": "integer"},
+    "products": {"sku": "text"},
 }
+
+TABLE_COLUMNS = {table: frozenset(types) for table, types in TABLE_TYPES.items()}
+
+
+def facts_with_types(column_types: Mapping[str, str]) -> SourceFacts:
+    return SourceFacts(True, frozenset(column_types), column_types)
 
 
 def healthy_load(rows: int = 3, **overrides: object) -> LoadFacts:
@@ -107,6 +115,7 @@ class RecordingSync:
     fail_sync_of: dict[str, Exception] = field(default_factory=dict)
     calls: list[tuple[str, str]] = field(default_factory=list)
     connections: list[ResolvedConnection] = field(default_factory=list)
+    nullable: list[tuple[str, str, tuple[str, ...]]] = field(default_factory=list)
 
     def preflight(self, step: SyncStep, source: ResolvedConnection) -> Mapping[str, SourceFacts]:
         self.calls.append(("preflight", step.name))
@@ -114,9 +123,7 @@ class RecordingSync:
         if step.name in self.fail_preflight_of:
             raise self.fail_preflight_of[step.name]
         return {
-            table.name: self.source_facts.get(
-                table.name, SourceFacts(table_exists=True, columns=TABLE_COLUMNS[table.name])
-            )
+            table.name: self.source_facts.get(table.name, facts_with_types(TABLE_TYPES[table.name]))
             for table in step.tables
         }
 
@@ -136,3 +143,62 @@ class RecordingSync:
             rows_loaded={name: fact.warehouse_rows_after for name, fact in facts.items()},
             load_facts=facts,
         )
+
+    def make_columns_nullable(
+        self,
+        step: SyncStep,
+        table: SyncTable,
+        warehouse: ResolvedConnection,
+        columns: Collection[str],
+    ) -> None:
+        self.connections.append(warehouse)
+        self.nullable.append((step.name, table.name, tuple(columns)))
+
+
+SnapshotKey = tuple[str, str, str]
+
+
+@dataclass
+class FakeSnapshotStore:
+    """Holds TableShapes in memory, keyed by (pipeline, source, table)."""
+
+    shapes: dict[SnapshotKey, TableShape] = field(default_factory=dict)
+    fail_load: Exception | None = None
+    fail_save: Exception | None = None
+    saves: list[SnapshotKey] = field(default_factory=list)
+    warehouses: list[ResolvedConnection] = field(default_factory=list)
+
+    def load(
+        self, warehouse: ResolvedConnection, pipeline: str, source: str, table: str
+    ) -> TableShape | None:
+        self.warehouses.append(warehouse)
+        if self.fail_load is not None:
+            raise self.fail_load
+        return self.shapes.get((pipeline, source, table))
+
+    def save(
+        self,
+        warehouse: ResolvedConnection,
+        pipeline: str,
+        source: str,
+        table: str,
+        shape: TableShape,
+    ) -> None:
+        self.warehouses.append(warehouse)
+        if self.fail_save is not None:
+            raise self.fail_save
+        self.saves.append((pipeline, source, table))
+        self.shapes[(pipeline, source, table)] = shape
+
+
+NOW = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)
+
+
+@dataclass
+class FixedClock:
+    moment: datetime = NOW
+    reads: int = 0
+
+    def now(self) -> datetime:
+        self.reads += 1
+        return self.moment

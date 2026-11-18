@@ -3,6 +3,7 @@ from typing import Annotated
 import typer
 
 from adops import __version__
+from adops.interface.accept_schema_command import accept_schema
 from adops.interface.init_command import init
 from adops.interface.run_command import run
 from adops.interface.validate_command import validate
@@ -11,6 +12,7 @@ app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False)
 app.command()(init)
 app.command()(run)
 app.command()(validate)
+app.command()(accept_schema)
 
 
 def _print_version(value: bool) -> None:

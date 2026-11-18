@@ -6,7 +6,11 @@ steps:
       - name: customers
         mode: full_refresh
         primary_key: id
+        checks:
+          - {type: not_null, column: email}
       - name: orders
         mode: incremental
         primary_key: id
         cursor: updated_at
+        checks:
+          - {type: min_rows, count: 1}

@@ -1,6 +1,6 @@
-import re
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 
@@ -8,14 +8,22 @@ import dlt
 import sqlalchemy as sa
 from dlt.common.destination import Destination
 from dlt.common.normalizers.naming.snake_case import NamingConvention
+from dlt.destinations.sql_client import SqlClientBase
 from dlt.sources.sql_database import sql_table
 
 from adops.application.ports import MASK, ResolvedConnection, SyncResult
-from adops.application.run_pipeline import SyncFailedError
+from adops.application.run_pipeline import URL_PATTERN, SyncFailedError
 from adops.domain.checks import LoadFacts, SourceFacts, SyncMode
-from adops.domain.pipeline import SyncStep, SyncTable
+from adops.domain.pipeline import (
+    AcceptedValuesCheck,
+    DeclaredCheck,
+    FreshnessCheck,
+    NotNullCheck,
+    SyncStep,
+    SyncTable,
+)
+from adops.domain.schema_snapshot import DLT_COLUMN_PREFIX, normalize_column_type
 
-URL_PATTERN = re.compile(r"[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE)
 NAMING = NamingConvention()
 
 
@@ -111,12 +119,7 @@ class DltSync:
         self, step: SyncStep, source: ResolvedConnection, warehouse: ResolvedConnection
     ) -> SyncResult:
         engine = source_engine(self._source_kind, source)
-        pipeline = dlt.pipeline(
-            pipeline_name=f"adops_{self._pipeline}_{step.name}",
-            pipelines_dir=str(self._pipelines_dir),
-            destination=warehouse_destination(self._warehouse_kind, warehouse),
-            dataset_name=f"raw_{step.source}",
-        )
+        pipeline = self._warehouse_pipeline(step, warehouse)
         rows_loaded: dict[str, int] = {}
         load_facts: dict[str, LoadFacts] = {}
         try:
@@ -128,6 +131,24 @@ class DltSync:
             engine.dispose()
         return SyncResult(rows_loaded, load_facts)
 
+    def make_columns_nullable(
+        self,
+        step: SyncStep,
+        table: SyncTable,
+        warehouse: ResolvedConnection,
+        columns: Collection[str],
+    ) -> None:
+        pipeline = self._warehouse_pipeline(step, warehouse)
+        _guarded(step, table, (warehouse,), _drop_not_null, pipeline, table, columns)
+
+    def _warehouse_pipeline(self, step: SyncStep, warehouse: ResolvedConnection) -> dlt.Pipeline:
+        return dlt.pipeline(
+            pipeline_name=f"adops_{self._pipeline}_{step.name}",
+            pipelines_dir=str(self._pipelines_dir),
+            destination=warehouse_destination(self._warehouse_kind, warehouse),
+            dataset_name=f"raw_{step.source}",
+        )
+
 
 def _load_table(
     pipeline: dlt.Pipeline, engine: sa.Engine, table: SyncTable
@@ -138,7 +159,7 @@ def _load_table(
     before = _measure_warehouse(pipeline, table)
     pipeline.run(_resource(engine, table))
     row_counts = pipeline.last_trace.last_normalize_info.row_counts
-    after = _measure_warehouse(pipeline, table)
+    after = _measure_warehouse(pipeline, table, table.checks)
     facts = LoadFacts(
         warehouse_rows_before=before.rows,
         warehouse_rows_after=after.rows,
@@ -147,6 +168,9 @@ def _load_table(
         source_rows=source_rows,
         cursor_max_before=before.cursor_max,
         cursor_max_after=after.cursor_max,
+        null_counts=after.null_counts,
+        unexpected_value_counts=after.unexpected_value_counts,
+        newest_values=after.newest_values,
     )
     return row_counts.get(NAMING.normalize_table_identifier(table.name), 0), facts
 
@@ -172,9 +196,18 @@ def _source_facts(engine: sa.Engine, table: str) -> SourceFacts:
     inspector = sa.inspect(engine)
     if not inspector.has_table(table):
         return SourceFacts(table_exists=False, columns=frozenset())
+    columns = [
+        column
+        for column in inspector.get_columns(table)
+        if not column["name"].startswith(DLT_COLUMN_PREFIX)
+    ]
     return SourceFacts(
         table_exists=True,
-        columns=frozenset(column["name"] for column in inspector.get_columns(table)),
+        columns=frozenset(column["name"] for column in columns),
+        column_types={
+            column["name"]: normalize_column_type(column["type"].compile(dialect=engine.dialect))
+            for column in columns
+        },
     )
 
 
@@ -190,13 +223,27 @@ class _Measurement:
     duplicate_keys: int
     null_keys: int
     cursor_max: Any
+    null_counts: dict[str, int] = field(default_factory=dict)
+    unexpected_value_counts: dict[str, int] = field(default_factory=dict)
+    newest_values: dict[str, datetime | None] = field(default_factory=dict)
 
 
-NOT_LOADED_YET = _Measurement(rows=0, duplicate_keys=0, null_keys=0, cursor_max=None)
+_MEASURED_CHECKS = (NotNullCheck, AcceptedValuesCheck, FreshnessCheck)
+type _MeasuredCheck = NotNullCheck | AcceptedValuesCheck | FreshnessCheck
 
 
-def _measure_warehouse(pipeline: dlt.Pipeline, table: SyncTable) -> _Measurement:
+class UnsupportedFreshnessColumnError(TypeError):
+    def __init__(self, column: str, value: object) -> None:
+        super().__init__(
+            f"freshness column {column} holds {type(value).__name__} values, not timestamps"
+        )
+
+
+def _measure_warehouse(
+    pipeline: dlt.Pipeline, table: SyncTable, declared: Sequence[DeclaredCheck] = ()
+) -> _Measurement:
     name = NAMING.normalize_table_identifier(table.name)
+    measured = [check for check in declared if isinstance(check, _MEASURED_CHECKS)]
     with pipeline.sql_client() as client:
         exists = client.execute_sql(
             "SELECT count(*) FROM information_schema.tables "
@@ -205,16 +252,98 @@ def _measure_warehouse(pipeline: dlt.Pipeline, table: SyncTable) -> _Measurement
             name,
         )
         if not exists[0][0]:
-            return NOT_LOADED_YET
-        key = client.escape_column_name(NAMING.normalize_identifier(table.primary_key))
+            empty_table = [None if isinstance(c, FreshnessCheck) else 0 for c in measured]
+            return _Measurement(0, 0, 0, None, *_declared_facts(measured, empty_table))
+        key = _column(client, table.primary_key)
         cursor = "NULL"
         if table.cursor is not None:
-            cursor = f"max({client.escape_column_name(NAMING.normalize_identifier(table.cursor))})"
-        rows, keys, distinct_keys, cursor_max = client.execute_sql(
-            f"SELECT count(*), count({key}), count(DISTINCT {key}), {cursor} "
-            f"FROM {client.make_qualified_table_name(name)}"
+            cursor = f"max({_column(client, table.cursor)})"
+        expressions = [f"count(*), count({key}), count(DISTINCT {key}), {cursor}"]
+        parameters: list[str] = []
+        for check in measured:
+            expression, values = _declared_expression(client, check)
+            expressions.append(expression)
+            parameters.extend(values)
+        query = f"SELECT {', '.join(expressions)} FROM {client.make_qualified_table_name(name)}"
+        rows, keys, distinct_keys, cursor_max, *declared_values = client.execute_sql(
+            query, *parameters
         )[0]
-    return _Measurement(rows, keys - distinct_keys, rows - keys, cursor_max)
+    return _Measurement(
+        rows,
+        keys - distinct_keys,
+        rows - keys,
+        cursor_max,
+        *_declared_facts(measured, declared_values),
+    )
+
+
+def _column(client: SqlClientBase[Any], column: str) -> str:
+    return client.escape_column_name(NAMING.normalize_identifier(column))
+
+
+def _declared_expression(
+    client: SqlClientBase[Any], check: _MeasuredCheck
+) -> tuple[str, list[str]]:
+    column = _column(client, check.column)
+    if isinstance(check, NotNullCheck):
+        return f"count(*) - count({column})", []
+    if isinstance(check, AcceptedValuesCheck):
+        # NULL is not "outside the list": CAST keeps it NULL and NOT IN yields NULL, so the
+        # CASE skips it. A missing value is not_null's job, as in dbt's accepted_values.
+        placeholders = ", ".join(["%s"] * len(check.values))
+        expression = f"count(CASE WHEN CAST({column} AS TEXT) NOT IN ({placeholders}) THEN 1 END)"
+        return expression, [str(value) for value in check.values]
+    return f"max({column})", []
+
+
+def _declared_facts(
+    checks: Sequence[_MeasuredCheck],
+    values: Sequence[Any],
+) -> tuple[dict[str, int], dict[str, int], dict[str, datetime | None]]:
+    null_counts: dict[str, int] = {}
+    unexpected_value_counts: dict[str, int] = {}
+    newest_values: dict[str, datetime | None] = {}
+    for check, value in zip(checks, values, strict=True):
+        if isinstance(check, NotNullCheck):
+            null_counts[check.column] = value
+        elif isinstance(check, AcceptedValuesCheck):
+            unexpected_value_counts[check.column] = value
+        else:
+            newest_values[check.column] = _as_datetime(check.column, value)
+    return null_counts, unexpected_value_counts, newest_values
+
+
+def _as_datetime(column: str, value: object) -> datetime | None:
+    if value is None or isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, time())
+    raise UnsupportedFreshnessColumnError(column, value)
+
+
+def _drop_not_null(pipeline: dlt.Pipeline, table: SyncTable, columns: Collection[str]) -> None:
+    name = NAMING.normalize_table_identifier(table.name)
+    wanted = {NAMING.normalize_identifier(column) for column in columns}
+    with pipeline.sql_client() as client:
+        _drop_not_null_in_dataset(client, name, wanted)
+        # Merge loads land in the staging copy first, which carries the same NOT NULL.
+        with client.with_staging_dataset():
+            _drop_not_null_in_dataset(client, name, wanted)
+
+
+def _drop_not_null_in_dataset(client: SqlClientBase[Any], table: str, columns: set[str]) -> None:
+    not_null = client.execute_sql(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = %s AND table_name = %s AND is_nullable = 'NO'",
+        client.dataset_name,
+        table,
+    )
+    qualified = client.make_qualified_table_name(table)
+    for column in sorted(columns & {row[0] for row in not_null}):
+        client.execute_sql(
+            f"ALTER TABLE {qualified} ALTER COLUMN {client.escape_column_name(column)} "
+            "DROP NOT NULL"
+        )
 
 
 def _guarded[T](

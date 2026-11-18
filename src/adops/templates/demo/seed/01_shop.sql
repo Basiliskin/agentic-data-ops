@@ -1,7 +1,7 @@
 -- Synthetic demo data. Every value is computed from the row number, so each fresh start is identical.
 CREATE TABLE customers (
     id integer PRIMARY KEY,
-    email text NOT NULL,
+    email text,
     updated_at timestamptz NOT NULL
 );
 

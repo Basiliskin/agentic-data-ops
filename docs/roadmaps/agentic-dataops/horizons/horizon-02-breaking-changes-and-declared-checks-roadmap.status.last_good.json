@@ -1,0 +1,389 @@
+{
+  "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-02-breaking-changes-and-declared-checks-roadmap.json",
+  "roadmapTask": "Horizon 2: finish the Check system — Breaking Change detection (schema snapshot vs last successful run, halting the Step and everything after it) and user-declared per-table Checks in YAML (not_null, accepted_values, min_rows, freshness) — then add a dbt Transform Step to the demo with dbt tests reported as Checks, proven in the Docker E2E under the 100% coverage gate",
+  "createdAt": "2026-11-18T15:24:18Z",
+  "updatedAt": "2026-11-18T16:12:24Z",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "halt-sync-step-on-breaking-change",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-18T15:24:18Z",
+      "baseRef": "d25a4d6a5f3b7f57917f4eff2b707e07d87b70b2",
+      "baseDirty": true,
+      "notes": "dirty at start: docs/roadmaps/agentic-dataops/{blockers,decisions,discoveries,state,next-horizon-brief}.md, horizon-02 roadmap .json/.md | changed: src/adops/domain/schema_snapshot.py (new), src/adops/domain/checks.py, src/adops/application/ports.py, src/adops/application/run_pipeline.py, src/adops/infrastructure/dlt_sync.py, tests/unit/domain/test_schema_snapshot.py (new), tests/unit/domain/test_checks.py, tests/unit/application/fakes.py, tests/unit/application/test_run_pipeline.py, GLOSSARY.md. Pure find_breaking_changes/normalize_column_type rule; PlannedStep checks every table against SchemaSnapshotStore after preflight, raises BreakingChangeError before sync, saves shapes only after all load Checks pass; store errors guarded+redacted (URL masking moved to application); run_pipeline snapshot_store defaults None (detection off) until next phase.",
+      "unplannedFiles": [],
+      "completedAt": "2026-11-18T15:28:59Z",
+      "gradeResult": {
+        "phaseId": "halt-sync-step-on-breaking-change",
+        "dimensionScores": [
+          {
+            "dimensionId": "breaking-change-rule-correctness",
+            "score": 9,
+            "pass": true,
+            "evidence": "all alias pairs, precision retype, whitespace/case, rename, _dlt_ and sorted-order tests present and passing"
+          },
+          {
+            "dimensionId": "halt-before-any-load",
+            "score": 9,
+            "pass": true,
+            "evidence": "BreakingChangeError(StepError); detection before sync; zero sync calls + later Steps SKIPPED; both broken tables named"
+          },
+          {
+            "dimensionId": "snapshot-save-timing",
+            "score": 9,
+            "pass": true,
+            "evidence": "save after final load-Check pass outside loop; baseline, no-save-on-fail, no partial save, unchanged-on-break tests"
+          },
+          {
+            "dimensionId": "redacted-store-and-break-errors",
+            "score": 9,
+            "pass": true,
+            "evidence": "load and save guarded; DSN and password masked, store named; exact Breaking Change text with no connection values"
+          },
+          {
+            "dimensionId": "layer-placement",
+            "score": 9,
+            "pass": true,
+            "evidence": "rule only in domain, single caller; port takes warehouse; fake has no comparison; nothing in dagster run config"
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": "uv sync --locked: pass; uv run ruff check: pass; uv run pytest tests/unit --cov (100% branch): pass; uv build --wheel + template grep: pass; uv run pytest tests/e2e -m e2e: pass"
+    },
+    {
+      "phaseId": "store-schema-snapshots-in-warehouse",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-18T15:33:43Z",
+      "baseRef": "d25a4d6a5f3b7f57917f4eff2b707e07d87b70b2",
+      "baseDirty": true,
+      "notes": "dirty at start: GLOSSARY.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/domain/checks.py,src/adops/infrastructure/dlt_sync.py,tests/unit/application/fakes.py,tests/unit/application/test_run_pipeline.py,tests/unit/domain/test_checks.py,docs/roadmaps/agentic-dataops/horizons/horizon-02-breaking-changes-and-declared-checks-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-02-breaking-changes-and-declared-checks-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-02-breaking-changes-and-declared-checks-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-02-breaking-changes-and-declared-checks-roadmap.status.last_good.json,src/adops/domain/schema_snapshot.py,tests/unit/domain/test_schema_snapshot.py | changed: src/adops/infrastructure/schema_snapshot_store.py (new), src/adops/infrastructure/dlt_sync.py, src/adops/application/run_pipeline.py, src/adops/interface/run_command.py, tests/unit/infrastructure/test_schema_snapshot_store.py (new), tests/unit/infrastructure/test_dlt_sync.py, tests/unit/infrastructure/test_dagster_orchestrator.py, tests/unit/interface/test_run_command.py, tests/unit/application/test_run_pipeline.py. WarehouseSnapshotStore keeps shapes in adops._adops_schema_snapshots via dlt sql_client (DELETE+INSERT in one transaction, parameterized); preflight fills column_types compiled by the engine dialect + normalized, _dlt_* excluded; snapshot_store now required (run_pipeline arg moved before orchestrator) and adops run passes build_snapshot_store(project). Implementer pre-check: ruff ok, unit 278 passed 100% cov, uv sync --locked ok, Docker e2e passed. | compensation known: DROP TABLE adops._adops_schema_snapshots (and empty schema adops) per Warehouse; not needed.",
+      "unplannedFiles": [],
+      "completedAt": "2026-11-18T15:38:01Z",
+      "gradeResult": {
+        "phaseId": "store-schema-snapshots-in-warehouse",
+        "dimensionScores": [
+          {
+            "dimensionId": "store-roundtrip-on-real-warehouse",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "real DuckDB tests cover create-on-first-use, replace (count=1), second instance, key separation, adops schema; DELETE+INSERT in one transaction"
+          },
+          {
+            "dimensionId": "measured-shape-fidelity",
+            "score": 9,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "dialect-compiled + normalized types, _dlt_* excluded, exact-mapping, timestamptz and twice-equal tests"
+          },
+          {
+            "dimensionId": "sql-and-secret-safety",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "values parameterized; quote-in-key test; stored row has no secret; vars(store) holds no credential"
+          },
+          {
+            "dimensionId": "detection-always-on",
+            "score": 9,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "snapshot_store required everywhere; sentinel monkeypatch test proves identity; factory builds at call time"
+          },
+          {
+            "dimensionId": "adapter-layer-placement",
+            "score": 9,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "no dlt/sqlalchemy outside infrastructure; store reuses warehouse_destination"
+          }
+        ],
+        "overallPass": true,
+        "summary": "All five dimensions pass at 9; nothing above the criteria."
+      },
+      "gateRun": [
+        "ruff check: pass",
+        "pytest tests/unit --cov (100%): pass",
+        "uv sync --locked: pass",
+        "uv build --wheel: pass",
+        "pytest tests/e2e -m e2e: pass"
+      ]
+    },
+    {
+      "phaseId": "add-accept-schema-command",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-18T15:39:35Z",
+      "baseRef": "d25a4d6a5f3b7f57917f4eff2b707e07d87b70b2",
+      "baseDirty": true,
+      "notes": "pre-existing dirty paths: GLOSSARY.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/domain/checks.py,src/adops/infrastructure/dlt_sync.py,src/adops/interface/run_command.py,tests/unit/application/fakes.py,tests/unit/application/test_run_pipeline.py,tests/unit/domain/test_checks.py,tests/unit/infrastructure/test_dagster_orchestrator.py,tests/unit/infrastructure/test_dlt_sync.py,tests/unit/interface/test_run_command.py,docs/roadmaps/agentic-dataops/horizons/horizon-02-breaking-changes-and-declared-checks-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-02-breaking-changes-and-declared-checks-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-02-breaking-changes-and-declared-checks-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-02-breaking-changes-and-declared-checks-roadmap.status.last_good.json,src/adops/domain/schema_snapshot.py,src/adops/infrastructure/schema_snapshot_store.py,tests/unit/domain/test_schema_snapshot.py,tests/unit/infrastructure/test_schema_snapshot_store.py || Changed: NEW src/adops/application/accept_schema.py, src/adops/interface/accept_schema_command.py, tests/unit/application/test_accept_schema.py, tests/unit/interface/test_accept_schema_command.py; EDITED src/adops/interface/cli.py, tests/e2e/test_demo_sync.py, and (amendment 1) src/adops/application/ports.py, src/adops/infrastructure/dlt_sync.py, src/adops/application/run_pipeline.py, src/adops/interface/run_command.py, tests/unit/application/fakes.py, tests/unit/infrastructure/test_dlt_sync.py. What: `adops accept-schema <pipeline> <table> --env` saves the table current Source shape for one Environment; when the previous snapshot shows dropped columns it first drops NOT NULL on them in raw_<source>.<table> and its _staging copy (Sync.make_columns_nullable). E2E: ALTER orders DROP customer_id -> run halts with Breaking Change, counts unchanged -> accept-schema -> run passes (orders 102) -> DROP TABLE customers still last. Grade against amendment 1. Files already dirty at start (earlier phases) are listed in the first notes line; ports.py, dlt_sync.py, run_pipeline.py, run_command.py, fakes.py, test_dlt_sync.py were among them, so diffs vs baseRef include earlier-phase edits. || Compensation known: delete the adops._adops_schema_snapshots row or re-accept; relaxed columns need ALTER ... SET NOT NULL by hand (amendment 1).",
+      "amendments": [
+        {
+          "at": "2026-11-18T15:44:39Z",
+          "by": "execute",
+          "reason": "Contract assumed saving the new snapshot is enough for the next run to pass. In the repo, dlt copies the Source NOT NULL onto Warehouse columns, so after accepting a dropped column (orders.customer_id) the next load fails with NotNullViolation. Accept must also make the dropped columns nullable in the Warehouse table; the goal (break, halt, accept, pass) is unchanged. User chose this option (AskUserQuestion, 2026-11-18). Compensation addendum: an accept that relaxed columns also ran ALTER COLUMN ... DROP NOT NULL on raw_<source>.<table>; restoring needs SET NOT NULL by hand.",
+          "grounding": "Docker E2E run 2026-11-18: psycopg2.errors.NotNullViolation null value in column customer_id of relation orders; discoveries.md missed-prereq line",
+          "before": {
+            "filesAffected": [
+              "src/adops/application/accept_schema.py",
+              "src/adops/interface/accept_schema_command.py",
+              "src/adops/interface/cli.py",
+              "tests/unit/application/test_accept_schema.py",
+              "tests/unit/interface/test_accept_schema_command.py",
+              "tests/e2e/test_demo_sync.py"
+            ],
+            "changes": [
+              "Create application/accept_schema.py with accept_schema(pipeline_text, settings_text, environment_name, table, env, sync, snapshot_store). It loads and validates the Pipeline, picks the Environment, finds the single Sync Step that lists the table (a PipelineValidationError if there is none, or more than one), resolves only that Source's and the Warehouse's Secret References, runs sync.preflight on that table, refuses when the table is missing in the Source, and saves its shape.",
+              "Create interface/accept_schema_command.py following run_command's pattern: read adops.yaml and the Pipeline file, merge .env with os.environ, use an explicit --env option (default dev) and print the Environment it wrote to, show only sanitized errors (unexpected errors by type name only). Register it in cli.py.",
+              "Add unit tests for: the use case (success, unknown table, table in two Steps, table missing in Source, unknown Environment) with fakes; the CLI (success message, validation error, missing secret, unexpected error showing only the type).",
+              "In tests/e2e/test_demo_sync.py, let adops_run take any adops arguments. After the passing runs, ALTER the demo Source (for example drop orders.customer_id). Assert that adops run fails with a Breaking Change message, that Warehouse row counts are unchanged, and that the output holds no secret. Then run accept-schema shop_sync orders and assert that the next run passes. Keep the destructive DROP TABLE scenario last."
+            ]
+          },
+          "after": {
+            "filesAffected": [
+              "src/adops/application/accept_schema.py",
+              "src/adops/interface/accept_schema_command.py",
+              "src/adops/interface/cli.py",
+              "tests/unit/application/test_accept_schema.py",
+              "tests/unit/interface/test_accept_schema_command.py",
+              "tests/e2e/test_demo_sync.py",
+              "src/adops/application/ports.py",
+              "src/adops/infrastructure/dlt_sync.py",
+              "src/adops/application/run_pipeline.py",
+              "src/adops/interface/run_command.py",
+              "tests/unit/application/fakes.py",
+              "tests/unit/infrastructure/test_dlt_sync.py"
+            ],
+            "changes": [
+              "Create application/accept_schema.py with accept_schema(pipeline_text, settings_text, environment_name, table, env, sync, snapshot_store). It loads and validates the Pipeline, picks the Environment, finds the single Sync Step that lists the table (a PipelineValidationError if there is none, or more than one), resolves only that Source's and the Warehouse's Secret References, runs sync.preflight on that table, refuses when the table is missing in the Source, and saves its shape.",
+              "Create interface/accept_schema_command.py following run_command's pattern: read adops.yaml and the Pipeline file, merge .env with os.environ, use an explicit --env option (default dev) and print the Environment it wrote to, show only sanitized errors (unexpected errors by type name only). Register it in cli.py.",
+              "Add unit tests for: the use case (success, unknown table, table in two Steps, table missing in Source, unknown Environment) with fakes; the CLI (success message, validation error, missing secret, unexpected error showing only the type).",
+              "In tests/e2e/test_demo_sync.py, let adops_run take any adops arguments. After the passing runs, ALTER the demo Source (for example drop orders.customer_id). Assert that adops run fails with a Breaking Change message, that Warehouse row counts are unchanged, and that the output holds no secret. Then run accept-schema shop_sync orders and assert that the next run passes. Keep the destructive DROP TABLE scenario last.",
+              "Add Sync.make_columns_nullable(step, table, warehouse, columns) to the Sync port; DltSync drops NOT NULL on those columns of raw_<source>.<table> when they exist and are NOT NULL, covered by real-dlt DuckDB tests. accept_schema loads the previous snapshot, and for every column it shows as dropped calls make_columns_nullable before saving the new shape; the CLI names the relaxed columns. run_pipeline exposes pick_environment/resolve_connection and run_command exposes read_project_files/project_env/fail so both commands share one path."
+            ]
+          }
+        }
+      ],
+      "unplannedFiles": [],
+      "failures": [
+        {
+          "at": "2026-11-18T15:49:10Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run pytest tests/e2e -m e2e",
+          "detail": "recovered run after accept-schema: NotNullViolation null value in column customer_id of relation orders",
+          "resolvedBy": "amendment",
+          "resolution": "amendment 1: accept drops NOT NULL on dropped columns (Sync.make_columns_nullable), user-approved"
+        },
+        {
+          "at": "2026-11-18T15:49:10Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run pytest tests/e2e -m e2e",
+          "detail": "same NotNullViolation after relaxing raw_shop.orders only: merge loads into raw_shop_staging.orders first",
+          "resolvedBy": "gate-fix",
+          "resolution": "make_columns_nullable also relaxes the staging dataset copy via sql_client.with_staging_dataset()"
+        }
+      ],
+      "gateRun": "uv sync --locked: pass; uv run ruff check: pass; uv run pytest tests/unit --cov (fail_under=100, branch): pass; uv build --wheel + template grep: pass; uv run pytest tests/e2e -m e2e (Docker): pass",
+      "completedAt": "2026-11-18T15:50:31Z",
+      "gradeResult": {
+        "phaseId": "add-accept-schema-command",
+        "dimensionScores": [
+          {
+            "dimensionId": "accept-use-case-scoping",
+            "score": 10,
+            "pass": true,
+            "evidence": "Single Step narrowed to one table, only its Source + Warehouse secrets, refuses missing table before saving, same key as run_pipeline. 10: test_the_next_run_passes_against_the_accepted_shape runs halt -> accept -> pass on one store, guarding the key-mismatch failure example no criterion covers."
+          },
+          {
+            "dimensionId": "cli-env-and-sanitized-output",
+            "score": 9,
+            "pass": true,
+            "evidence": "Registered, --env default dev, success names the Environment, unexpected errors type-only, exit 1; tests cover DSN leak, validation error, missing secret, staging targeting."
+          },
+          {
+            "dimensionId": "e2e-break-halt-accept-recover",
+            "score": 9,
+            "pass": true,
+            "evidence": "ALTER drop customer_id + new row; halt asserted on message, counts equal; accept; recovered run passes with 102 orders; DROP TABLE stays last."
+          },
+          {
+            "dimensionId": "no-secret-in-e2e-output",
+            "score": 9,
+            "pass": true,
+            "evidence": "assert_no_secret_or_row_value on halted, accept and recovered outputs."
+          },
+          {
+            "dimensionId": "use-case-layer-placement",
+            "score": 9,
+            "pass": true,
+            "evidence": "application imports only stdlib/adops.application/adops.domain; file/env reading via monkeypatchable run_command factories; tests use fakes."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "add-user-declared-checks-to-pipeline-yaml",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-18T15:53:16Z",
+      "baseRef": "d25a4d6a5f3b7f57917f4eff2b707e07d87b70b2",
+      "baseDirty": true,
+      "notes": "already dirty at start (phases 1-3, uncommitted): GLOSSARY.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/domain/checks.py,src/adops/infrastructure/dlt_sync.py,src/adops/interface/cli.py,src/adops/interface/run_command.py,tests/e2e/test_demo_sync.py,tests/unit/application/fakes.py,tests/unit/application/test_run_pipeline.py,tests/unit/domain/test_checks.py,tests/unit/infrastructure/test_dagster_orchestrator.py,tests/unit/infrastructure/test_dlt_sync.py,tests/unit/interface/test_run_command.py,docs/roadmaps/agentic-dataops/horizons/horizon-02-breaking-changes-and-declared-checks-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-02-breaking-changes-and-declared-checks-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-02-breaking-changes-and-declared-checks-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-02-breaking-changes-and-declared-checks-roadmap.status.last_good.json,src/adops/application/accept_schema.py,src/adops/domain/schema_snapshot.py,src/adops/infrastructure/schema_snapshot_store.py,src/adops/interface/accept_schema_command.py,tests/unit/application/test_accept_schema.py,tests/unit/domain/test_schema_snapshot.py,tests/unit/infrastructure/test_schema_snapshot_store.py,tests/unit/interface/test_accept_schema_command.py || changed: src/adops/domain/{checks,pipeline,loader}.py, tests/unit/domain/test_{checks,pipeline,loader}.py. Adds per-table `checks:` (not_null/accepted_values/min_rows/freshness tagged models with unique display names, duplicate + skip_checks name validation), LoadFacts null_counts/unexpected_value_counts/newest_values, CheckResult.check: str, and pure evaluate_declared_checks(table, facts, now). loader.py (unplanned): strips the pydantic union tag from error paths so they stay YAML paths. || graded first pass, no 10→9 demotions. Follow-up wording nits from grader: freshness message at +1s reads 24.0 hours old, more than 24 hours; 1 rows plural.",
+      "unplannedFiles": [
+        "src/adops/domain/loader.py"
+      ],
+      "completedAt": "2026-11-18T15:58:33Z",
+      "gradeResult": {
+        "phaseId": "add-user-declared-checks-to-pipeline-yaml",
+        "dimensionScores": [
+          {
+            "dimensionId": "yaml-contract-validation",
+            "score": 9,
+            "pass": true,
+            "evidence": "All passCriteria met with exact-message tests; not 10: values list[str|int] coerces YAML true to 1, and loader tag-strip is a name-based heuristic outside filesAffected"
+          },
+          {
+            "dimensionId": "verdict-rule-correctness",
+            "score": 10,
+            "pass": true,
+            "evidence": "Exact-limit and one-second-over pairs in UTC, naive, +02:00 and -05:00 forms, plus future newest, naive now, and fail-closed not-measured branches"
+          },
+          {
+            "dimensionId": "skip-and-display-names",
+            "score": 9,
+            "pass": true,
+            "evidence": "Display names, skip by display name, typo rejection with path all tested; not 10: one pre-existing test_pipeline expected message rewritten"
+          },
+          {
+            "dimensionId": "messages-hold-no-row-values",
+            "score": 8,
+            "pass": true,
+            "evidence": "Exact accepted_values message and no ISO/2031 in freshness asserted; wording flaws: 24.0 hours old, more than 24 hours at +1s, and 1 rows"
+          },
+          {
+            "dimensionId": "domain-purity-and-determinism",
+            "score": 9,
+            "pass": true,
+            "evidence": "Grep clean, now has no default, new LoadFacts fields default empty, application tests unchanged; not 10: _DECLARED_RULES dispatches through Any"
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": [
+        "g1 uv sync --locked: pass",
+        "g2 ruff check: pass",
+        "g3 pytest tests/unit --cov (100%): pass",
+        "g4 wheel template check: pass",
+        "g5 pytest tests/e2e -m e2e: pass"
+      ]
+    },
+    {
+      "phaseId": "run-user-declared-checks-in-sync-steps",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-18T16:01:12Z",
+      "baseRef": "d25a4d6a5f3b7f57917f4eff2b707e07d87b70b2",
+      "baseDirty": true,
+      "notes": "baseDirty: uncommitted horizon-2 phases 1-4 work (all paths in git status at start are pre-existing) || Changed: application/ports.py (Clock Protocol), application/run_pipeline.py (PlannedStep.clock; reads clock.now() once after sync; evaluate_declared_checks per table after built-in load Checks, before _save_shapes; run_pipeline/_build_plan take required clock), infrastructure/clock.py (new SystemClock), interface/run_command.py (build_clock passed to run_pipeline), domain/checks.py (missing-fact messages now \"... was not measured\"), tests: fakes.py (FixedClock), test_run_pipeline.py, test_accept_schema.py, test_dagster_orchestrator.py, test_run_command.py, test_checks.py, test_domain_purity.py (AST clock-read ban + alias test), test_clock.py (new). Base was dirty with phases 1-4 on the same files, so git diff <baseRef> mixes earlier phases.",
+      "unplannedFiles": [
+        "src/adops/domain/checks.py",
+        "tests/unit/domain/test_checks.py",
+        "tests/unit/application/test_accept_schema.py"
+      ],
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-18T16:03:19Z",
+          "gate": "uv run pytest tests/unit --cov",
+          "detail": "FAILED test_run_pipeline.py::test_breaking_change_error_is_a_step_error_raised_by_the_planned_step — PlannedStep built without the new required clock",
+          "resolvedBy": "gate-fix",
+          "resolution": "passed FixedClock() to that direct PlannedStep construction"
+        }
+      ],
+      "completedAt": "2026-11-18T16:04:29Z",
+      "gradeResult": {
+        "phaseId": "run-user-declared-checks-in-sync-steps",
+        "dimensionScores": [
+          {
+            "dimensionId": "declared-checks-before-baseline",
+            "score": 9,
+            "pass": true,
+            "evidence": "Clock read after sync once per Step; load then declared Checks then _raise_if_failed then _save_shapes; all three passCriteria tested; not 10: stale-freshness test does not also assert no snapshot save."
+          },
+          {
+            "dimensionId": "clock-injection-and-purity-test",
+            "score": 9,
+            "pass": true,
+            "evidence": "Clock in ports.py, aware UTC SystemClock tested, build_clock wiring tested, AST purity check catches aliased calls with a permanent test; grep shows only infrastructure/clock.py; not 10: a bound-method call through a local name would slip past."
+          },
+          {
+            "dimensionId": "wiring-layer-placement",
+            "score": 9,
+            "pass": true,
+            "evidence": "No framework imports in application; PlannedStep only calls evaluate_declared_checks; 'was not measured' failure tested with no save; not 10: three files edited outside the planned filesAffected (justified)."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": "ruff check: pass; pytest tests/unit --cov (100% line+branch, 375 passed): pass after 1 gate-fix; uv sync --locked: pass; wheel template listing: pass; pytest tests/e2e -m e2e (Docker): pass. ruff format --check not a CI gate; 2 pre-existing unformatted files left untouched."
+    },
+    {
+      "phaseId": "measure-declared-check-facts-in-warehouse",
+      "status": "awaiting-verification",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-18T16:05:16Z",
+      "baseRef": "d25a4d6a5f3b7f57917f4eff2b707e07d87b70b2",
+      "baseDirty": true,
+      "notes": "already dirty at start (phases 1-5, uncommitted): GLOSSARY.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/domain/checks.py,src/adops/domain/loader.py,src/adops/domain/pipeline.py,src/adops/infrastructure/dlt_sync.py,src/adops/interface/cli.py,src/adops/interface/run_command.py,tests/e2e/test_demo_sync.py,tests/unit/application/fakes.py,tests/unit/application/test_run_pipeline.py,tests/unit/domain/test_checks.py,tests/unit/domain/test_domain_purity.py,tests/unit/domain/test_loader.py,tests/unit/domain/test_pipeline.py,tests/unit/infrastructure/test_dagster_orchestrator.py,tests/unit/infrastructure/test_dlt_sync.py,tests/unit/interface/test_run_command.py,docs/roadmaps/agentic-dataops/horizons/horizon-02-breaking-changes-and-declared-checks-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-02-breaking-changes-and-declared-checks-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-02-breaking-changes-and-declared-checks-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-02-breaking-changes-and-declared-checks-roadmap.status.last_good.json,src/adops/application/accept_schema.py,src/adops/domain/schema_snapshot.py,src/adops/infrastructure/clock.py,src/adops/infrastructure/schema_snapshot_store.py,src/adops/interface/accept_schema_command.py,tests/unit/application/test_accept_schema.py,tests/unit/domain/test_schema_snapshot.py,tests/unit/infrastructure/test_clock.py,tests/unit/infrastructure/test_schema_snapshot_store.py,tests/unit/interface/test_accept_schema_command.py || changed: src/adops/infrastructure/dlt_sync.py, tests/unit/infrastructure/test_dlt_sync.py, tests/e2e/test_demo_sync.py (all already dirty from earlier phases, so git diff <baseRef> mixes earlier work); NEW-dirty src/adops/templates/demo/pipelines/shop_sync.yaml, src/adops/templates/demo/seed/01_shop.sql (amendment 1), tests/unit/interface/test_validate_command.py. What: _measure_warehouse(after load only) adds one SELECT per table with count(*)-count(col) per not_null, count(CASE WHEN CAST(col AS TEXT) NOT IN (%s..) THEN 1 END) per accepted_values (values as params; NULL not counted, left to not_null), max(col) per freshness (datetime kept, date -> midnight, other types -> UnsupportedFreshnessColumnError with type name only); never-loaded table reports 0 / None. Demo declares not_null(email) on customers, min_rows 1 on orders; seed email nullable. E2E: NULL customer 7 email -> run fails not_null(email), no Breaking Change, no row values; restore -> run passes, Warehouse has no NULL email; DROP TABLE still last. Grade against amendment 1.",
+      "amendments": [
+        {
+          "at": "2026-11-18T16:08:41Z",
+          "by": "execute",
+          "reason": "Contract assumed a NULL email set in the Source after dropping NOT NULL reaches the Warehouse and fails not_null(email). In the repo, dlt copied the Source NOT NULL onto raw_shop.customers.email and a replace load keeps the table, so the load itself fails with a NOT NULL constraint error before any Check runs. Make customers.email nullable in the demo seed instead, so the E2E only sets one email to NULL; goal (a NULL email fails the declared not_null(email) Check, sanitized) is unchanged. User chose this option (AskUserQuestion, 2026-11-18).",
+          "grounding": "probe 2026-11-18: sqlite email TEXT NOT NULL -> duckdb raw_shop.customers.email is_nullable NO; second replace load with NULL email: NOT NULL constraint failed: customers.email",
+          "before": {
+            "filesAffected": [
+              "src/adops/infrastructure/dlt_sync.py",
+              "src/adops/templates/demo/pipelines/shop_sync.yaml",
+              "tests/unit/infrastructure/test_dlt_sync.py",
+              "tests/unit/interface/test_validate_command.py",
+              "tests/e2e/test_demo_sync.py"
+            ],
+            "changes": [
+              "In the E2E, drop the NOT NULL constraint on customers.email and set one email to NULL; this is not a Breaking Change because names and types are unchanged. Assert the run fails with the not_null(email) Check failed and the output holds no row value or secret. Restore the row and keep DROP TABLE last."
+            ]
+          },
+          "after": {
+            "filesAffected": [
+              "src/adops/infrastructure/dlt_sync.py",
+              "src/adops/templates/demo/pipelines/shop_sync.yaml",
+              "src/adops/templates/demo/seed/01_shop.sql",
+              "tests/unit/infrastructure/test_dlt_sync.py",
+              "tests/unit/interface/test_validate_command.py",
+              "tests/e2e/test_demo_sync.py"
+            ],
+            "changes": [
+              "Remove NOT NULL from customers.email in the demo seed (file set unchanged). In the E2E, set one email to NULL; this is not a Breaking Change because names and types are unchanged. Assert the run fails with the not_null(email) Check failed and the output holds no row value or secret. Restore the row and keep DROP TABLE last."
+            ]
+          }
+        }
+      ],
+      "unplannedFiles": []
+    }
+  ]
+}

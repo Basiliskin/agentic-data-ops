@@ -5,7 +5,7 @@ from pydantic import BaseModel, ValidationError
 
 from adops.domain.environment import Environment, ProjectSettings
 from adops.domain.errors import Location, PipelineValidationError, RuleViolation
-from adops.domain.pipeline import Pipeline
+from adops.domain.pipeline import DECLARED_CHECK_TYPES, Pipeline
 
 ROOT = "(root)"
 
@@ -70,7 +70,7 @@ def _describe_yaml_error(error: yaml.YAMLError) -> str:
 def _describe(error: ValidationError) -> list[str]:
     lines = []
     for detail in error.errors(include_input=False, include_url=False):
-        location = tuple(detail["loc"])
+        location = _without_union_tags(tuple(detail["loc"]))
         cause = detail.get("ctx", {}).get("error")
         if isinstance(cause, RuleViolation):
             lines.extend(
@@ -80,3 +80,12 @@ def _describe(error: ValidationError) -> list[str]:
         else:
             lines.append(f"{format_path(location)}: {detail['msg']}")
     return lines
+
+
+def _without_union_tags(location: Location) -> Location:
+    # pydantic inserts the matched tag after `checks[k]`; it is not a key in the YAML.
+    return tuple(
+        part
+        for index, part in enumerate(location)
+        if not (index >= 2 and location[index - 2] == "checks" and part in DECLARED_CHECK_TYPES)
+    )

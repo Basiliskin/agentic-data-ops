@@ -2,6 +2,7 @@ import ast
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from adops.application.ports import (
 from adops.application.run_pipeline import InOrderOrchestrator, run_pipeline
 from adops.domain.checks import LoadFacts, SourceFacts
 from adops.domain.pipeline import SyncStep
+from adops.domain.schema_snapshot import TableShape
 from adops.infrastructure import dagster_orchestrator
 from adops.infrastructure.dagster_orchestrator import (
     DagsterOrchestrator,
@@ -145,8 +147,42 @@ def cursor_facts() -> dict[str, LoadFacts]:
     }
 
 
+@dataclass
+class FakeSnapshotStore:
+    shapes: dict[tuple[str, str, str], TableShape] = field(default_factory=dict)
+
+    def load(
+        self, warehouse: ResolvedConnection, pipeline: str, source: str, table: str
+    ) -> TableShape | None:
+        return self.shapes.get((pipeline, source, table))
+
+    def save(
+        self,
+        warehouse: ResolvedConnection,
+        pipeline: str,
+        source: str,
+        table: str,
+        shape: TableShape,
+    ) -> None:
+        self.shapes[(pipeline, source, table)] = shape
+
+
+class FixedClock:
+    def now(self) -> datetime:
+        return datetime(2026, 11, 18, tzinfo=UTC)
+
+
 def run(sync: RecordingSync, orchestrator: Orchestrator | None = None) -> RunResult:
-    return run_pipeline(PIPELINE, SETTINGS, "dev", ENV, sync, orchestrator or DagsterOrchestrator())
+    return run_pipeline(
+        PIPELINE,
+        SETTINGS,
+        "dev",
+        ENV,
+        sync,
+        FakeSnapshotStore(),
+        FixedClock(),
+        orchestrator or DagsterOrchestrator(),
+    )
 
 
 @pytest.fixture(autouse=True)

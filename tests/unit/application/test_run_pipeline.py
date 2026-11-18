@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 from fakes import (
@@ -6,23 +6,31 @@ from fakes import (
     PIPELINE,
     SETTINGS,
     SOURCE_PASSWORD,
+    TABLE_TYPES,
     WAREHOUSE_PASSWORD,
+    FakeSnapshotStore,
+    FixedClock,
     RecordingSync,
+    facts_with_types,
     healthy_load,
 )
 
 from adops.application.ports import (
+    Clock,
     Orchestrator,
     ResolvedConnection,
     RunPlan,
     RunResult,
+    SchemaSnapshotStore,
     StepStatus,
     Sync,
 )
 from adops.application.run_pipeline import (
+    BreakingChangeError,
     CheckFailedError,
     InOrderOrchestrator,
     PlannedStep,
+    StepError,
     SyncFailedError,
     run_pipeline,
 )
@@ -30,13 +38,24 @@ from adops.application.secrets import MissingSecretError
 from adops.domain.checks import CheckName, CheckResult, CheckStatus, SourceFacts
 from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import load_pipeline
+from adops.domain.schema_snapshot import TableShape
 
 SENTINELS = (SOURCE_PASSWORD, WAREHOUSE_PASSWORD)
 CURSOR_SENTINEL = "cursor-sentinel-2031"
 
 
-def run(sync: RecordingSync, env=ENV, environment="dev", orchestrator=None) -> RunResult:
-    return run_pipeline(PIPELINE, SETTINGS, environment, env, sync, orchestrator)
+def run(
+    sync: RecordingSync,
+    env=ENV,
+    environment="dev",
+    orchestrator=None,
+    snapshot_store=None,
+    clock=None,
+    pipeline=PIPELINE,
+) -> RunResult:
+    store = FakeSnapshotStore() if snapshot_store is None else snapshot_store
+    clock = FixedClock() if clock is None else clock
+    return run_pipeline(pipeline, SETTINGS, environment, env, sync, store, clock, orchestrator)
 
 
 def statuses(result: RunResult) -> list[tuple[str, StepStatus]]:
@@ -214,6 +233,9 @@ def test_preflight_error_fails_step_without_chaining_the_original():
         load_pipeline(PIPELINE).steps[1],
         ResolvedConnection("h", 1, "d", "u", SOURCE_PASSWORD),
         ResolvedConnection("h", 1, "d", "u", WAREHOUSE_PASSWORD),
+        "shop",
+        FakeSnapshotStore(),
+        FixedClock(),
     )
 
     with pytest.raises(SyncFailedError) as raised:
@@ -236,6 +258,9 @@ def test_check_failure_messages_and_reprs_hold_no_secret_or_cursor_value():
         load_pipeline(PIPELINE).steps[1],
         ResolvedConnection("h", 1, "d", "u", SOURCE_PASSWORD),
         ResolvedConnection("h", 1, "d", "u", WAREHOUSE_PASSWORD),
+        "shop",
+        FakeSnapshotStore(),
+        FixedClock(),
     )
 
     with pytest.raises(CheckFailedError) as raised:
@@ -322,6 +347,8 @@ def test_orchestrator_port_is_used_when_given():
 def test_fakes_and_default_runner_satisfy_the_ports():
     assert isinstance(RecordingSync(), Sync)
     assert isinstance(InOrderOrchestrator(), Orchestrator)
+    assert isinstance(FakeSnapshotStore(), SchemaSnapshotStore)
+    assert isinstance(FixedClock(), Clock)
 
 
 def test_check_failed_error_keeps_checks_and_rows():
@@ -343,3 +370,280 @@ def test_cursor_values_may_be_datetimes():
     )
 
     assert run(sync).succeeded
+
+
+def baseline_store() -> FakeSnapshotStore:
+    return FakeSnapshotStore(
+        {("shop", "shop", table): TableShape(types) for table, types in TABLE_TYPES.items()}
+    )
+
+
+def test_first_run_records_a_baseline_for_every_table():
+    store = FakeSnapshotStore()
+
+    result = run(RecordingSync(), snapshot_store=store)
+
+    assert result.succeeded
+    assert store.shapes == {
+        ("shop", "shop", table): TableShape(types) for table, types in TABLE_TYPES.items()
+    }
+    assert {warehouse.password for warehouse in store.warehouses} == {WAREHOUSE_PASSWORD}
+
+
+def test_unchanged_shape_passes_even_when_types_are_spelled_differently():
+    store = baseline_store()
+    store.shapes[("shop", "shop", "customers")] = TableShape({"id": "int4", "email": "varchar"})
+    sync = RecordingSync()
+
+    result = run(sync, snapshot_store=store)
+
+    assert result.succeeded
+    assert [call for call in sync.calls if call[0] == "sync"] == [
+        ("sync", "customers"),
+        ("sync", "orders"),
+        ("sync", "products"),
+    ]
+
+
+def test_added_column_passes_and_becomes_the_new_snapshot():
+    store = baseline_store()
+    widened = {**TABLE_TYPES["customers"], "phone": "text"}
+    sync = RecordingSync(source_facts={"customers": facts_with_types(widened)})
+
+    result = run(sync, snapshot_store=store)
+
+    assert result.succeeded
+    assert ("sync", "customers") in sync.calls
+    assert store.shapes[("shop", "shop", "customers")] == TableShape(widened)
+
+
+def test_dropped_column_halts_the_step_before_sync_and_skips_later_steps():
+    store = baseline_store()
+    before = dict(store.shapes)
+    sync = RecordingSync(source_facts={"customers": facts_with_types({"id": "integer"})})
+
+    result = run(sync, snapshot_store=store)
+
+    assert sync.calls == [("preflight", "customers")]
+    assert statuses(result) == [
+        ("customers", StepStatus.FAILED),
+        ("orders", StepStatus.SKIPPED),
+        ("products", StepStatus.SKIPPED),
+    ]
+    assert result.steps[0].error == "Step customers: Breaking Change in customers: email dropped"
+    assert store.shapes == before and store.saves == []
+
+
+def test_every_broken_table_of_the_step_is_reported_at_once():
+    store = baseline_store()
+    sync = RecordingSync(
+        source_facts={
+            "orders": facts_with_types({"id": "integer", "updated_at": "date"}),
+            "order_items": facts_with_types({"id": "integer", "item_order_id": "integer"}),
+        }
+    )
+
+    result = run(sync, snapshot_store=store)
+
+    assert ("sync", "orders") not in sync.calls
+    assert statuses(result)[1:] == [("orders", StepStatus.FAILED), ("products", StepStatus.SKIPPED)]
+    error = result.steps[1].error
+    assert error == (
+        "Step orders: Breaking Change in orders: updated_at retyped (timestamptz -> date); "
+        "Breaking Change in order_items: order_id dropped"
+    )
+    assert_no_secret_in(error)
+    assert all(value not in error for value in ("localhost", "5433", "adops", "warehouse"))
+
+
+def test_breaking_change_error_is_a_step_error_raised_by_the_planned_step():
+    sync = RecordingSync(source_facts={"products": facts_with_types({"sku": "integer"})})
+    plan_step = PlannedStep(
+        load_pipeline(PIPELINE).steps[2],
+        ResolvedConnection("h", 1, "d", "u", SOURCE_PASSWORD),
+        ResolvedConnection("h", 1, "d", "u", WAREHOUSE_PASSWORD),
+        "shop",
+        baseline_store(),
+        FixedClock(),
+    )
+
+    with pytest.raises(BreakingChangeError) as raised:
+        plan_step(sync)
+
+    assert isinstance(raised.value, StepError)
+    assert str(raised.value) == (
+        "Step products: Breaking Change in products: sku retyped (text -> integer)"
+    )
+    (change,) = raised.value.changes["products"]
+    assert change.message == "sku retyped (text -> integer)"
+
+
+def test_failed_load_check_saves_no_snapshot():
+    store = FakeSnapshotStore()
+    sync = RecordingSync(load_facts={"customers": healthy_load(duplicate_keys=1)})
+
+    result = run(sync, snapshot_store=store)
+
+    assert statuses(result)[0] == ("customers", StepStatus.CHECK_FAILED)
+    assert store.saves == []
+
+
+def test_failed_load_check_on_a_later_table_saves_no_table_of_the_step():
+    store = FakeSnapshotStore()
+    sync = RecordingSync(load_facts={"order_items": healthy_load(null_keys=1)})
+
+    result = run(sync, snapshot_store=store)
+
+    assert statuses(result)[1] == ("orders", StepStatus.CHECK_FAILED)
+    assert store.saves == [("shop", "shop", "customers")]
+
+
+LEAKY_STORE_ERROR = (
+    f"could not connect to postgresql://adops:{WAREHOUSE_PASSWORD}@warehouse.internal/warehouse "
+    f"with password {WAREHOUSE_PASSWORD}"
+)
+
+
+def test_snapshot_store_load_error_is_redacted_and_names_the_store():
+    sync = RecordingSync()
+    store = FakeSnapshotStore(fail_load=RuntimeError(LEAKY_STORE_ERROR))
+
+    result = run(sync, snapshot_store=store)
+
+    assert sync.calls == [("preflight", "customers")]
+    assert statuses(result)[0] == ("customers", StepStatus.FAILED)
+    assert result.steps[0].error == (
+        "Step customers: schema snapshot store: RuntimeError: could not connect to *** "
+        "with password ***"
+    )
+    assert_no_secret_in(repr(result))
+    assert "postgresql://" not in repr(result)
+
+
+def test_snapshot_store_save_error_is_redacted_and_names_the_store():
+    sync = RecordingSync()
+    store = FakeSnapshotStore(fail_save=RuntimeError(LEAKY_STORE_ERROR))
+
+    result = run(sync, snapshot_store=store)
+
+    assert sync.calls == [("preflight", "customers"), ("sync", "customers")]
+    assert statuses(result)[0] == ("customers", StepStatus.FAILED)
+    error = result.steps[0].error
+    assert error is not None and error.startswith("Step customers: schema snapshot store: ")
+    assert_no_secret_in(repr(result))
+    assert "postgresql://" not in repr(result)
+
+
+def test_sync_error_messages_mask_connection_urls():
+    leak = RuntimeError("cannot reach postgresql://shop@db:5432/shop")
+    sync = RecordingSync(fail_sync_of={"customers": leak})
+
+    result = run(sync)
+
+    assert result.steps[0].error == "Step customers: RuntimeError: cannot reach ***"
+
+
+DECLARED = """
+name: shop
+steps:
+  - name: customers
+    source: shop
+    tables:
+      - name: customers
+        mode: full_refresh
+        primary_key: id
+        checks:
+          - {type: not_null, column: email}
+          - {type: min_rows, count: 2}
+  - name: orders
+    source: shop
+    tables:
+      - name: orders
+        mode: incremental
+        primary_key: id
+        cursor: updated_at
+        checks:
+          - {type: freshness, column: updated_at, max_age_hours: 24}
+      - {name: order_items, mode: full_refresh, primary_key: id}
+"""
+
+MEASURED = {
+    "customers": healthy_load(null_counts={"email": 0}),
+    "orders": healthy_load(newest_values={"updated_at": datetime(2026, 11, 18, 6, tzinfo=UTC)}),
+}
+
+
+def test_declared_checks_are_reported_after_the_built_in_ones_with_their_names():
+    result = run(RecordingSync(load_facts=MEASURED), pipeline=DECLARED)
+
+    assert result.succeeded
+    assert [(c.check, c.status) for c in result.steps[0].checks] == [
+        (CheckName.SOURCE_TABLES_EXIST, CheckStatus.PASS),
+        (CheckName.PRIMARY_KEY_UNIQUE, CheckStatus.PASS),
+        (CheckName.PRIMARY_KEY_NOT_NULL, CheckStatus.PASS),
+        (CheckName.ROW_COUNT_MATCHES, CheckStatus.PASS),
+        ("not_null(email)", CheckStatus.PASS),
+        ("min_rows", CheckStatus.PASS),
+    ]
+    assert checks_of(result, "orders")["freshness(updated_at)"].message == (
+        "orders: freshness(updated_at) passed"
+    )
+
+
+def test_failing_declared_check_halts_the_step_before_the_snapshot_is_saved():
+    store = FakeSnapshotStore()
+    facts = {**MEASURED, "customers": healthy_load(null_counts={"email": 2})}
+
+    result = run(RecordingSync(load_facts=facts), snapshot_store=store, pipeline=DECLARED)
+
+    assert statuses(result) == [
+        ("customers", StepStatus.CHECK_FAILED),
+        ("orders", StepStatus.SKIPPED),
+    ]
+    assert checks_of(result, "customers")["not_null(email)"].status is CheckStatus.FAIL
+    assert result.steps[0].error is not None
+    assert "not_null(email) failed — 2 rows with no value" in result.steps[0].error
+    assert result.steps[0].rows_loaded == {"customers": 3}
+    assert store.saves == []
+
+
+def test_freshness_is_judged_against_the_injected_clock():
+    early = FixedClock(datetime(2026, 11, 18, 12, tzinfo=UTC))
+    late = FixedClock(datetime(2026, 11, 19, 12, tzinfo=UTC))
+
+    fresh = run(RecordingSync(load_facts=MEASURED), clock=early, pipeline=DECLARED)
+    stale = run(RecordingSync(load_facts=MEASURED), clock=late, pipeline=DECLARED)
+
+    assert fresh.succeeded
+    assert statuses(stale)[1] == ("orders", StepStatus.CHECK_FAILED)
+    assert checks_of(stale, "orders")["freshness(updated_at)"].message == (
+        "orders: freshness(updated_at) failed — "
+        "the newest value is 30.0 hours old, more than 24 hours"
+    )
+
+
+def test_the_clock_is_read_after_the_load_once_per_step():
+    clock = FixedClock()
+    sync = RecordingSync(load_facts=MEASURED)
+    original = sync.sync
+
+    def sync_then_note(step, source, warehouse):
+        assert clock.reads == len([c for c in sync.calls if c[0] == "sync"])
+        return original(step, source, warehouse)
+
+    sync.sync = sync_then_note  # type: ignore[method-assign]
+
+    assert run(sync, clock=clock, pipeline=DECLARED).succeeded
+    assert clock.reads == 2
+
+
+def test_declared_check_without_a_measured_fact_fails_instead_of_passing():
+    store = FakeSnapshotStore()
+
+    result = run(RecordingSync(), snapshot_store=store, pipeline=DECLARED)
+
+    assert statuses(result)[0] == ("customers", StepStatus.CHECK_FAILED)
+    assert checks_of(result, "customers")["not_null(email)"].message == (
+        "customers: not_null(email) failed — the null count was not measured"
+    )
+    assert store.saves == []

@@ -51,7 +51,7 @@ A Sync that reads the Source database's own change log, so it also captures dele
 _Avoid_: replication, streaming sync
 
 **Breaking Change**:
-A change to a Source table's shape (renamed or dropped column, changed type) that halts that table's Sync and everything downstream until resolved.
+A change to a Source table's shape (renamed or dropped column, changed type) since the last successful run. It halts the whole Sync Step before any table loads, and every later Step, until resolved. An added column is not a Breaking Change.
 _Avoid_: schema drift (covers harmless changes too), schema error
 
 **Transform**:

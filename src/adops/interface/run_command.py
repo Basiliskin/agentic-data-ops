@@ -7,12 +7,14 @@ from typing import Annotated, NoReturn
 import typer
 from dotenv import dotenv_values
 
-from adops.application.ports import Orchestrator, RunResult, Sync
+from adops.application.ports import Clock, Orchestrator, RunResult, SchemaSnapshotStore, Sync
 from adops.application.run_pipeline import run_pipeline
 from adops.application.secrets import MissingSecretError
 from adops.domain.errors import PipelineValidationError
+from adops.infrastructure.clock import SystemClock
 from adops.infrastructure.dagster_orchestrator import DagsterOrchestrator, JobCompileError
 from adops.infrastructure.dlt_sync import DltSync
+from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
 
 SETTINGS_FILE = Path("adops.yaml")
 PIPELINES_DIR = Path("pipelines")
@@ -26,6 +28,14 @@ class ProjectFileError(Exception):
 
 def build_sync(project: Path, pipeline: str) -> Sync:
     return DltSync(project, pipeline)
+
+
+def build_snapshot_store(project: Path) -> SchemaSnapshotStore:
+    return WarehouseSnapshotStore(project, "postgres")
+
+
+def build_clock() -> Clock:
+    return SystemClock()
 
 
 def build_orchestrator() -> Orchestrator:
@@ -44,23 +54,21 @@ def run(
     try:
         result = run_project(project.resolve(), pipeline, env)
     except PipelineValidationError as error:
-        _fail(*error.problems)
+        fail(*error.problems)
     except (ProjectFileError, MissingSecretError, JobCompileError) as error:
-        _fail(str(error))
+        fail(str(error))
     except Exception as error:
         # Only the type: an unexpected error was never redacted and may hold a secret.
-        _fail(f"unexpected {type(error).__name__} while running {pipeline}")
+        fail(f"unexpected {type(error).__name__} while running {pipeline}")
     _print_result(result)
     if not result.succeeded:
-        _fail(f"Pipeline {result.pipeline} failed in Environment {result.environment}.")
+        fail(f"Pipeline {result.pipeline} failed in Environment {result.environment}.")
     typer.echo(f"Pipeline {result.pipeline} passed in Environment {result.environment}.")
 
 
 def run_project(project: Path, pipeline: str, environment: str) -> RunResult:
-    settings_text = _read(project, SETTINGS_FILE)
-    pipeline_text = _read(project, PIPELINES_DIR / f"{pipeline}.yaml")
-    dotenv = {k: v for k, v in dotenv_values(project / DOTENV_FILE).items() if v is not None}
-    env = {**dotenv, **os.environ}
+    settings_text, pipeline_text = read_project_files(project, pipeline)
+    env = project_env(project)
     dagster_env = {}
     if (project / DAGSTER_FILE).is_file():
         # Dagster resolves dagster.yaml's `env:` values from the process environment.
@@ -72,8 +80,21 @@ def run_project(project: Path, pipeline: str, environment: str) -> RunResult:
             environment,
             env,
             build_sync(project, pipeline),
+            build_snapshot_store(project),
+            build_clock(),
             build_orchestrator(),
         )
+
+
+def read_project_files(project: Path, pipeline: str) -> tuple[str, str]:
+    """adops.yaml and the Pipeline file, as text."""
+    return _read(project, SETTINGS_FILE), _read(project, PIPELINES_DIR / f"{pipeline}.yaml")
+
+
+def project_env(project: Path) -> dict[str, str]:
+    """The Project's .env merged under the process environment, which wins."""
+    dotenv = {k: v for k, v in dotenv_values(project / DOTENV_FILE).items() if v is not None}
+    return {**dotenv, **os.environ}
 
 
 def _read(project: Path, relative: Path) -> str:
@@ -104,7 +125,7 @@ def _print_result(result: RunResult) -> None:
             typer.echo(f"  {step.error}", err=True)
 
 
-def _fail(*lines: str) -> NoReturn:
+def fail(*lines: str) -> NoReturn:
     for line in lines:
         typer.echo(line, err=True)
     raise typer.Exit(1)

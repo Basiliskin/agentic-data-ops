@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import date, datetime
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from adops.domain.pipeline import SyncTable
@@ -54,7 +54,7 @@ class CheckStatus(StrEnum):
 
 @dataclass(frozen=True)
 class CheckResult:
-    check: CheckName
+    check: str
     table: str
     status: CheckStatus
     message: str
@@ -66,6 +66,7 @@ class SourceFacts:
 
     table_exists: bool
     columns: frozenset[str]
+    column_types: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,9 @@ class LoadFacts:
     source_rows: int | None = None
     cursor_max_before: CursorValue | None = None
     cursor_max_after: CursorValue | None = None
+    null_counts: Mapping[str, int] = field(default_factory=dict)
+    unexpected_value_counts: Mapping[str, int] = field(default_factory=dict)
+    newest_values: Mapping[str, datetime | None] = field(default_factory=dict)
 
 
 def evaluate_preflight_checks(table: SyncTable, source_facts: SourceFacts) -> list[CheckResult]:
@@ -90,10 +94,21 @@ def evaluate_load_checks(table: SyncTable, load_facts: LoadFacts) -> list[CheckR
     return _evaluate(table, load_checks, lambda check: _LOAD_RULES[check](load_facts))
 
 
+def evaluate_declared_checks(
+    table: SyncTable, load_facts: LoadFacts, now: datetime
+) -> list[CheckResult]:
+    declared = {check.name: check for check in table.checks}
+    return _evaluate(
+        table,
+        tuple(declared),
+        lambda name: _DECLARED_RULES[declared[name].type](declared[name], load_facts, now),
+    )
+
+
 def _evaluate(
     table: SyncTable,
-    checks: tuple[CheckName, ...],
-    failure_of: Callable[[CheckName], str | None],
+    checks: Sequence[str],
+    failure_of: Callable[[str], str | None],
 ) -> list[CheckResult]:
     results = []
     for check in checks:
@@ -176,4 +191,55 @@ _LOAD_RULES: dict[CheckName, Callable[[LoadFacts], str | None]] = {
     CheckName.ROW_COUNT_MATCHES: _row_count_matches,
     CheckName.NO_ROW_LOSS: _no_row_loss,
     CheckName.CURSOR_NOT_BACKWARDS: _cursor_not_backwards,
+}
+
+
+def _not_null(facts: LoadFacts, column: str) -> str | None:
+    if column not in facts.null_counts:
+        return "the null count was not measured"
+    nulls = facts.null_counts[column]
+    if nulls:
+        return f"{nulls} rows with no value"
+    return None
+
+
+def _accepted_values(facts: LoadFacts, column: str) -> str | None:
+    if column not in facts.unexpected_value_counts:
+        return "the count of values outside the accepted list was not measured"
+    unexpected = facts.unexpected_value_counts[column]
+    if unexpected:
+        return f"{unexpected} rows with a value outside the accepted list"
+    return None
+
+
+def _min_rows(facts: LoadFacts, count: int) -> str | None:
+    if facts.warehouse_rows_after < count:
+        return f"Warehouse has {facts.warehouse_rows_after} rows, at least {count} required"
+    return None
+
+
+def _freshness(facts: LoadFacts, column: str, max_age_hours: int, now: datetime) -> str | None:
+    if column not in facts.newest_values:
+        return "the newest value was not measured"
+    newest = facts.newest_values[column]
+    if newest is None:
+        return "the column has no values"
+    age = _as_utc(now) - _as_utc(newest)
+    if age > timedelta(hours=max_age_hours):
+        hours = age / timedelta(hours=1)
+        return f"the newest value is {hours:.1f} hours old, more than {max_age_hours} hours"
+    return None
+
+
+def _as_utc(moment: datetime) -> datetime:
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+
+
+_DECLARED_RULES: dict[str, Callable[[Any, LoadFacts, datetime], str | None]] = {
+    "not_null": lambda check, facts, _now: _not_null(facts, check.column),
+    "accepted_values": lambda check, facts, _now: _accepted_values(facts, check.column),
+    "min_rows": lambda check, facts, _now: _min_rows(facts, check.count),
+    "freshness": lambda check, facts, now: _freshness(
+        facts, check.column, check.max_age_hours, now
+    ),
 }

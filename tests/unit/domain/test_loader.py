@@ -132,3 +132,42 @@ def test_pipeline_whose_sources_all_exist_passes_the_cross_check():
 )
 def test_error_paths_read_like_yaml_paths(location, path):
     assert format_path(location) == path
+
+
+@pytest.mark.parametrize(
+    ("check", "problem"),
+    [
+        (
+            f"{{type: {SENTINEL}, column: id}}",
+            "steps[0].tables[0].checks[0]: type must be one of:"
+            " not_null, accepted_values, min_rows, freshness",
+        ),
+        (
+            f"{{type: accepted_values, column: s, values: [{SENTINEL}, {SENTINEL}]}}",
+            "steps[0].tables[0].checks[0].values[1]: repeats an earlier value",
+        ),
+        (
+            "{type: accepted_values, column: s, values: []}",
+            "steps[0].tables[0].checks[0].values: List should have at least 1 item"
+            " after validation, not 0",
+        ),
+        (
+            f"{{type: min_rows, count: 0, note: {SENTINEL}}}",
+            "steps[0].tables[0].checks[0].count: Input should be greater than or equal to 1",
+        ),
+        (
+            "{type: freshness, max_age_hours: 3}",
+            "steps[0].tables[0].checks[0].column: Field required",
+        ),
+    ],
+)
+def test_malformed_declared_checks_are_reported_at_yaml_paths_without_values(check, problem):
+    pipeline = (
+        "name: shop_sync\nsteps:\n  - name: sync_shop\n    source: shop\n"
+        f"    tables: [{{name: t, mode: full_refresh, primary_key: id, checks: [{check}]}}]"
+    )
+
+    error = raised_by(load_pipeline, pipeline)
+
+    assert error.problems[0] == problem
+    assert_secret_free(error)

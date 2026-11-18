@@ -1,12 +1,23 @@
 # Blockers
 
-- 2026-11-17 | horizon 1 | Do dbt-core/dbt-postgres/dbt-duckdb (and later PyAirbyte) fit the same uv lock as dlt + dagster + dagster-postgres?
+- 2026-11-17 | horizon 1 | Do dbt-core/dbt-postgres/dbt-duckdb (and later PyAirbyte) fit the same uv lock as dlt + dagster + dagster-postgres? — resolved by decision 2026-11-18
 - 2026-11-17 | horizon 1 | How do dbt models reference dlt's raw_<source> tables (normalized names, _dlt_* columns), and does adops generate sources.yml?
-- 2026-11-17 | horizon 1 | Can dlt schema contracts detect renamed/dropped/retyped Postgres columns as a Breaking Change, or is an adops schema snapshot needed?
-- 2026-11-17 | horizon 1 | How does 'halt this Step and downstream' work once Steps form a graph rather than a linear chain?
+- 2026-11-17 | horizon 1 | Can dlt schema contracts detect renamed/dropped/retyped Postgres columns as a Breaking Change, or is an adops schema snapshot needed? — resolved by decision 2026-11-18
+- 2026-11-17 | horizon 1 | How does 'halt this Step and downstream' work once Steps form a graph rather than a linear chain? — resolved by decision 2026-11-18
 - 2026-11-17 | horizon 1 | How do Pipelines run on a schedule when Dagster runs in-process only (daemon/code location vs cron/CI)?
 - 2026-11-17 | horizon 1 | How do Branch Environment schemas line up with dlt datasets and dbt --defer --state, and where does stage dbt state live?
 - 2026-11-17 | horizon 1 | How can PR workflows reach the stage Warehouse without exposing secrets to forked PRs?
 - 2026-11-17 | horizon 1 | Which engine performs Reverse Sync into Postgres, how is the Preview diff computed without writing, and what are delete semantics?
 - 2026-11-17 | horizon 1 | Does the single adops.yaml Environment model hold up for stage/prod deployments and generated Branch Environments?
 - 2026-11-17 | horizon 1 | How long and how stable is the Docker E2E job on GitHub Actions as Steps are added?
+- 2026-11-18 | horizon 2 | Do the planned horizon-2 names hold after execute (SchemaSnapshotStore, Clock, PlannedStep closures, CheckResult.check: str)?
+- 2026-11-18 | horizon 2 | How do you tell a dbt crash from a test failure in the dbtRunner result, and is `failures` ever null?
+- 2026-11-18 | horizon 2 | Is dbtRunner safe to call several times in one process and inside an in-process Dagster op?
+- 2026-11-18 | horizon 2 | Which dbt outputs (logs, compiled SQL, run_results messages, exception text) echo profile values or the host?
+- 2026-11-18 | horizon 2 | Does DuckDB's single-writer lock break when dlt, the snapshot store and dbt-duckdb open the same file in one run?
+- 2026-11-18 | horizon 2 | Which dbt-duckdb version does the lock resolve to, and does it pin duckdb against the installed 1.5.6?
+- 2026-11-18 | horizon 2 | Will a dbt build plus the failure scenarios fit the 20-minute Docker E2E job?
+- 2026-11-18 | horizon 2 | Do dlt destination connection failures surface a stable exception type to classify as 'Warehouse unreachable'?
+- 2026-11-18 | horizon 2 | Do dlt duckdb type mapping and identifier normalization differ enough from Postgres to break sources.yml, models or declared-Check measurements?
+- 2026-11-18 | horizon 2 | Which horizon redacts dlt load-failure output (row values, tracebacks) so a failed load never prints Source data?
+- 2026-11-18 | horizon 2 | When a Source column drops NOT NULL, the Warehouse column keeps it and the next load fails with a raw constraint error (row values on Postgres) — relax it automatically, or report it as a Breaking Change?

@@ -1,10 +1,12 @@
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 from adops.domain.checks import CheckResult, LoadFacts, SourceFacts
-from adops.domain.pipeline import SyncStep
+from adops.domain.pipeline import SyncStep, SyncTable
+from adops.domain.schema_snapshot import TableShape
 
 MASK = "***"
 
@@ -42,6 +44,41 @@ class Sync(Protocol):
     def sync(
         self, step: SyncStep, source: ResolvedConnection, warehouse: ResolvedConnection
     ) -> SyncResult:
+        ...
+
+    def make_columns_nullable(
+        self,
+        step: SyncStep,
+        table: SyncTable,
+        warehouse: ResolvedConnection,
+        columns: Collection[str],
+    ) -> None:
+        """Let loaded columns that the Source no longer has hold NULL in the Warehouse."""
+        ...
+
+
+@runtime_checkable
+class SchemaSnapshotStore(Protocol):
+    """Keeps each Source table's last accepted shape in the Warehouse; it never judges a change."""
+
+    def load(
+        self, warehouse: ResolvedConnection, pipeline: str, source: str, table: str
+    ) -> TableShape | None: ...
+
+    def save(
+        self,
+        warehouse: ResolvedConnection,
+        pipeline: str,
+        source: str,
+        table: str,
+        shape: TableShape,
+    ) -> None: ...
+
+
+@runtime_checkable
+class Clock(Protocol):
+    def now(self) -> datetime:
+        """The current moment, timezone-aware."""
         ...
 
 

@@ -33,3 +33,42 @@ def test_domain_imports_only_stdlib_pydantic_yaml_and_itself():
                 offenders.setdefault(source.name, []).append(module)
 
     assert offenders == {}
+
+
+CLOCK_READS = {"now", "utcnow", "today"}
+
+
+def clock_reads(source: str) -> list[str]:
+    """Calls like `datetime.now()` or `dt.utcnow()`, whatever the receiver is named."""
+    return [
+        ast.unparse(node.func)
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in CLOCK_READS
+    ]
+
+
+def test_domain_never_reads_the_clock():
+    offenders = {
+        source.name: reads
+        for source in DOMAIN.glob("*.py")
+        if (reads := clock_reads(source.read_text()))
+    }
+
+    assert offenders == {}
+
+
+def test_clock_reads_are_found_under_any_alias():
+    source = """
+from datetime import datetime, date
+from datetime import datetime as dt
+import datetime as d
+a = datetime.now(UTC)
+b = dt.utcnow()
+c = d.datetime.now()
+e = date.today()
+f = now()
+"""
+
+    assert clock_reads(source) == ["datetime.now", "dt.utcnow", "d.datetime.now", "date.today"]

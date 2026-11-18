@@ -1,5 +1,5 @@
 import copy
-from datetime import datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -9,10 +9,18 @@ from adops.domain.checks import (
     CheckStatus,
     LoadFacts,
     SourceFacts,
+    evaluate_declared_checks,
     evaluate_load_checks,
     evaluate_preflight_checks,
 )
-from adops.domain.pipeline import SkipChecks, SyncTable
+from adops.domain.pipeline import (
+    AcceptedValuesCheck,
+    FreshnessCheck,
+    MinRowsCheck,
+    NotNullCheck,
+    SkipChecks,
+    SyncTable,
+)
 
 FULL = SyncTable(name="customers", mode="full_refresh", primary_key="id")
 INCREMENTAL = SyncTable(name="orders", mode="incremental", primary_key="id", cursor="updated_at")
@@ -169,6 +177,11 @@ def test_facts_and_results_are_immutable(value):
         value.table = "other"
 
 
+def test_source_facts_carry_column_types_when_measured():
+    assert SourceFacts(True, frozenset({"id"})).column_types == {}
+    assert SourceFacts(True, frozenset({"id"}), {"id": "integer"}).column_types == {"id": "integer"}
+
+
 def test_messages_name_table_and_check_but_never_cursor_values():
     leaking = "LEAK-2031-01-01"
     facts = load_facts(
@@ -223,3 +236,187 @@ def test_without_skip_checks_nothing_is_skipped(table):
     )
 
     assert CheckStatus.SKIPPED not in {r.status for r in results}
+
+
+NOW = datetime(2031, 3, 1, 12, 0, tzinfo=UTC)
+DECLARED = FULL.model_copy(
+    update={
+        "checks": [
+            NotNullCheck(type="not_null", column="email"),
+            AcceptedValuesCheck(type="accepted_values", column="status", values=["a", "b"]),
+            MinRowsCheck(type="min_rows", count=10),
+            FreshnessCheck(type="freshness", column="updated_at", max_age_hours=24),
+        ]
+    }
+)
+
+
+def declared_facts(**overrides) -> LoadFacts:
+    measured = {
+        "null_counts": {"email": 0},
+        "unexpected_value_counts": {"status": 0},
+        "newest_values": {"updated_at": NOW},
+    }
+    return load_facts(**(measured | overrides))
+
+
+def declared(name: str, facts: LoadFacts, now: datetime = NOW) -> CheckResult:
+    return {r.check: r for r in evaluate_declared_checks(DECLARED, facts, now)}[name]
+
+
+def test_declared_checks_yield_one_result_each_in_declaration_order():
+    results = evaluate_declared_checks(DECLARED, declared_facts(), NOW)
+
+    assert [(r.check, r.table, r.status) for r in results] == [
+        ("not_null(email)", "customers", CheckStatus.PASS),
+        ("accepted_values(status)", "customers", CheckStatus.PASS),
+        ("min_rows", "customers", CheckStatus.PASS),
+        ("freshness(updated_at)", "customers", CheckStatus.PASS),
+    ]
+    assert results[0].message == "customers: not_null(email) passed"
+
+
+def test_a_table_without_declared_checks_yields_no_declared_results():
+    assert evaluate_declared_checks(FULL, declared_facts(), NOW) == []
+
+
+@pytest.mark.parametrize(
+    ("nulls", "status", "message"),
+    [
+        ({"email": 0}, "pass", "customers: not_null(email) passed"),
+        ({"email": 1}, "fail", "customers: not_null(email) failed — 1 rows with no value"),
+        ({}, "fail", "customers: not_null(email) failed — the null count was not measured"),
+    ],
+)
+def test_not_null(nulls, status, message):
+    result = declared("not_null(email)", declared_facts(null_counts=nulls))
+
+    assert (result.status, result.message) == (status, message)
+
+
+@pytest.mark.parametrize(
+    ("unexpected", "status", "detail"),
+    [
+        ({"status": 0}, "pass", None),
+        ({"status": 1}, "fail", "1 rows with a value outside the accepted list"),
+        ({}, "fail", "the count of values outside the accepted list was not measured"),
+    ],
+)
+def test_accepted_values(unexpected, status, detail):
+    result = declared("accepted_values(status)", declared_facts(unexpected_value_counts=unexpected))
+
+    assert result.status == status
+    if detail is not None:
+        assert result.message == f"customers: accepted_values(status) failed — {detail}"
+
+
+@pytest.mark.parametrize(("rows", "status"), [(10, "pass"), (11, "pass"), (9, "fail")])
+def test_min_rows(rows, status):
+    assert declared("min_rows", declared_facts(warehouse_rows_after=rows)).status == status
+
+
+def test_min_rows_counts_the_warehouse_table_not_the_rows_loaded_this_run():
+    facts = declared_facts(warehouse_rows_before=10, warehouse_rows_after=10, source_rows=0)
+    short = declared_facts(warehouse_rows_before=0, warehouse_rows_after=9, source_rows=50)
+
+    assert declared("min_rows", facts).status is CheckStatus.PASS
+    assert declared("min_rows", short).message == (
+        "customers: min_rows failed — Warehouse has 9 rows, at least 10 required"
+    )
+
+
+@pytest.mark.parametrize(
+    ("newest", "status"),
+    [
+        (NOW, "pass"),
+        (NOW + timedelta(hours=1), "pass"),
+        (NOW - timedelta(hours=24), "pass"),
+        (NOW - timedelta(hours=24, seconds=1), "fail"),
+        (datetime(2031, 2, 28, 12, 0), "pass"),
+        (datetime(2031, 2, 28, 11, 59, 59), "fail"),
+        (datetime(2031, 2, 28, 14, 0, tzinfo=timezone(timedelta(hours=2))), "pass"),
+        (datetime(2031, 2, 28, 13, 59, 59, tzinfo=timezone(timedelta(hours=2))), "fail"),
+        (datetime(2031, 2, 28, 7, 0, tzinfo=timezone(timedelta(hours=-5))), "pass"),
+        (datetime(2031, 2, 28, 6, 59, 59, tzinfo=timezone(timedelta(hours=-5))), "fail"),
+    ],
+)
+def test_freshness_boundaries_across_naive_and_offset_timestamps(newest, status):
+    facts = declared_facts(newest_values={"updated_at": newest})
+
+    assert declared("freshness(updated_at)", facts).status == status
+
+
+def test_freshness_treats_a_naive_now_as_utc():
+    facts = declared_facts(newest_values={"updated_at": NOW - timedelta(hours=25)})
+
+    result = declared("freshness(updated_at)", facts, now=NOW.replace(tzinfo=None))
+
+    assert result.status is CheckStatus.FAIL
+
+
+@pytest.mark.parametrize(
+    ("newest_values", "detail"),
+    [
+        ({"updated_at": None}, "the column has no values"),
+        ({}, "the newest value was not measured"),
+    ],
+)
+def test_freshness_fails_without_a_newest_value(newest_values, detail):
+    result = declared("freshness(updated_at)", declared_facts(newest_values=newest_values))
+
+    assert result.message == f"customers: freshness(updated_at) failed — {detail}"
+
+
+def test_declared_check_messages_hold_counts_and_ages_but_no_row_values():
+    stale = datetime(2031, 2, 27, 9, 30, 15)
+    facts = declared_facts(
+        null_counts={"email": 4},
+        unexpected_value_counts={"status": 7},
+        newest_values={"updated_at": stale},
+        warehouse_rows_after=3,
+    )
+
+    results = {r.check: r for r in evaluate_declared_checks(DECLARED, facts, NOW)}
+
+    assert {r.status for r in results.values()} == {CheckStatus.FAIL}
+    assert results["accepted_values(status)"].message == (
+        "customers: accepted_values(status) failed — 7 rows with a value outside the accepted list"
+    )
+    freshness = results["freshness(updated_at)"].message
+    assert freshness.endswith("the newest value is 50.5 hours old, more than 24 hours")
+    for result in results.values():
+        assert stale.isoformat() not in result.message
+        assert "2031" not in result.message
+        assert result.message.startswith(f"customers: {result.check} failed — ")
+
+
+def test_a_skipped_declared_check_is_reported_with_its_reason_and_not_evaluated():
+    table = DECLARED.model_copy(
+        update={"skip_checks": SkipChecks(checks=["not_null(email)"], reason="backfill")}
+    )
+
+    results = {
+        r.check: r
+        for r in evaluate_declared_checks(table, declared_facts(null_counts={"email": 3}), NOW)
+    }
+
+    assert results["not_null(email)"].status is CheckStatus.SKIPPED
+    assert results["not_null(email)"].message == "customers: not_null(email) skipped — backfill"
+    assert results["min_rows"].status is CheckStatus.PASS
+
+
+def test_same_facts_and_now_always_give_the_same_declared_results():
+    facts = declared_facts(null_counts={"email": 2})
+
+    first = evaluate_declared_checks(DECLARED, facts, NOW)
+
+    assert first == evaluate_declared_checks(DECLARED, copy.deepcopy(facts), NOW)
+
+
+def test_built_in_and_declared_results_compare_by_check_name():
+    result = CheckResult(CheckName.PRIMARY_KEY_UNIQUE, "t", CheckStatus.PASS, "m")
+
+    assert result.check == "primary_key_unique"
+    assert load_facts().null_counts == {}
+    assert load_facts().unexpected_value_counts == {}
+    assert load_facts().newest_values == {}

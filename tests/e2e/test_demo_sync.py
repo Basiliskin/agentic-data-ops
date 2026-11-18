@@ -13,12 +13,14 @@ from dotenv import dotenv_values
 pytestmark = pytest.mark.e2e
 
 ADOPS = str(Path(sys.executable).parent / "adops")
+RUN = ("run", "shop_sync")
 SEED_EMAIL = "customer7@example.com"
 CUSTOMER_CHECKS = (
     "source_tables_exist",
     "primary_key_unique",
     "primary_key_not_null",
     "row_count_matches",
+    "not_null(email)",
 )
 ORDER_CHECKS = (
     "source_tables_exist",
@@ -26,6 +28,7 @@ ORDER_CHECKS = (
     "primary_key_not_null",
     "no_row_loss",
     "cursor_not_backwards",
+    "min_rows",
 )
 
 
@@ -85,9 +88,9 @@ def counts(env):
     }
 
 
-def adops_run(project):
+def adops_run(project, *args):
     result = subprocess.run(
-        [ADOPS, "run", "shop_sync"],
+        [ADOPS, *args],
         cwd=project,
         capture_output=True,
         text=True,
@@ -111,10 +114,10 @@ def assert_all_checks_pass(output):
     assert "check orders row_count_matches" not in output
 
 
-def test_demo_full_refresh_incremental_and_missing_table(demo):
+def test_demo_incremental_breaking_change_and_missing_table(demo):
     project, env = demo
 
-    code, output = adops_run(project)
+    code, output = adops_run(project, *RUN)
 
     assert code == 0, output
     assert "step sync_shop: passed — customers 20 rows, orders 100 rows" in output
@@ -130,7 +133,7 @@ def test_demo_full_refresh_incremental_and_missing_table(demo):
         " WHERE id = 5",
     )
 
-    code, output = adops_run(project)
+    code, output = adops_run(project, *RUN)
 
     assert code == 0, output
     assert "step sync_shop: passed — customers 20 rows, orders 2 rows" in output
@@ -144,17 +147,68 @@ def test_demo_full_refresh_incremental_and_missing_table(demo):
 
     shop(
         env,
-        "INSERT INTO orders VALUES (102, 2, 5.00, TIMESTAMPTZ '2026-04-01 00:00:00+00');"
+        "ALTER TABLE orders DROP COLUMN customer_id;"
+        "INSERT INTO orders VALUES (102, 5.00, TIMESTAMPTZ '2026-03-15 00:00:00+00')",
+    )
+    before_halt = counts(env)
+
+    code, output = adops_run(project, *RUN)
+
+    assert code == 1, output
+    assert "Breaking Change in orders: customer_id dropped" in output
+    assert_no_secret_or_row_value(output, env)
+    assert counts(env) == before_halt
+
+    code, output = adops_run(project, "accept-schema", "shop_sync", "orders")
+
+    assert code == 0, output
+    assert "Accepted the current shape of orders" in output
+    assert "in Environment dev." in output
+    assert "may now be NULL in the Warehouse: customer_id" in output
+    assert_no_secret_or_row_value(output, env)
+
+    code, output = adops_run(project, *RUN)
+
+    assert code == 0, output
+    assert_all_checks_pass(output)
+    assert_no_secret_or_row_value(output, env)
+    assert counts(env) == {"customers": 20, "orders": 102}
+
+    shop(env, "UPDATE customers SET email = NULL WHERE id = 7")
+
+    code, output = adops_run(project, *RUN)
+
+    assert code == 1, output
+    assert "  check customers not_null(email): fail" in output
+    assert "customers: not_null(email) failed — 1 rows with no value" in output
+    assert "Breaking Change" not in output
+    assert_no_secret_or_row_value(output, env)
+    for nulled_row_value in ("(7,", "2026-01-01 07:00", "2026, 1, 1, 7"):
+        assert nulled_row_value not in output
+
+    shop(env, f"UPDATE customers SET email = '{SEED_EMAIL}' WHERE id = 7")
+
+    code, output = adops_run(project, *RUN)
+
+    assert code == 0, output
+    assert_all_checks_pass(output)
+    assert_no_secret_or_row_value(output, env)
+    nulls = "SELECT count(*) FROM raw_shop.customers WHERE email IS NULL"
+    assert warehouse(env, nulls) == [(0,)]
+
+    shop(
+        env,
+        "INSERT INTO orders VALUES (103, 5.00, TIMESTAMPTZ '2026-04-01 00:00:00+00');"
         "DROP TABLE customers",
     )
 
-    code, output = adops_run(project)
+    code, output = adops_run(project, *RUN)
 
     assert code == 1, output
     assert "  check customers source_tables_exist: fail" in output
     assert "customers: source_tables_exist failed — table not found in the Source" in output
     assert_no_secret_or_row_value(output, env)
-    assert counts(env) == {"customers": 20, "orders": 101}
+    assert counts(env) == {"customers": 20, "orders": 102}
 
     for name in ("SHOP_PASSWORD", "WAREHOUSE_PASSWORD"):
         leaks = (

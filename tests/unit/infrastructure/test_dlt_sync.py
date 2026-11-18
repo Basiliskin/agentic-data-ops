@@ -1,13 +1,20 @@
 import logging
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
 import pytest
+import sqlalchemy as sa
 
 from adops.application.ports import ResolvedConnection, Sync
 from adops.application.run_pipeline import SyncFailedError
 from adops.domain.pipeline import SyncStep
+from adops.domain.schema_snapshot import (
+    TableShape,
+    find_breaking_changes,
+    normalize_column_type,
+)
 from adops.infrastructure.dlt_sync import (
     DltSync,
     UnknownConnectionKindError,
@@ -208,6 +215,114 @@ def test_null_key_in_the_warehouse_is_counted_and_not_as_a_duplicate(shop):
     assert (facts.duplicate_keys, facts.null_keys) == (0, 1)
 
 
+ROW_VALUE = "row-value-sentinel"
+
+
+def events_table(*checks: dict[str, object]) -> dict[str, object]:
+    return {
+        "name": "events",
+        "mode": "incremental",
+        "primary_key": "id",
+        "cursor": "id",
+        "checks": list(checks),
+    }
+
+
+def with_events(shop: Shop) -> Shop:
+    shop.execute(
+        "CREATE TABLE events (id INTEGER PRIMARY KEY, status TEXT, priority INTEGER, "
+        "happened_at TIMESTAMP, day DATE, note TEXT)",
+        "INSERT INTO events VALUES "
+        "(1, 'open', 1, '2026-01-01 00:00:00', '2026-01-01', 'a'), "
+        "(2, NULL, 2, '2026-01-03 06:00:00', '2026-01-05', NULL), "
+        "(3, 'lost', 3, NULL, NULL, 'b'), "
+        f"(4, 'it''s', NULL, '2026-01-02 00:00:00', '2026-01-02', '{ROW_VALUE}')",
+    )
+    return shop
+
+
+def test_declared_check_facts_are_measured_in_the_warehouse(shop):
+    events = events_table(
+        {"type": "not_null", "column": "status"},
+        {"type": "not_null", "column": "note"},
+        {"type": "not_null", "column": "id"},
+        {"type": "accepted_values", "column": "status", "values": ["open", "it's"]},
+        {"type": "accepted_values", "column": "priority", "values": [1, 2]},
+        {"type": "freshness", "column": "happened_at", "max_age_hours": 24},
+        {"type": "freshness", "column": "day", "max_age_hours": 24},
+        {"type": "min_rows", "count": 1},
+    )
+
+    facts = with_events(shop).sync(step(events)).load_facts["events"]
+
+    assert facts.null_counts == {"status": 1, "note": 1, "id": 0}
+    assert facts.unexpected_value_counts == {"status": 1, "priority": 1}
+    assert facts.newest_values == {
+        "happened_at": datetime(2026, 1, 3, 6),
+        "day": datetime(2026, 1, 5),
+    }
+
+
+def test_accepted_values_does_not_count_null_as_outside_the_list(shop):
+    events = events_table({"type": "accepted_values", "column": "status", "values": ["open"]})
+
+    facts = with_events(shop).sync(step(events)).load_facts["events"]
+
+    # 'lost' and "it's" are outside the list; the NULL status is left to not_null.
+    assert facts.unexpected_value_counts == {"status": 2}
+
+
+def test_freshness_of_a_timestamptz_column_is_time_zone_aware(shop):
+    events = step(events_table({"type": "freshness", "column": "happened_at", "max_age_hours": 1}))
+    with_events(shop).sync(events)
+    shop.warehouse_execute(
+        "SET TimeZone = 'UTC'",
+        "ALTER TABLE raw_shop.events ALTER happened_at TYPE TIMESTAMPTZ",
+    )
+
+    newest = shop.sync(events).load_facts["events"].newest_values["happened_at"]
+
+    assert newest.tzinfo is not None
+    assert newest == datetime(2026, 1, 3, 6, tzinfo=UTC)
+
+
+def test_a_table_without_declared_checks_leaves_the_declared_facts_empty(shop):
+    facts = with_events(shop).sync(step(events_table())).load_facts["events"]
+
+    assert (facts.null_counts, facts.unexpected_value_counts, facts.newest_values) == ({}, {}, {})
+
+
+def test_a_table_never_loaded_reports_no_nulls_and_no_newest_value(shop):
+    empty = {
+        **INCREMENTAL_ORDERS,
+        "name": "empty_orders",
+        "checks": [
+            {"type": "not_null", "column": "updated_at"},
+            {"type": "accepted_values", "column": "updated_at", "values": [1]},
+            {"type": "freshness", "column": "updated_at", "max_age_hours": 1},
+        ],
+    }
+
+    facts = shop.sync(step(empty)).load_facts["empty_orders"]
+
+    assert facts.null_counts == {"updated_at": 0}
+    assert facts.unexpected_value_counts == {"updated_at": 0}
+    assert facts.newest_values == {"updated_at": None}
+
+
+def test_freshness_of_a_text_column_fails_without_showing_a_value(shop):
+    events = events_table({"type": "freshness", "column": "note", "max_age_hours": 1})
+
+    with pytest.raises(SyncFailedError) as raised:
+        with_events(shop).sync(step(events))
+
+    assert str(raised.value) == (
+        "Step orders, table events: UnsupportedFreshnessColumnError: "
+        "freshness column note holds str values, not timestamps"
+    )
+    assert ROW_VALUE not in str(raised.value)
+
+
 def test_preflight_reports_missing_tables_and_columns_without_loading(shop):
     allowlist = step(
         INCREMENTAL_ORDERS,
@@ -225,6 +340,50 @@ def test_preflight_reports_missing_tables_and_columns_without_loading(shop):
     assert facts["refunds"].columns == frozenset()
     assert not shop.warehouse_path.exists()
     assert not (shop.project / ".adops").exists()
+
+
+def test_preflight_reports_normalized_column_types_compiled_by_the_dialect(shop):
+    shop.execute(
+        "CREATE TABLE typed (id INTEGER PRIMARY KEY, name VARCHAR(40), price NUMERIC(10,2), "
+        "seen_at TIMESTAMP, _dlt_id TEXT)"
+    )
+
+    facts = shop.adapter().preflight(step({**FULL_REFRESH_CUSTOMERS, "name": "typed"}), shop.source)
+
+    types = facts["typed"].column_types
+    assert types == {
+        "id": "integer",
+        "name": "varchar(40)",
+        "price": "numeric(10, 2)",
+        "seen_at": "timestamp",
+    }
+    assert all(normalize_column_type(kind) == kind for kind in types.values())
+    assert set(types) == facts["typed"].columns
+    assert "_dlt_id" not in facts["typed"].columns
+
+
+def test_postgres_timestamptz_keeps_its_time_zone_when_compiled():
+    engine = source_engine("postgres", unreachable_postgres())
+    compiled = sa.TIMESTAMP(timezone=True).compile(dialect=engine.dialect)
+
+    assert normalize_column_type(compiled) == "timestamptz"
+
+
+def test_preflight_twice_on_an_unchanged_source_gives_equal_shapes(shop):
+    allowlist = step(FULL_REFRESH_CUSTOMERS, INCREMENTAL_ORDERS)
+
+    first = shop.adapter().preflight(allowlist, shop.source)
+    second = shop.adapter().preflight(allowlist, shop.source)
+
+    for table in ("customers", "orders"):
+        assert first[table].column_types
+        assert TableShape(first[table].column_types) == TableShape(second[table].column_types)
+    assert (
+        find_breaking_changes(
+            TableShape(first["orders"].column_types), TableShape(second["orders"].column_types)
+        )
+        == ()
+    )
 
 
 def test_sync_of_a_missing_table_fails_naming_step_and_table(shop):
@@ -339,3 +498,54 @@ def test_postgres_source_engine_keeps_the_password_out_of_its_url_text():
 def test_unknown_source_kind_is_rejected_clearly():
     with pytest.raises(UnknownConnectionKindError, match=r"unknown Source kind 'oracle' \(known"):
         source_engine("oracle", unreachable_postgres())
+
+
+def not_null_columns(shop: Shop, table: str, schema: str = "raw_shop") -> set[str]:
+    rows = shop.warehouse_rows(
+        "SELECT column_name FROM information_schema.columns "
+        f"WHERE table_schema = '{schema}' AND table_name = '{table}' AND is_nullable = 'NO'"
+    )
+    return {name for (name,) in rows}
+
+
+def test_make_columns_nullable_drops_not_null_only_on_named_existing_columns(shop):
+    orders = step(INCREMENTAL_ORDERS)
+    shop.sync(orders)
+    shop.warehouse_execute(
+        *(
+            f"ALTER TABLE {schema}.orders ALTER COLUMN {column} SET NOT NULL"
+            for schema in ("raw_shop", "raw_shop_staging")
+            for column in ("amount", "updated_at")
+        )
+    )
+    before = not_null_columns(shop, "orders")
+    staging_before = not_null_columns(shop, "orders", "raw_shop_staging")
+
+    shop.adapter().make_columns_nullable(
+        orders, orders.tables[0], shop.warehouse, ["amount", "never_loaded"]
+    )
+
+    assert {"amount", "updated_at"} <= before
+    assert not_null_columns(shop, "orders") == before - {"amount"}
+    assert not_null_columns(shop, "orders", "raw_shop_staging") == staging_before - {"amount"}
+
+
+def test_make_columns_nullable_before_any_load_does_nothing(shop):
+    orders = step(INCREMENTAL_ORDERS)
+
+    shop.adapter().make_columns_nullable(orders, orders.tables[0], shop.warehouse, ["amount"])
+
+    assert not shop.warehouse_path.exists() or not_null_columns(shop, "orders") == set()
+
+
+def test_make_columns_nullable_failure_is_redacted(shop):
+    orders = step(INCREMENTAL_ORDERS)
+    adapter = DltSync(shop.project, "shop", source_kind="sqlite", warehouse_kind="postgres")
+
+    with pytest.raises(SyncFailedError) as error:
+        adapter.make_columns_nullable(
+            orders, orders.tables[0], unreachable_postgres(), ["amount"]
+        )
+
+    assert str(error.value).startswith("Step orders, table orders: ")
+    assert SENTINEL_PASSWORD not in str(error.value)

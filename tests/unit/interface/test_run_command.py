@@ -1,23 +1,29 @@
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from adops.application.ports import (
+    Clock,
     Orchestrator,
     ResolvedConnection,
     RunPlan,
     RunResult,
+    SchemaSnapshotStore,
     Sync,
     SyncResult,
 )
 from adops.application.run_pipeline import InOrderOrchestrator
 from adops.domain.checks import LoadFacts, SourceFacts
 from adops.domain.pipeline import SyncStep
+from adops.domain.schema_snapshot import TableShape
+from adops.infrastructure.clock import SystemClock
 from adops.infrastructure.dagster_orchestrator import DagsterOrchestrator, JobCompileError
 from adops.infrastructure.dlt_sync import DltSync
+from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
 from adops.interface import cli, run_command
 
 runner = CliRunner()
@@ -107,6 +113,33 @@ def sync(monkeypatch):
     fake = FakeSync()
     monkeypatch.setattr(run_command, "build_sync", lambda project, pipeline: fake)
     return fake
+
+
+@dataclass
+class InMemorySnapshotStore:
+    shapes: dict[tuple[str, str, str], TableShape] = field(default_factory=dict)
+
+    def load(
+        self, warehouse: ResolvedConnection, pipeline: str, source: str, table: str
+    ) -> TableShape | None:
+        return self.shapes.get((pipeline, source, table))
+
+    def save(
+        self,
+        warehouse: ResolvedConnection,
+        pipeline: str,
+        source: str,
+        table: str,
+        shape: TableShape,
+    ) -> None:
+        self.shapes[(pipeline, source, table)] = shape
+
+
+@pytest.fixture(autouse=True)
+def snapshot_store(monkeypatch):
+    store = InMemorySnapshotStore()
+    monkeypatch.setattr(run_command, "build_snapshot_store", lambda project: store)
+    return store
 
 
 @pytest.fixture
@@ -267,11 +300,69 @@ def test_dagster_home_unset_without_dagster_yaml(project, orchestrator):
     assert dict(os.environ) == before
 
 
-def test_real_adapters_are_built_for_the_project(tmp_path):
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_run_passes_the_project_snapshot_store_to_the_pipeline(project, monkeypatch):
+    sentinel = InMemorySnapshotStore()
+    built_for: list[Path] = []
+    received: list[object] = []
+
+    def build(project_dir: Path) -> InMemorySnapshotStore:
+        built_for.append(project_dir)
+        return sentinel
+
+    def capture(*args: object) -> RunResult:
+        received.append(args[5])
+        return RunResult("shop_sync", "dev", ())
+
+    monkeypatch.setattr(run_command, "build_snapshot_store", build)
+    monkeypatch.setattr(run_command, "run_pipeline", capture)
+
+    assert invoke(project).exit_code == 0
+    assert received == [sentinel] and received[0] is sentinel
+    assert built_for == [project.resolve()]
+
+
+@pytest.mark.usefixtures("sync", "orchestrator", "snapshot_store")
+def test_run_passes_the_built_clock_to_the_pipeline(project, monkeypatch):
+    clock = SystemClock()
+    received: list[object] = []
+
+    def capture(*args: object) -> RunResult:
+        received.append(args[6])
+        return RunResult("shop_sync", "dev", ())
+
+    monkeypatch.setattr(run_command, "build_clock", lambda: clock)
+    monkeypatch.setattr(run_command, "run_pipeline", capture)
+
+    assert invoke(project).exit_code == 0
+    assert received == [clock] and received[0] is clock
+
+
+def test_first_run_records_a_snapshot_for_every_table(project, sync, orchestrator, snapshot_store):
+    assert invoke(project).exit_code == 0
+
+    assert set(snapshot_store.shapes) == {
+        ("shop_sync", "shop", "customers"),
+        ("shop_sync", "shop", "orders"),
+    }
+
+
+def test_real_adapters_are_built_for_the_project(tmp_path, monkeypatch):
+    monkeypatch.undo()
     sync = run_command.build_sync(tmp_path, "shop_sync")
     orchestrator = run_command.build_orchestrator()
+    store = run_command.build_snapshot_store(tmp_path)
+    clock = run_command.build_clock()
 
     assert isinstance(sync, DltSync)
     assert isinstance(sync, Sync)
     assert isinstance(orchestrator, DagsterOrchestrator)
     assert isinstance(orchestrator, Orchestrator)
+    assert isinstance(store, WarehouseSnapshotStore)
+    assert isinstance(store, SchemaSnapshotStore)
+    assert isinstance(clock, SystemClock)
+    assert isinstance(clock, Clock)
+    assert vars(store) == {
+        "_pipelines_dir": tmp_path / ".adops" / "dlt",
+        "_warehouse_kind": "postgres",
+    }

@@ -152,6 +152,19 @@ def test_invalid_skip_checks_fail_with_one_line_per_problem(project, skip):
     assert SENTINEL not in result.output
 
 
+def test_malformed_declared_check_is_reported_with_its_yaml_path(project):
+    checks = "        checks:\n          - {type: min_rows, count: 0}\n"
+    write_pipeline(project, "p", pipeline_yaml("p", table_yaml("orders", checks)))
+
+    result = validate("--project", str(project))
+
+    assert result.exit_code == 1
+    problems = result.output.splitlines()
+    assert len(problems) == 1
+    assert problems[0].startswith("pipelines/p.yaml: steps[0].tables[0].checks[0]")
+    assert "Traceback" not in result.output
+
+
 def test_step_source_missing_from_an_environment_is_reported(project):
     write_pipeline(project, "p", pipeline_yaml("p", table_yaml("orders"), source="crm"))
 
