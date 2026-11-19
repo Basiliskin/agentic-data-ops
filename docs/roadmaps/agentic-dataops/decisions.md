@@ -24,3 +24,12 @@
 - 2026-11-18 | horizon 4 | A DuckDB warehouse is `type: duckdb` + `path`, relative to the Project unless absolute, with no secret; resolved as ResolvedDuckDb(path) — because ADR-0007 has nothing to resolve for a local file
 - 2026-11-18 | horizon 4 | The demo stays Postgres by default and ships a commented DuckDB warehouse block; no new Environment or init flag — user choice
 - 2026-11-18 | horizon 4 | The full Docker E2E scenario runs on both Warehouse kinds in one compose stack, reseeding the shop Source between runs; the 20-min CI timeout is not raised — user choice
+- 2026-11-19 | horizon 5 | Only Environments named exactly stage or prod write in a Reverse Sync; every other name gets a Preview, and no config field can change that — because ADR-0003 and writes into operational DBs are risky
+- 2026-11-19 | horizon 5 | adops computes the Reverse Sync Diff itself and applies exactly it in one psycopg transaction; not dlt — so the Preview and the write can never disagree
+- 2026-11-19 | horizon 5 | Reverse Sync never deletes by default; a Step opts in with delete_missing: true — because deletes in an operational database cannot be undone
+- 2026-11-19 | horizon 5 | Every Reverse Sync runs built-in Checks target_columns_exist, key_unique, key_not_null, max_change (default share 0.5, empty target passes), result_not_empty before writing — per ADR-0013
+- 2026-11-19 | horizon 5 | Reverse Sync targets live in a new optional targets map per Environment (PostgresConnection + password_env); adops never creates tables in an operational database — user choice
+- 2026-11-19 | horizon 5 | Local dlt state lives in <project>/.adops/dlt/<env> — because a shared folder made stage inherit dev's Incremental cursor
+- 2026-11-19 | horizon 5 | The CI unit job runs a Postgres service and the Reverse Sync writer is unit-tested against it; the fixture fails, never skips, without ADOPS_TEST_POSTGRES_DSN — user choice
+- 2026-11-19 | horizon 5 | The Preview sample shows at most 5 keys per kind plus changed column names, never values — so no PII or secret reaches output
+- 2026-11-19 | horizon 5 | The demo ships a stage Environment (warehouse_stage DB) and Reverse Syncs a new per-customer dbt model customer_stats into shop.customer_stats — user choice; supersedes the h4 'no new Environment' line for stage

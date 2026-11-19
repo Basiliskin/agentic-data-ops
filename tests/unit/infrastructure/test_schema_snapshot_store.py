@@ -24,7 +24,7 @@ class Warehouse:
         self.connection = ResolvedDuckDb(str(self.path))
 
     def store(self) -> WarehouseSnapshotStore:
-        return WarehouseSnapshotStore(self.project, "duckdb")
+        return WarehouseSnapshotStore(self.project, "duckdb", environment="dev")
 
     def rows(self, sql: str, *parameters: object) -> list[tuple]:
         with duckdb.connect(str(self.path)) as connection:
@@ -111,7 +111,7 @@ def test_quotes_in_keys_are_stored_as_values(warehouse):
 def test_stored_row_holds_only_names_and_types_and_no_connection_details(tmp_path):
     path = tmp_path / "warehouse.duckdb"
     connection = ResolvedDuckDb(str(path))
-    store = WarehouseSnapshotStore(tmp_path, "duckdb")
+    store = WarehouseSnapshotStore(tmp_path, "duckdb", environment="dev")
 
     store.save(connection, "shop", "shop", "orders", ORDERS)
 
@@ -126,7 +126,7 @@ def test_stored_row_holds_only_names_and_types_and_no_connection_details(tmp_pat
     assert all(str(path) not in str(value) and "://" not in str(value) for value in row)
     assert vars(store) == {
         "_project": tmp_path,
-        "_pipelines_dir": tmp_path / ".adops" / "dlt",
+        "_pipelines_dir": tmp_path / ".adops" / "dlt" / "dev",
         "_warehouse_kind": "duckdb",
     }
 
@@ -144,7 +144,7 @@ def assert_holds_no_driver_text(error: Exception) -> None:
 
 
 def test_load_from_an_unreachable_warehouse_raises_warehouse_unreachable(tmp_path):
-    store = WarehouseSnapshotStore(tmp_path, "postgres")
+    store = WarehouseSnapshotStore(tmp_path, "postgres", environment="dev")
 
     with pytest.raises(WarehouseUnreachable) as raised:
         store.load(UNREACHABLE, "shop", "shop", "orders")
@@ -153,7 +153,7 @@ def test_load_from_an_unreachable_warehouse_raises_warehouse_unreachable(tmp_pat
 
 
 def test_save_to_an_unreachable_warehouse_raises_warehouse_unreachable(tmp_path):
-    store = WarehouseSnapshotStore(tmp_path, "postgres")
+    store = WarehouseSnapshotStore(tmp_path, "postgres", environment="dev")
 
     with pytest.raises(WarehouseUnreachable) as raised:
         store.save(UNREACHABLE, "shop", "shop", "orders", ORDERS)

@@ -1,0 +1,415 @@
+{
+  "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.json",
+  "roadmapTask": "Reverse Sync + Preview: push a dbt result from the Warehouse back into a Postgres database, writing only in stage/prod and producing a Preview (what would change, without writing) in dev",
+  "createdAt": "2026-11-19T08:03:26Z",
+  "updatedAt": "2026-11-19T09:58:59Z",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "reverse-sync-step-config",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-19T08:03:26Z",
+      "baseRef": "3e3e3d046a68b9924eb8de89a595175c2d20cdad",
+      "baseDirty": true,
+      "notes": "already dirty at start (planning output, not this phase): docs/roadmaps/agentic-dataops/{blockers,decisions,discoveries,state}.md, horizon-05 roadmap .json/.md || changed: src/adops/domain/{reverse_sync.py(new),checks.py,pipeline.py,environment.py,loader.py}, tests/unit/domain/{test_reverse_sync.py(new),test_loader.py,test_environment.py}. Adds ReverseSyncStep (IDENTIFIER on every name + both mapping sides, bad dbt column names reported by position), five Reverse Sync CheckNames + REVERSE_SYNC_CHECKS, SkipChecks moved from pipeline.py to checks.py (avoids circular import; still imported by pipeline), reverse_sync in Step union/STEP_TYPES, Environment.targets, ensure_targets_defined (not yet wired into run/validate — later phase).",
+      "unplannedFiles": [],
+      "gateRun": {
+        "ranAt": "2026-11-19T08:07:33Z",
+        "commands": [
+          "uv sync --locked: pass",
+          "uv run ruff check: pass",
+          "uv run pytest tests/unit --cov --cov-report=term-missing: pass (100% branch, 611 tests)",
+          "rubric write-switch grep on src/adops/domain: no match",
+          "g4 wheel/g5 e2e: not run — phase touches no templates or e2e paths"
+        ]
+      },
+      "completedAt": "2026-11-19T08:07:53Z",
+      "gradeResult": {
+        "phaseId": "reverse-sync-step-config",
+        "overallPass": true,
+        "dimensionScores": [
+          {
+            "dimensionId": "identifier-safety-on-every-name-field",
+            "score": 10,
+            "pass": true,
+            "evidence": "Identifier on name/model/target/target_table/key; mapping dict[Identifier, Identifier] min_length=1; extra=forbid; drop-table value, uppercase/quoted key, dotted/spaced table tested. Above a 9: bad mapping keys reported by position, never echoed."
+          },
+          {
+            "dimensionId": "no-write-switch-and-domain-only-targets",
+            "score": 9,
+            "pass": true,
+            "evidence": "targets dict[str, PostgresConnection], empty default, separate from sources; literal password rejected, not echoed; ensure_targets_defined passes with TARGET_PW unset; write/dry_run/preview keys rejected."
+          },
+          {
+            "dimensionId": "sanitized-path-qualified-load-errors",
+            "score": 9,
+            "pass": true,
+            "evidence": "reverse_sync in STEP_TYPES, errors read steps[2].<field>; ensure_targets_defined names target shop and Step push_stats; max_change_share 0/-0.1/1.5 and blank reason tested; password env value not leaked."
+          },
+          {
+            "dimensionId": "skip-checks-scoped-to-reverse-sync",
+            "score": 9,
+            "pass": true,
+            "evidence": "Five CheckNames + REVERSE_SYNC_CHECKS, no verdict logic; Sync checks rejected (does not apply to a Reverse Sync Step); typo max_changes rejected with valid list; blank reason rejected."
+          }
+        ]
+      }
+    },
+    {
+      "phaseId": "reverse-sync-diff-and-checks",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-19T08:34:09Z",
+      "baseRef": "3e3e3d046a68b9924eb8de89a595175c2d20cdad",
+      "baseDirty": true,
+      "notes": "already dirty at start: phase reverse-sync-step-config changes (src/adops/domain/{reverse_sync.py,checks.py,pipeline.py,environment.py,loader.py}, tests/unit/domain/{test_reverse_sync.py,test_loader.py,test_environment.py}) and horizon-05 planning docs/memory || changed: src/adops/domain/reverse_sync_diff.py (new: Diff, RowUpdate, PreviewSample, compute_diff, normalize_value, preview_sample, writes_allowed), src/adops/domain/checks.py (ReverseSyncFacts, evaluate_reverse_sync, five rules; _evaluate now takes subject name + skip_reason callable), tests/unit/domain/test_reverse_sync_diff.py (new), tests/unit/domain/test_checks.py, GLOSSARY.md, src/adops/domain/reverse_sync.py (docstring only: max_change_share counts updates+deletes, not inserts, matching the contract). Diff keeps target-only keys in `kept` when delete_missing is false. Key not in mapping keeps its own name.",
+      "unplannedFiles": [
+        "src/adops/domain/reverse_sync.py"
+      ],
+      "completedAt": "2026-11-19T08:37:56Z",
+      "gradeResult": {
+        "phaseId": "reverse-sync-diff-and-checks",
+        "dimensionScores": [
+          {
+            "dimensionId": "write-rule-exact-stage-prod",
+            "score": 9,
+            "pass": true,
+            "evidence": "frozenset membership, no normalization; parametrized True/False cases incl. 'Stage','PROD',' stage','prod_copy',''."
+          },
+          {
+            "dimensionId": "diff-normalization-no-phantom-updates",
+            "score": 9,
+            "pass": true,
+            "evidence": "Decimal/float/int and naive/aware/non-UTC cases unchanged; True vs 1 is an update; real change lists only order_count. Gap: NaN on both sides still differs (not required)."
+          },
+          {
+            "dimensionId": "opt-in-deletes-and-mapping",
+            "score": 9,
+            "pass": true,
+            "evidence": "same fixture both ways (kept vs deletes), mapping rename and key-mapping tests, FrozenInstanceError asserted."
+          },
+          {
+            "dimensionId": "preview-sample-key-only-bounded",
+            "score": 9,
+            "pass": true,
+            "evidence": "per-kind slicing, ordered 5-per-kind test, sentinel absent from repr, update entries are (key, column names)."
+          },
+          {
+            "dimensionId": "check-verdict-boundaries",
+            "score": 9,
+            "pass": true,
+            "evidence": "strict >, empty target passes, deletes counted only with delete_missing, exact failure messages name columns/counts only, skip carries reason; no I/O."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": "g1 uv sync --locked: pass; g2 uv run ruff check: pass; g3 uv run pytest tests/unit --cov (branch, fail_under=100): pass. g4/g5 not affected (no templates, no e2e change). Note: ruff format --check flags 4 pre-existing files untouched by this phase; not a CI gate."
+    },
+    {
+      "phaseId": "reverse-sync-run-plan",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-19T08:38:33Z",
+      "baseRef": "3e3e3d046a68b9924eb8de89a595175c2d20cdad",
+      "baseDirty": true,
+      "notes": "already dirty at start: GLOSSARY.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,src/adops/domain/checks.py,src/adops/domain/environment.py,src/adops/domain/loader.py,src/adops/domain/pipeline.py,tests/unit/domain/test_checks.py,tests/unit/domain/test_environment.py,tests/unit/domain/test_loader.py,docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.status.last_good.json,src/adops/domain/reverse_sync.py,src/adops/domain/reverse_sync_diff.py,tests/unit/domain/test_reverse_sync.py,tests/unit/domain/test_reverse_sync_diff.py | changed: src/adops/application/{ports,run_pipeline,secrets,accept_schema}.py, tests/unit/application/{fakes,test_run_pipeline,test_secrets}.py, tests/unit/infrastructure/test_dagster_orchestrator.py (+1 discoveries.md line). Adds ReverseSync port (read/apply, ReverseSyncRead, TargetUnreachable/WriteFailed markers), ReverseSyncPreview on StepOutcome/StepReport, PlannedReverseSyncStep (diff once -> checks -> apply only if writes_allowed) with explicit isinstance dispatch + assert_never; secret helpers moved into secrets.py with targets.",
+      "unplannedFiles": [
+        "src/adops/application/accept_schema.py",
+        "tests/unit/infrastructure/test_dagster_orchestrator.py"
+      ],
+      "gateRun": "uv sync --locked: pass; uv run ruff check: pass; uv run pytest tests/unit --cov (100% branch): pass; uv build --wheel: pass; uv run pytest tests/e2e -m e2e: pass (92.9s)",
+      "completedAt": "2026-11-19T08:49:35Z",
+      "gradeResult": {
+        "phaseId": "reverse-sync-run-plan",
+        "dimensionScores": [
+          {
+            "dimensionId": "preview-never-calls-apply",
+            "score": 9,
+            "pass": true,
+            "evidence": "apply only under writes_allowed; dev and Stage tests assert zero apply calls and written=False; no stage string compare in application."
+          },
+          {
+            "dimensionId": "identical-diff-preview-and-write",
+            "score": 9,
+            "pass": true,
+            "evidence": "compute_diff spy called once; applied_diff is the computed Diff; max_change failure raises CheckFailedError before apply; later Step skipped."
+          },
+          {
+            "dimensionId": "secret-confinement-and-fixed-errors",
+            "score": 9,
+            "pass": true,
+            "evidence": "targets in secret_references with name-only MissingSecretError test; fixed unchained errors for both markers; redaction tested; Dagster storage scan clean. Nit: unexpected errors reuse SyncFailedError."
+          },
+          {
+            "dimensionId": "port-keeps-application-engine-free",
+            "score": 9,
+            "pass": true,
+            "evidence": "Protocol with domain/application types only; no engine imports; per-Environment Warehouse test; isinstance dispatch + assert_never; no-engine PipelineValidationError tested; preview defaults None."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "postgres-reverse-sync-adapter",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-19T08:59:42Z",
+      "baseRef": "3e3e3d046a68b9924eb8de89a595175c2d20cdad",
+      "baseDirty": true,
+      "notes": "dirty at start: GLOSSARY.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/accept_schema.py,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/application/secrets.py,src/adops/domain/checks.py,src/adops/domain/environment.py,src/adops/domain/loader.py,src/adops/domain/pipeline.py,tests/unit/application/fakes.py,tests/unit/application/test_run_pipeline.py,tests/unit/application/test_secrets.py,tests/unit/domain/test_checks.py,tests/unit/domain/test_environment.py,tests/unit/domain/test_loader.py,tests/unit/infrastructure/test_dagster_orchestrator.py,docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.status.last_good.json,src/adops/domain/reverse_sync.py,src/adops/domain/reverse_sync_diff.py,tests/unit/domain/test_reverse_sync.py,tests/unit/domain/test_reverse_sync_diff.py | changed: .github/workflows/ci.yml\nsrc/adops/infrastructure/postgres_reverse_sync.py\ntests/unit/infrastructure/conftest.py\ntests/unit/infrastructure/test_postgres_reverse_sync.py — PostgresReverseSync reads the dbt model via the dlt sql_client (both kinds), measures the Target with psycopg, and apply() re-reads under FOR UPDATE, recomputes the Diff from the result rows read() kept, and writes deletes/updates/inserts in one transaction (WriteFailed/TargetUnreachable markers); real-Postgres fixture fails without ADOPS_TEST_POSTGRES_DSN; CI unit job gets a postgres service. | compensation known: revert ci.yml service block, conftest postgres_target fixture, adapter + test module together (adapter unused until CLI wiring).",
+      "unplannedFiles": [],
+      "gateRun": "uv sync --locked: pass; uv run ruff check: pass; uv run pytest tests/unit --cov (branch, fail_under=100) with ADOPS_TEST_POSTGRES_DSN: pass; env -u ADOPS_TEST_POSTGRES_DSN pytest test_postgres_reverse_sync.py: 10 errors with docker-run hint, 0 skips (expected); adapter tests forward + reversed order: pass; uv build --wheel + template grep: pass; uv run pytest tests/e2e -m e2e: pass (109s)",
+      "completedAt": "2026-11-19T09:07:00Z",
+      "gradeResult": {
+        "phaseId": "postgres-reverse-sync-adapter",
+        "dimensionScores": [
+          {
+            "dimensionId": "single-transaction-full-rollback",
+            "score": 9,
+            "pass": true,
+            "evidence": "One connection.transaction() wraps FOR UPDATE re-read, deletes, updates, inserts; last-insert failure test asserts table == before; commit test reads via fresh connection."
+          },
+          {
+            "dimensionId": "concurrent-change-refusal",
+            "score": 9,
+            "pass": true,
+            "evidence": "Re-read with FOR UPDATE inside the transaction; full Diff recomputed and compared by equality; separate-connection change test raises WriteFailed and keeps modified rows."
+          },
+          {
+            "dimensionId": "sql-composed-with-identifiers",
+            "score": 9,
+            "pass": true,
+            "evidence": "Target SQL all sql.Identifier/Placeholder with bound values; Warehouse read is an f-string over dlt-escaped names (TARGET_SCHEMA as dataset, model quoted) — grep hit is the one reason it is not a 10."
+          },
+          {
+            "dimensionId": "measure-only-facts-and-warehouse-kinds",
+            "score": 9,
+            "pass": true,
+            "evidence": "warehouse_kind keyword-only, no default (TypeError test); dbt build then read in one process on DuckDB; Postgres Warehouse tested; missing column/table returned as facts; unreachable passes assert_no_secret."
+          },
+          {
+            "dimensionId": "ci-postgres-fixture-fails-not-skips",
+            "score": 9,
+            "pass": true,
+            "evidence": "No DSN: 10 errors, 0 skips, one-line docker run hint; ci.yml unit job has services.postgres + DSN env; uuid tables per test; reversed order passes."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "reverse-sync-cli-wiring",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-19T09:15:35Z",
+      "baseRef": "3e3e3d046a68b9924eb8de89a595175c2d20cdad",
+      "baseDirty": true,
+      "notes": "pre-existing dirty paths at start: .github/workflows/ci.yml,GLOSSARY.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/accept_schema.py,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/application/secrets.py,src/adops/domain/checks.py,src/adops/domain/environment.py,src/adops/domain/loader.py,src/adops/domain/pipeline.py,tests/unit/application/fakes.py,tests/unit/application/test_run_pipeline.py,tests/unit/application/test_secrets.py,tests/unit/domain/test_checks.py,tests/unit/domain/test_environment.py,tests/unit/domain/test_loader.py,tests/unit/infrastructure/conftest.py,tests/unit/infrastructure/test_dagster_orchestrator.py,docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.status.last_good.json,src/adops/domain/reverse_sync.py,src/adops/domain/reverse_sync_diff.py,src/adops/infrastructure/postgres_reverse_sync.py,tests/unit/domain/test_reverse_sync.py,tests/unit/domain/test_reverse_sync_diff.py,tests/unit/infrastructure/test_postgres_reverse_sync.py | changed: src/adops/interface/run_command.py, src/adops/interface/validate_command.py, tests/unit/interface/test_run_command.py, tests/unit/interface/test_validate_command.py — run builds PostgresReverseSync via monkeypatchable build_reverse_sync(project, kind) and prints a Preview line (would insert/update/delete, or kept N absent from dbt result) or a wrote line chosen by StepReport.preview.written, plus key-only samples; validate runs ensure_targets_defined per Environment and lists Reverse Sync skip_checks after table skips. | graded first pass, all 4 dimensions 9/10; no compensation declared (revert the 4 files to undo).",
+      "unplannedFiles": [],
+      "gateRun": "uv sync --locked: pass; uv run ruff check: pass; uv run pytest tests/unit --cov (branch, fail_under=100) with ADOPS_TEST_POSTGRES_DSN: pass; uv build --wheel + template grep: pass; uv run pytest tests/e2e -m e2e: pass (124s)",
+      "completedAt": "2026-11-19T09:22:41Z",
+      "gradeResult": {
+        "phaseId": "reverse-sync-cli-wiring",
+        "dimensionScores": [
+          {
+            "dimensionId": "preview-vs-wrote-output",
+            "score": 9,
+            "pass": true,
+            "evidence": "Exact Preview/wrote lines asserted for dev and stage (both delete_missing values); kept vs would delete covered; Check-failed stage prints neither; interface grep for compute_diff|writes_allowed|evaluate_reverse_sync empty; wording from preview.written. Not 10: 'would delete 0' printed when nothing is target-only."
+          },
+          {
+            "dimensionId": "cli-output-leaks-no-values",
+            "score": 9,
+            "pass": true,
+            "evidence": "Every reverse-sync run test asserts value and target-password sentinels absent; 7 inserts print 5 keys; Dagster storage covered by test_no_target_password_or_preview_key_reaches_dagster_storage. Not 10: the 5-key bound is proven at the CLI only for inserts."
+          },
+          {
+            "dimensionId": "validate-offline-targets-and-skips",
+            "score": 9,
+            "pass": true,
+            "evidence": "_check_connections runs ensure_targets_defined per Environment; exact missing-target line names stage and crm, exit 1; Reverse Sync skips listed with reasons; build_reverse_sync monkeypatched to raise plus no_network. Not 10: raising fixture only on the new tests."
+          },
+          {
+            "dimensionId": "adapter-wired-with-kind",
+            "score": 9,
+            "pass": true,
+            "evidence": "build_reverse_sync called with the Environment's kind for postgres and duckdb; built instance passed to run_pipeline; real builder returns PostgresReverseSync with no connection opened. Not 10: positional args[9] capture is brittle."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "per-environment-local-state",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-19T09:34:05Z",
+      "baseRef": "3e3e3d046a68b9924eb8de89a595175c2d20cdad",
+      "baseDirty": true,
+      "notes": "already dirty at start (horizon-5 phases 1-5, uncommitted): .github/workflows/ci.yml,GLOSSARY.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/accept_schema.py,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/application/secrets.py,src/adops/domain/checks.py,src/adops/domain/environment.py,src/adops/domain/loader.py,src/adops/domain/pipeline.py,src/adops/interface/run_command.py,src/adops/interface/validate_command.py,tests/unit/application/fakes.py,tests/unit/application/test_run_pipeline.py,tests/unit/application/test_secrets.py,tests/unit/domain/test_checks.py,tests/unit/domain/test_environment.py,tests/unit/domain/test_loader.py,tests/unit/infrastructure/conftest.py,tests/unit/infrastructure/test_dagster_orchestrator.py,tests/unit/interface/test_run_command.py,tests/unit/interface/test_validate_command.py,docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.status.last_good.json,src/adops/domain/reverse_sync.py,src/adops/domain/reverse_sync_diff.py,src/adops/infrastructure/postgres_reverse_sync.py,tests/unit/domain/test_reverse_sync.py,tests/unit/domain/test_reverse_sync_diff.py,tests/unit/infrastructure/test_postgres_reverse_sync.py || CHANGE: new dlt_sync.local_state_dir(project, env) = <project>/.adops/dlt/<env>; DltSync, WarehouseSnapshotStore and PostgresReverseSync take a required keyword `environment`; run_command.build_sync/build_snapshot_store/build_reverse_sync and accept_schema_command pass the selected --env; ProjectSettings.environments keys validated by IDENTIFIER. Files: src/adops/domain/environment.py, src/adops/infrastructure/{dlt_sync,schema_snapshot_store,postgres_reverse_sync}.py, src/adops/interface/{run_command,accept_schema_command}.py; tests: domain/test_environment.py, application/{fakes,test_run_pipeline}.py, infrastructure/{test_dlt_sync,test_schema_snapshot_store,test_postgres_reverse_sync,test_dbt_transform}.py, interface/{test_run_command,test_accept_schema_command}.py. Amendment 1: PostgresReverseSync added to scope. The 'Stage' Environment in fakes REVERSE_SETTINGS renamed to 'staging' because IDENTIFIER rejects capitals. Many of these files were already dirty from phases 1-5, so git diff against baseRef also shows earlier phases' edits.",
+      "amendments": [
+        {
+          "at": "2026-11-19T09:41:41Z",
+          "by": "execute",
+          "reason": "The contract named DltSync and WarehouseSnapshotStore, but PostgresReverseSync (added in this horizon) also builds a dlt pipeline under the shared <project>/.adops/dlt, which would leave state outside any env folder.",
+          "grounding": "src/adops/infrastructure/postgres_reverse_sync.py __init__ set _pipelines_dir = project_dir / '.adops' / 'dlt'; decisions.md horizon 5: local dlt state lives in <project>/.adops/dlt/<env>.",
+          "before": {
+            "filesAffected": [
+              "src/adops/infrastructure/dlt_sync.py",
+              "src/adops/infrastructure/schema_snapshot_store.py",
+              "src/adops/interface/run_command.py",
+              "src/adops/interface/accept_schema_command.py",
+              "tests/unit/infrastructure/test_dlt_sync.py",
+              "tests/unit/infrastructure/test_schema_snapshot_store.py",
+              "tests/unit/interface/test_run_command.py",
+              "src/adops/domain/environment.py",
+              "tests/unit/domain/test_environment.py"
+            ],
+            "changes": [
+              "In src/adops/domain/environment.py constrain ProjectSettings.environments keys with IDENTIFIER from domain/names.py, so an Environment name such as '../x' is rejected at load and the per-Environment state folder always stays inside <project>/.adops/dlt; check the demo and existing test settings still load.",
+              "Make the Environment name a required constructor argument of DltSync and WarehouseSnapshotStore and use <project>/.adops/dlt/<env> as pipelines_dir.",
+              "Pass the selected Environment name from run_command.build_sync / build_snapshot_store and from accept_schema_command.",
+              "Unit-test with real dlt (as the existing adapter tests do): an Incremental load in Environment dev followed by one in Environment stage against a separate Warehouse loads every row in stage; accept-schema still finds the stage snapshot store."
+            ]
+          },
+          "after": {
+            "filesAffected": [
+              "src/adops/infrastructure/dlt_sync.py",
+              "src/adops/infrastructure/schema_snapshot_store.py",
+              "src/adops/interface/run_command.py",
+              "src/adops/interface/accept_schema_command.py",
+              "tests/unit/infrastructure/test_dlt_sync.py",
+              "tests/unit/infrastructure/test_schema_snapshot_store.py",
+              "tests/unit/interface/test_run_command.py",
+              "src/adops/domain/environment.py",
+              "tests/unit/domain/test_environment.py",
+              "src/adops/infrastructure/postgres_reverse_sync.py",
+              "tests/unit/infrastructure/test_postgres_reverse_sync.py"
+            ],
+            "changes": [
+              "In src/adops/domain/environment.py constrain ProjectSettings.environments keys with IDENTIFIER from domain/names.py, so an Environment name such as '../x' is rejected at load and the per-Environment state folder always stays inside <project>/.adops/dlt; check the demo and existing test settings still load.",
+              "Make the Environment name a required constructor argument of DltSync, WarehouseSnapshotStore and PostgresReverseSync and use <project>/.adops/dlt/<env> as pipelines_dir.",
+              "Pass the selected Environment name from run_command.build_sync / build_snapshot_store and from accept_schema_command.",
+              "Unit-test with real dlt (as the existing adapter tests do): an Incremental load in Environment dev followed by one in Environment stage against a separate Warehouse loads every row in stage; accept-schema still finds the stage snapshot store."
+            ]
+          }
+        }
+      ],
+      "unplannedFiles": [
+        "tests/unit/application/fakes.py",
+        "tests/unit/application/test_run_pipeline.py",
+        "tests/unit/infrastructure/test_dbt_transform.py",
+        "tests/unit/interface/test_accept_schema_command.py",
+        "docs/roadmaps/agentic-dataops/discoveries.md"
+      ],
+      "completedAt": "2026-11-19T09:44:45Z",
+      "gradeResult": {
+        "phaseId": "per-environment-local-state",
+        "dimensionScores": [
+          {
+            "dimensionId": "cursor-isolation-between-environments",
+            "score": 9,
+            "pass": true,
+            "evidence": "Real-dlt test interleaves dev and stage into separate DuckDB Warehouses; asserts stage rows_loaded 2, stage ids == source ids (5), only dev/stage folders under .adops/dlt, later dev run loads only 2 new rows."
+          },
+          {
+            "dimensionId": "env-required-no-default",
+            "score": 9,
+            "pass": true,
+            "evidence": "DltSync, WarehouseSnapshotStore, PostgresReverseSync take environment with no default; TypeError test; run_command and accept_schema tests assert the --env value reaches every builder; accept-schema stage test finds the stage-only snapshot column."
+          },
+          {
+            "dimensionId": "env-name-path-safe",
+            "score": 9,
+            "pass": true,
+            "evidence": "environments keys typed with IDENTIFIER; test rejects ../x, .., a/b, Stage, PROD, 1st, dev-2 with exact error; exact-equality test on project/.adops/dlt/stage."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": "uv sync --locked; uv run ruff check; ADOPS_TEST_POSTGRES_DSN=…:55432 uv run pytest tests/unit --cov (734 passed, 100%); uv build --wheel + template grep; uv run pytest tests/e2e -m e2e (2 passed)"
+    },
+    {
+      "phaseId": "demo-stage-reverse-sync-e2e",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-19T09:49:23Z",
+      "baseRef": "3e3e3d046a68b9924eb8de89a595175c2d20cdad",
+      "baseDirty": true,
+      "notes": "already dirty at start (uncommitted horizon-5 phases 1-6): .github/workflows/ci.yml,GLOSSARY.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/accept_schema.py,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/application/secrets.py,src/adops/domain/checks.py,src/adops/domain/environment.py,src/adops/domain/loader.py,src/adops/domain/pipeline.py,src/adops/infrastructure/dlt_sync.py,src/adops/infrastructure/schema_snapshot_store.py,src/adops/interface/accept_schema_command.py,src/adops/interface/run_command.py,src/adops/interface/validate_command.py,tests/unit/application/fakes.py,tests/unit/application/test_run_pipeline.py,tests/unit/application/test_secrets.py,tests/unit/domain/test_checks.py,tests/unit/domain/test_environment.py,tests/unit/domain/test_loader.py,tests/unit/infrastructure/conftest.py,tests/unit/infrastructure/test_dagster_orchestrator.py,tests/unit/infrastructure/test_dbt_transform.py,tests/unit/infrastructure/test_dlt_sync.py,tests/unit/infrastructure/test_schema_snapshot_store.py,tests/unit/interface/test_accept_schema_command.py,tests/unit/interface/test_run_command.py,tests/unit/interface/test_validate_command.py,docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-05-reverse-sync-and-preview-roadmap.status.last_good.json,src/adops/domain/reverse_sync.py,src/adops/domain/reverse_sync_diff.py,src/adops/infrastructure/postgres_reverse_sync.py,tests/unit/domain/test_reverse_sync.py,tests/unit/domain/test_reverse_sync_diff.py,tests/unit/infrastructure/test_postgres_reverse_sync.py | Changed: src/adops/templates/demo/{adops.yaml,pipelines/shop_sync.yaml,docker-compose.yml,seed/01_shop.sql}, new dbt/models/customer_stats.sql and warehouse_init/01_stage.sql, tests/unit/interface/test_init_command.py, tests/unit/domain/test_loader.py (demo pipeline now has 3 Steps), .github/workflows/ci.yml, tests/e2e/test_demo_sync.py. Demo gains a stage Environment (warehouse_stage DB / warehouse_stage.duckdb) and Reverse Syncs customer_stats into shop; customer_stats filters customer_id is not null so the drop-column scenario keeps passing key_not_null. E2E wall-clock 110s for postgres+duckdb (was 92s).",
+      "unplannedFiles": [
+        "tests/unit/domain/test_loader.py"
+      ],
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-19T09:58:27Z",
+          "gate": "uv run pytest tests/e2e -m e2e",
+          "detail": "duckdb: step sync_shop: passed — customers 20 rows, orders 0 rows on the stage run",
+          "resolvedBy": "gate-fix",
+          "resolution": "use_shipped_duckdb_warehouse swapped dev's block twice so both Environments used warehouse_stage.duckdb; it now replaces the Postgres block preceding each commented block",
+          "attempt": 1,
+          "by": "execute"
+        },
+        {
+          "kind": "gate",
+          "at": "2026-11-19T09:58:27Z",
+          "gate": "uv run pytest tests/unit --cov",
+          "detail": "tests/unit/domain/test_loader.py: ValueError: too many values to unpack (expected 2)",
+          "resolvedBy": "gate-fix",
+          "resolution": "test_the_demo_pipeline_without_step_types_loads_as_sync_steps unpacks the third (Reverse Sync) Step",
+          "attempt": 1,
+          "by": "execute"
+        }
+      ],
+      "gateRun": {
+        "ranAt": "2026-11-19T09:58:36Z",
+        "commands": [
+          "uv sync --locked: pass",
+          "uv run ruff check: pass",
+          "uv run pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass, 736 tests, 100%",
+          "uv run pytest tests/e2e -m e2e: pass, 2 tests, 110s",
+          "uv build --wheel + wheel grep: pass"
+        ]
+      },
+      "completedAt": "2026-11-19T09:58:59Z",
+      "gradeResult": {
+        "phaseId": "demo-stage-reverse-sync-e2e",
+        "dimensionScores": [
+          {
+            "dimensionId": "e2e-dev-no-write-stage-exact-rows",
+            "score": 9,
+            "minScore": 9,
+            "passed": true,
+            "evidence": "demo fixture parametrized postgres/duckdb with reseed; full Preview line + empty customer_stats after dev; literal 20-row SEED_CUSTOMER_STATS after stage; both before first Source mutation. Gap: dev run relies on default --env dev."
+          },
+          {
+            "dimensionId": "stage-warehouse-isolated",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "stage uses warehouse_stage / .adops/warehouse_stage.duckdb; warehouse_init mounted; E2E checks stage analytics.customer_stats and unchanged dev counts."
+          },
+          {
+            "dimensionId": "no-pii-in-model-table-or-output",
+            "score": 9,
+            "minScore": 9,
+            "passed": true,
+            "evidence": "model selects four columns from ref(orders), no email; seed table deterministic with PK; @example.com asserted absent in dev and stage output."
+          },
+          {
+            "dimensionId": "demo-config-loads-and-ships",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "ensure_sources/targets_defined for dev and stage; port test loops envs; ReverseSyncStep asserted exactly; wheel list and ci.yml include both files; .env.example unchanged."
+          }
+        ],
+        "overallPass": true,
+        "healerHint": null
+      }
+    }
+  ]
+}

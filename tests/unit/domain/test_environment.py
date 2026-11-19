@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from adops.domain.environment import DuckDbConnection
+from adops.domain.environment import DuckDbConnection, PostgresConnection
 from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import load_project_settings
 from adops.domain.secret_reference import SecretReference
@@ -147,3 +147,53 @@ def test_sources_stay_postgres_only():
     )
 
     assert "environments.dev.sources.shop.type: Input should be 'postgres'" in problems_of(text)
+
+
+TARGETS = f"""
+    targets:
+      crm: {CONNECTION % "password_env: CRM_DB_PASSWORD"}
+"""
+
+
+def test_an_environment_has_no_targets_unless_it_declares_them():
+    assert load_project_settings(settings()).environments["dev"].targets == {}
+
+
+def test_targets_are_postgres_connections_kept_apart_from_sources():
+    environment = load_project_settings(settings() + TARGETS).environments["dev"]
+
+    crm = environment.targets["crm"]
+    assert isinstance(crm, PostgresConnection)
+    assert crm.password_env.name == "CRM_DB_PASSWORD"
+    assert "crm" not in environment.sources
+    assert "shop" not in environment.targets
+
+
+def test_a_target_with_a_literal_password_is_rejected():
+    text = settings() + TARGETS.replace("password_env: CRM", "password: hunter2, password_env: CRM")
+
+    (problem,) = problems_of(text)
+
+    assert problem.startswith("environments.dev.targets.crm.password: literal passwords")
+    assert "hunter2" not in problem
+
+
+def test_a_target_cannot_be_a_duckdb_file():
+    text = settings() + "    targets:\n      crm: {type: duckdb, path: x}\n"
+
+    assert "environments.dev.targets.crm.type: Input should be 'postgres'" in problems_of(text)
+
+
+@pytest.mark.parametrize("name", ["../x", "..", "a/b", "Stage", "PROD", "1st", "dev-2"])
+def test_an_environment_name_that_could_leave_its_state_folder_is_rejected(name):
+    text = settings() + settings(environment=f'"{name}"').removeprefix("\nenvironments:\n")
+
+    assert problems_of(text) == (
+        f"environments.{name}.[key]: String should match pattern '^[a-z][a-z0-9_]*$'",
+    )
+
+
+def test_lowercase_environment_names_load():
+    text = settings() + settings(environment="stage_2").removeprefix("\nenvironments:\n")
+
+    assert set(load_project_settings(text).environments) == {"dev", "stage_2"}

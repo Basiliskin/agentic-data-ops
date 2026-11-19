@@ -498,10 +498,11 @@ def test_sync_then_snapshot_then_dbt_share_one_duckdb_file(tmp_path: Path, root:
         **{"models/sources.yml": SHOP_SOURCES},
     )
 
-    synced = DltSync(root, "shop", source_kind="sqlite", warehouse_kind="duckdb").sync(
-        sync_step, source, warehouse
+    adapter = DltSync(
+        root, "shop", environment="dev", source_kind="sqlite", warehouse_kind="duckdb"
     )
-    WarehouseSnapshotStore(root, "duckdb").save(
+    synced = adapter.sync(sync_step, source, warehouse)
+    WarehouseSnapshotStore(root, "duckdb", environment="dev").save(
         warehouse, "shop", "shop", "orders", TableShape({"id": "bigint", "status": "text"})
     )
     result = DbtTransform(root, warehouse_kind="duckdb").run(STEP, warehouse)

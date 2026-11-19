@@ -62,12 +62,24 @@ _Avoid_: model run, job
 Copying data from the Warehouse back into an operational database.
 _Avoid_: reverse ETL, writeback, activation
 
+**Reverse Sync target**:
+The existing table in an operational Postgres database that a Reverse Sync writes to, matched row by row on a key column. adops never creates it.
+_Avoid_: destination, sink
+
+**Diff**:
+The rows a Reverse Sync would insert, update or delete to make its target match the dbt result, matched by key. Rows missing from the dbt result are deleted only when the Step sets `delete_missing: true`; otherwise they are kept and reported. The Preview and the real write use the same Diff.
+_Avoid_: changeset, delta, plan
+
+**Max-change guard**:
+The `max_change` Check: it stops a Reverse Sync when the rows it would update or delete exceed a set share of the target's rows (half by default). An empty target always passes.
+_Avoid_: circuit breaker, blast-radius limit
+
 **Check**:
 A fixed rule run before or after a Step that gives the same pass or fail for the same data (for example: the primary key is unique, no rows were lost). A failed Check fails its Step and stops every later Step; a Check can be skipped for one table only with a written reason.
 _Avoid_: test, assertion, validation, data quality rule
 
 **Preview**:
-A Reverse Sync run that reports the changes it would make, with a sample, without writing anything.
+A Reverse Sync run that reports the changes it would make, with a sample, without writing anything. Only the Environments named exactly `stage` and `prod` write; every other Environment, including every Branch Environment, gets a Preview.
 _Avoid_: dry run, simulation, plan
 
 ### Environments

@@ -5,8 +5,14 @@ import yaml
 from dotenv import dotenv_values
 from typer.testing import CliRunner
 
-from adops.domain.loader import ensure_sources_defined, load_pipeline, load_project_settings
+from adops.domain.loader import (
+    ensure_sources_defined,
+    ensure_targets_defined,
+    load_pipeline,
+    load_project_settings,
+)
 from adops.domain.pipeline import SyncStep
+from adops.domain.reverse_sync import ReverseSyncStep
 from adops.domain.transform import TransformStep
 from adops.interface import cli
 
@@ -19,6 +25,7 @@ DEMO_FILES = {
     "dagster.yaml",
     "dbt/dbt_project.yml",
     "dbt/models/customer_orders.sql",
+    "dbt/models/customer_stats.sql",
     "dbt/models/customers.sql",
     "dbt/models/orders.sql",
     "dbt/models/schema.yml",
@@ -26,6 +33,7 @@ DEMO_FILES = {
     "docker-compose.yml",
     "pipelines/shop_sync.yaml",
     "seed/01_shop.sql",
+    "warehouse_init/01_stage.sql",
 }
 
 
@@ -83,12 +91,57 @@ def test_demo_pipeline_and_settings_pass_the_domain_loaders(demo):
     settings = load_project_settings((demo / "adops.yaml").read_text())
     pipeline = load_pipeline((demo / "pipelines" / "shop_sync.yaml").read_text())
 
-    ensure_sources_defined(pipeline, settings.environments["dev"])
-    sync, transform = pipeline.steps
+    assert set(settings.environments) == {"dev", "stage"}
+    for environment in settings.environments.values():
+        ensure_sources_defined(pipeline, environment)
+        ensure_targets_defined(pipeline, environment)
+    sync, transform, reverse_sync = pipeline.steps
     assert isinstance(sync, SyncStep)
     assert [table.name for table in sync.tables] == ["customers", "orders"]
     assert transform == TransformStep(type="transform", name="transform_shop", project="dbt")
     assert (demo / transform.project / "dbt_project.yml").is_file()
+    columns = ("customer_id", "order_count", "total_amount", "last_order_at")
+    assert reverse_sync == ReverseSyncStep(
+        type="reverse_sync",
+        name="reverse_sync_customer_stats",
+        model="customer_stats",
+        target="shop",
+        target_table="customer_stats",
+        key="customer_id",
+        mapping={column: column for column in columns},
+    )
+    assert (demo / "dbt" / "models" / f"{reverse_sync.model}.sql").is_file()
+
+
+def test_demo_customer_stats_carries_no_personal_data(demo):
+    model = (demo / "dbt" / "models" / "customer_stats.sql").read_text()
+    seed = (demo / "seed" / "01_shop.sql").read_text()
+    [table] = re.findall(r"CREATE TABLE customer_stats \((.*?)\);", seed, re.DOTALL)
+
+    assert "email" not in model.lower()
+    assert re.findall(r"as (\w+)", model) == ["order_count", "total_amount", "last_order_at"]
+    assert [line.split()[0] for line in table.strip().splitlines()] == [
+        "customer_id",
+        "order_count",
+        "total_amount",
+        "last_order_at",
+    ]
+    assert "customer_id integer PRIMARY KEY" in table
+
+
+def test_demo_stage_keeps_its_own_warehouse(demo):
+    settings_text = (demo / "adops.yaml").read_text()
+    environments = yaml.safe_load(settings_text)["environments"]
+    compose = yaml.safe_load((demo / "docker-compose.yml").read_text())
+
+    assert environments["dev"]["warehouse"]["database"] == "warehouse"
+    assert environments["stage"]["warehouse"]["database"] == "warehouse_stage"
+    assert "#   path: .adops/warehouse.duckdb" in settings_text
+    assert "#   path: .adops/warehouse_stage.duckdb" in settings_text
+    volumes = compose["services"]["warehouse"]["volumes"]
+    assert "./warehouse_init:/docker-entrypoint-initdb.d:ro" in volumes
+    init = (demo / "warehouse_init" / "01_stage.sql").read_text()
+    assert "CREATE DATABASE warehouse_stage;" in init
 
 
 def test_demo_dbt_project_reads_raw_shop_and_ships_no_profile(demo):
@@ -132,10 +185,12 @@ def test_every_variable_the_demo_reads_is_in_env_example(demo):
 
 def test_settings_ports_match_the_ports_compose_publishes(demo):
     env = dotenv_values(demo / ".env.example")
-    dev = yaml.safe_load((demo / "adops.yaml").read_text())["environments"]["dev"]
+    environments = yaml.safe_load((demo / "adops.yaml").read_text())["environments"]
 
-    assert dev["sources"]["shop"]["port"] == int(env["SHOP_PORT"])
-    assert dev["warehouse"]["port"] == int(env["WAREHOUSE_PORT"])
+    for environment in environments.values():
+        assert environment["sources"]["shop"]["port"] == int(env["SHOP_PORT"])
+        assert environment["targets"]["shop"]["port"] == int(env["SHOP_PORT"])
+        assert environment["warehouse"]["port"] == int(env["WAREHOUSE_PORT"])
 
 
 def test_demo_settings_hold_no_literal_password(demo):

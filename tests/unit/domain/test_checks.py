@@ -8,10 +8,12 @@ from adops.domain.checks import (
     CheckResult,
     CheckStatus,
     LoadFacts,
+    ReverseSyncFacts,
     SourceFacts,
     evaluate_declared_checks,
     evaluate_load_checks,
     evaluate_preflight_checks,
+    evaluate_reverse_sync,
 )
 from adops.domain.pipeline import (
     AcceptedValuesCheck,
@@ -21,6 +23,7 @@ from adops.domain.pipeline import (
     SkipChecks,
     SyncTable,
 )
+from adops.domain.reverse_sync import ReverseSyncStep
 
 FULL = SyncTable(name="customers", mode="full_refresh", primary_key="id")
 INCREMENTAL = SyncTable(name="orders", mode="incremental", primary_key="id", cursor="updated_at")
@@ -477,3 +480,149 @@ def test_built_in_and_declared_results_compare_by_check_name():
     assert load_facts().null_counts == {}
     assert load_facts().unexpected_value_counts == {}
     assert load_facts().newest_values == {}
+
+
+PUSH = ReverseSyncStep(
+    type="reverse_sync",
+    name="push_stats",
+    model="customer_stats",
+    target="shop",
+    target_table="customer_stats",
+    key="customer_id",
+    mapping={"customer_id": "customer_id", "orders": "order_count"},
+)
+
+
+def reverse_facts(**overrides) -> ReverseSyncFacts:
+    facts = {
+        "target_table_exists": True,
+        "missing_target_columns": (),
+        "result_rows": 10,
+        "duplicate_keys": 0,
+        "null_keys": 0,
+        "target_rows": 10,
+        "diff_updates": 0,
+        "diff_deletes": 0,
+    }
+    return ReverseSyncFacts(**(facts | overrides))
+
+
+def reverse_result(check: CheckName, facts: ReverseSyncFacts, step=PUSH) -> CheckResult:
+    return {result.check: result for result in evaluate_reverse_sync(step, facts)}[check]
+
+
+def test_a_clean_reverse_sync_passes_every_check_in_order():
+    results = evaluate_reverse_sync(PUSH, reverse_facts())
+
+    assert isinstance(results, tuple)
+    assert [result.check for result in results] == [
+        "target_columns_exist",
+        "key_unique",
+        "key_not_null",
+        "max_change",
+        "result_not_empty",
+    ]
+    assert {result.status for result in results} == {CheckStatus.PASS}
+    assert results[0] == CheckResult(
+        "target_columns_exist",
+        "customer_stats",
+        CheckStatus.PASS,
+        "customer_stats: target_columns_exist passed",
+    )
+
+
+@pytest.mark.parametrize(
+    ("step", "facts", "status"),
+    [
+        (PUSH, reverse_facts(diff_updates=5), "pass"),
+        (PUSH, reverse_facts(diff_updates=6), "fail"),
+        (PUSH, reverse_facts(diff_updates=3, diff_deletes=3), "pass"),
+        (
+            PUSH.model_copy(update={"delete_missing": True}),
+            reverse_facts(diff_updates=3, diff_deletes=2),
+            "pass",
+        ),
+        (
+            PUSH.model_copy(update={"delete_missing": True}),
+            reverse_facts(diff_updates=3, diff_deletes=3),
+            "fail",
+        ),
+        (
+            PUSH.model_copy(update={"max_change_share": 0.3}),
+            reverse_facts(diff_updates=3),
+            "pass",
+        ),
+        (
+            PUSH.model_copy(update={"max_change_share": 0.3}),
+            reverse_facts(diff_updates=4),
+            "fail",
+        ),
+        (PUSH, reverse_facts(target_rows=0, result_rows=40), "pass"),
+    ],
+)
+def test_max_change_fails_only_above_the_allowed_share(step, facts, status):
+    assert reverse_result(CheckName.MAX_CHANGE, facts, step).status == status
+
+
+def test_max_change_failure_reports_counts():
+    result = reverse_result(CheckName.MAX_CHANGE, reverse_facts(diff_updates=6))
+
+    assert result.message == (
+        "customer_stats: max_change failed — 6 of 10 target rows would change, "
+        "more than the allowed share 0.5"
+    )
+
+
+@pytest.mark.parametrize(
+    ("check", "facts", "detail"),
+    [
+        (
+            CheckName.RESULT_NOT_EMPTY,
+            reverse_facts(result_rows=0),
+            "the dbt model customer_stats has no rows",
+        ),
+        (
+            CheckName.KEY_UNIQUE,
+            reverse_facts(duplicate_keys=1),
+            "1 duplicate customer_id values in the dbt result",
+        ),
+        (
+            CheckName.KEY_NOT_NULL,
+            reverse_facts(null_keys=1),
+            "1 rows with an empty customer_id in the dbt result",
+        ),
+        (
+            CheckName.TARGET_COLUMNS_EXIST,
+            reverse_facts(target_table_exists=False),
+            "table customer_stats not found in the target shop",
+        ),
+        (
+            CheckName.TARGET_COLUMNS_EXIST,
+            reverse_facts(missing_target_columns=("order_count",)),
+            "missing columns in the target: order_count",
+        ),
+    ],
+)
+def test_reverse_sync_checks_fail_on_bad_facts(check, facts, detail):
+    result = reverse_result(check, facts)
+
+    assert result.status == CheckStatus.FAIL
+    assert result.message == f"customer_stats: {check} failed — {detail}"
+
+
+def test_a_skipped_reverse_sync_check_carries_its_reason():
+    step = PUSH.model_copy(
+        update={"skip_checks": SkipChecks(checks=["max_change"], reason="first full load")}
+    )
+
+    results = evaluate_reverse_sync(step, reverse_facts(diff_updates=10))
+
+    assert reverse_result(
+        CheckName.MAX_CHANGE, reverse_facts(diff_updates=10), step
+    ) == CheckResult(
+        "max_change",
+        "customer_stats",
+        CheckStatus.SKIPPED,
+        "customer_stats: max_change skipped — first full load",
+    )
+    assert [r.status for r in results].count(CheckStatus.SKIPPED) == 1

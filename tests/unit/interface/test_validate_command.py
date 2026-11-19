@@ -4,7 +4,7 @@ import pytest
 from typer.testing import CliRunner
 
 from adops.infrastructure import dbt_transform
-from adops.interface import cli
+from adops.interface import cli, run_command
 
 runner = CliRunner()
 
@@ -347,3 +347,83 @@ def test_a_malformed_warehouse_is_reported_at_its_yaml_path(project, warehouse, 
     assert SENTINEL not in result.output
     assert ".duckdb." not in result.output
     assert "union_tag" not in result.output
+
+
+CRM_TARGET = """    targets:
+      crm: {type: postgres, host: crm.internal, port: 5440, database: crm, user: crm_writer,
+            password_env: CRM_PASSWORD}
+"""
+
+REVERSE_SETTINGS = f"""
+environments:
+  dev:
+    warehouse: {{type: duckdb, path: dev.duckdb}}
+    sources:
+      shop: {{type: postgres, host: localhost, port: 5432, database: s, user: s,
+             password_env: SHOP_PASSWORD}}
+{CRM_TARGET}  stage:
+    warehouse: {{type: duckdb, path: stage.duckdb}}
+    sources:
+      shop: {{type: postgres, host: localhost, port: 5432, database: s, user: s,
+             password_env: SHOP_PASSWORD}}
+"""
+
+
+def reverse_step_yaml(name, skip=""):
+    return (
+        f"  - type: reverse_sync\n    name: {name}\n    model: customer_stats\n    target: crm\n"
+        f"    target_table: customer_stats\n    key: customer_id\n"
+        f"    mapping: {{order_count: orders}}\n{skip}"
+    )
+
+
+def reverse_skip_yaml(checks, reason):
+    return f"    skip_checks:\n      checks: [{', '.join(checks)}]\n      reason: {reason}\n"
+
+
+@pytest.fixture
+def reverse_sync_never_built(monkeypatch, no_network):
+    def refuse(*args, **kwargs):
+        raise AssertionError("validate must not build the Reverse Sync adapter")
+
+    monkeypatch.setattr(run_command, "build_reverse_sync", refuse)
+
+
+@pytest.mark.usefixtures("reverse_sync_never_built")
+def test_target_missing_from_an_environment_is_reported_by_environment_and_key(project):
+    (project / "adops.yaml").write_text(REVERSE_SETTINGS)
+    write_pipeline(project, "p", "name: p\nsteps:\n" + reverse_step_yaml("push_stats"))
+
+    result = validate("--project", str(project))
+
+    assert result.exit_code == 1
+    assert result.output == (
+        "pipelines/p.yaml: steps[0].target: Step push_stats writes to Target crm, which the "
+        "Environment does not define (Environment stage)\n"
+    )
+
+
+@pytest.mark.usefixtures("reverse_sync_never_built")
+def test_reverse_sync_skips_are_listed_after_table_skips_with_their_reasons(project):
+    (project / "adops.yaml").write_text(REVERSE_SETTINGS + CRM_TARGET)
+    steps = (
+        "  - name: sync\n    source: shop\n    tables:\n"
+        + table_yaml("orders", skip_yaml(["primary_key_unique"]))
+        + reverse_step_yaml("push_z", reverse_skip_yaml(["max_change"], "monthly rebuild"))
+        + reverse_step_yaml("push_plain")
+        + reverse_step_yaml(
+            "push_a", reverse_skip_yaml(["result_not_empty", "max_change"], "seasonal model")
+        )
+    )
+    write_pipeline(project, "p", "name: p\nsteps:\n" + steps)
+
+    result = validate("--project", str(project))
+
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines() == [
+        "orders: primary_key_unique skipped — kept for audit",
+        "push_a: max_change skipped — seasonal model",
+        "push_a: result_not_empty skipped — seasonal model",
+        "push_z: max_change skipped — monthly rebuild",
+        "ok",
+    ]

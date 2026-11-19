@@ -1,14 +1,17 @@
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import assert_never
 
 from adops.application.ports import (
     MASK,
     Clock,
     Orchestrator,
     ResolvedConnection,
-    ResolvedDuckDb,
     ResolvedWarehouse,
+    ReverseSync,
+    ReverseSyncPreview,
+    ReverseSyncRead,
     RunPlan,
     RunResult,
     SchemaSnapshotStore,
@@ -18,31 +21,42 @@ from adops.application.ports import (
     StepStatus,
     StepTask,
     Sync,
+    TargetUnreachable,
     Transform,
     TransformResult,
     WarehouseUnreachable,
+    WriteFailed,
 )
-from adops.application.secrets import resolve_secret_references
+from adops.application.secrets import (
+    resolve_connection,
+    resolve_secret_references,
+    resolve_warehouse,
+    secret_references,
+)
 from adops.domain.checks import (
     CheckName,
     CheckResult,
     CheckStatus,
+    ReverseSyncFacts,
     SourceFacts,
     evaluate_declared_checks,
     evaluate_load_checks,
     evaluate_preflight_checks,
+    evaluate_reverse_sync,
 )
-from adops.domain.environment import DuckDbConnection, Environment, PostgresConnection
+from adops.domain.environment import Environment
 from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import (
     ensure_sources_defined,
+    ensure_targets_defined,
     format_path,
     load_pipeline,
     load_project_settings,
 )
 from adops.domain.pipeline import Pipeline, SyncStep
+from adops.domain.reverse_sync import ReverseSyncStep
+from adops.domain.reverse_sync_diff import Diff, compute_diff, preview_sample, writes_allowed
 from adops.domain.schema_snapshot import BreakingChange, TableShape, find_breaking_changes
-from adops.domain.secret_reference import SecretReference
 from adops.domain.transform import TransformStep, evaluate_dbt_tests
 
 NOT_IN_SOURCE = SourceFacts(table_exists=False, columns=frozenset())
@@ -85,6 +99,21 @@ class SourceUnreachableError(StepError):
 class WarehouseUnreachableError(StepError):
     def __init__(self, pipeline: str, step: str) -> None:
         super().__init__(f"Pipeline {pipeline}, Step {step}: Warehouse is unreachable")
+
+
+class ReverseSyncTargetUnreachableError(StepError):
+    def __init__(self, pipeline: str, step: str, target: str) -> None:
+        self.target = target
+        super().__init__(f"Pipeline {pipeline}, Step {step}: Target {target} is unreachable")
+
+
+class ReverseSyncWriteFailedError(StepError):
+    def __init__(self, pipeline: str, step: str, target: str) -> None:
+        self.target = target
+        super().__init__(
+            f"Pipeline {pipeline}, Step {step}: the write to Target {target} failed "
+            "and was rolled back; the Target was left unchanged"
+        )
 
 
 class TransformFailedError(StepError):
@@ -187,12 +216,7 @@ class PlannedStep:
         raise failure
 
     def _redact(self, text: str) -> str:
-        secrets = [self.source.password]
-        if isinstance(self.warehouse, ResolvedConnection):
-            secrets.append(self.warehouse.password)
-        for secret in secrets:
-            text = text.replace(secret, MASK)
-        return URL_PATTERN.sub(MASK, text)
+        return _redact(text, (self.source, self.warehouse))
 
 
 @dataclass(frozen=True)
@@ -220,6 +244,84 @@ class PlannedTransformStep:
         except Exception:
             # dbt's own error text may hold the Warehouse password, so none of it is kept.
             return CRASHED
+
+
+@dataclass(frozen=True)
+class PlannedReverseSyncStep:
+    step: ReverseSyncStep
+    warehouse: ResolvedWarehouse
+    target: ResolvedConnection
+    environment: str
+    pipeline: str
+    reverse_sync: ReverseSync
+
+    @property
+    def name(self) -> str:
+        return self.step.name
+
+    def __call__(self, sync: Sync) -> StepOutcome:
+        read = self._guard(lambda: self.reverse_sync.read(self.step, self.warehouse, self.target))
+        diff = compute_diff(
+            read.result_rows,
+            read.target_rows,
+            self.step.key,
+            self.step.mapping,
+            self.step.delete_missing,
+        )
+        checks = evaluate_reverse_sync(self.step, _reverse_sync_facts(read, diff))
+        _raise_if_failed(self.name, checks, {})
+        written = writes_allowed(self.environment)
+        if written:
+            self._guard(lambda: self.reverse_sync.apply(self.step, self.target, diff))
+        return StepOutcome(checks, {}, _preview(diff, written))
+
+    def _guard[T](self, call: Callable[[], T]) -> T:
+        try:
+            return call()
+        except TargetUnreachable:
+            failure: StepError = ReverseSyncTargetUnreachableError(
+                self.pipeline, self.name, self.step.target
+            )
+        except WriteFailed:
+            failure = ReverseSyncWriteFailedError(self.pipeline, self.name, self.step.target)
+        except WarehouseUnreachable:
+            failure = WarehouseUnreachableError(self.pipeline, self.name)
+        except Exception as error:
+            message = _redact(f"{type(error).__name__}: {error}", (self.target, self.warehouse))
+            failure = SyncFailedError(f"Step {self.name}: {message}")
+        # Raised outside `except` so the original error, which may hold a secret, is not chained.
+        raise failure
+
+
+def _reverse_sync_facts(read: ReverseSyncRead, diff: Diff) -> ReverseSyncFacts:
+    return ReverseSyncFacts(
+        target_table_exists=read.target_table_exists,
+        missing_target_columns=read.missing_target_columns,
+        result_rows=len(read.result_rows),
+        duplicate_keys=read.duplicate_keys,
+        null_keys=read.null_keys,
+        target_rows=len(read.target_rows),
+        diff_updates=len(diff.updates),
+        diff_deletes=len(diff.deletes) + len(diff.kept),
+    )
+
+
+def _preview(diff: Diff, written: bool) -> ReverseSyncPreview:
+    return ReverseSyncPreview(
+        inserts=len(diff.inserts),
+        updates=len(diff.updates),
+        deletes=len(diff.deletes),
+        kept=len(diff.kept),
+        sample=preview_sample(diff),
+        written=written,
+    )
+
+
+def _redact(text: str, connections: Iterable[ResolvedWarehouse]) -> str:
+    for connection in connections:
+        if isinstance(connection, ResolvedConnection):
+            text = text.replace(connection.password, MASK)
+    return URL_PATTERN.sub(MASK, text)
 
 
 def _raise_if_only_empty_tables(pipeline: str, step: str, checks: Sequence[CheckResult]) -> None:
@@ -257,7 +359,13 @@ def run_step(task: StepTask, sync: Sync) -> StepReport:
         )
     except StepError as error:
         return StepReport(task.name, StepStatus.FAILED, error=str(error))
-    return StepReport(task.name, StepStatus.PASSED, outcome.checks, outcome.rows_loaded)
+    return StepReport(
+        task.name,
+        StepStatus.PASSED,
+        outcome.checks,
+        outcome.rows_loaded,
+        preview=outcome.preview,
+    )
 
 
 def run_pipeline(
@@ -270,13 +378,22 @@ def run_pipeline(
     clock: Clock,
     orchestrator: Orchestrator | None = None,
     transform: Transform | None = None,
+    reverse_sync: ReverseSync | None = None,
 ) -> RunResult:
     pipeline = load_pipeline(pipeline_text)
     settings = load_project_settings(settings_text)
     environment = pick_environment(settings.environments, environment_name)
     ensure_sources_defined(pipeline, environment)
+    ensure_targets_defined(pipeline, environment)
     plan = _build_plan(
-        pipeline, environment_name, environment, env, snapshot_store, clock, transform
+        pipeline,
+        environment_name,
+        environment,
+        env,
+        snapshot_store,
+        clock,
+        transform,
+        reverse_sync,
     )
     return (orchestrator or InOrderOrchestrator()).execute(plan, sync)
 
@@ -299,48 +416,42 @@ def _build_plan(
     snapshot_store: SchemaSnapshotStore,
     clock: Clock,
     transform: Transform | None,
+    reverse_sync: ReverseSync | None,
 ) -> RunPlan:
-    sync_steps = [step for step in pipeline.steps if isinstance(step, SyncStep)]
-    connections = [environment.sources[step.source] for step in sync_steps]
-    secrets = resolve_secret_references(env, secret_references(environment.warehouse, connections))
+    sources = [
+        environment.sources[step.source] for step in pipeline.steps if isinstance(step, SyncStep)
+    ]
+    targets = [
+        environment.targets[step.target]
+        for step in pipeline.steps
+        if isinstance(step, ReverseSyncStep)
+    ]
+    secrets = resolve_secret_references(
+        env, secret_references(environment.warehouse, sources, targets)
+    )
     warehouse = resolve_warehouse(environment.warehouse, secrets)
     steps: list[StepTask] = []
     for index, step in enumerate(pipeline.steps):
         if isinstance(step, SyncStep):
             source = resolve_connection(environment.sources[step.source], secrets)
             steps.append(PlannedStep(step, source, warehouse, pipeline.name, snapshot_store, clock))
-        elif transform is None:
-            location = format_path(("steps", index))
-            raise PipelineValidationError(
-                [f"{location}: a Transform Step needs a Transform engine, and none is set"]
+        elif isinstance(step, TransformStep):
+            if transform is None:
+                raise _missing_engine(index, "a Transform Step needs a Transform engine")
+            steps.append(PlannedTransformStep(step, warehouse, pipeline.name, transform))
+        elif isinstance(step, ReverseSyncStep):
+            if reverse_sync is None:
+                raise _missing_engine(index, "a Reverse Sync Step needs a Reverse Sync engine")
+            target = resolve_connection(environment.targets[step.target], secrets)
+            steps.append(
+                PlannedReverseSyncStep(
+                    step, warehouse, target, environment_name, pipeline.name, reverse_sync
+                )
             )
         else:
-            steps.append(PlannedTransformStep(step, warehouse, pipeline.name, transform))
+            assert_never(step)
     return RunPlan(pipeline.name, environment_name, tuple(steps))
 
 
-def secret_references(
-    warehouse: PostgresConnection | DuckDbConnection, sources: Sequence[PostgresConnection]
-) -> list[SecretReference]:
-    connections = [warehouse, *sources] if isinstance(warehouse, PostgresConnection) else sources
-    return [connection.password_env for connection in connections]
-
-
-def resolve_warehouse(
-    connection: PostgresConnection | DuckDbConnection, secrets: Mapping[str, str]
-) -> ResolvedWarehouse:
-    if isinstance(connection, DuckDbConnection):
-        return ResolvedDuckDb(connection.path)
-    return resolve_connection(connection, secrets)
-
-
-def resolve_connection(
-    connection: PostgresConnection, secrets: Mapping[str, str]
-) -> ResolvedConnection:
-    return ResolvedConnection(
-        host=connection.host,
-        port=connection.port,
-        database=connection.database,
-        user=connection.user,
-        password=secrets[connection.password_env.name],
-    )
+def _missing_engine(index: int, need: str) -> PipelineValidationError:
+    return PipelineValidationError([f"{format_path(('steps', index))}: {need}, and none is set"])

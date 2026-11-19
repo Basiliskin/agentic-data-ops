@@ -57,6 +57,6 @@ def accept_project_schema(
         environment,
         table,
         run_command.project_env(project),
-        run_command.build_sync(project, pipeline, kind),
-        run_command.build_snapshot_store(project, kind),
+        run_command.build_sync(project, pipeline, environment, kind),
+        run_command.build_snapshot_store(project, environment, kind),
     )

@@ -10,6 +10,8 @@ from dotenv import dotenv_values
 from adops.application.ports import (
     Clock,
     Orchestrator,
+    ReverseSync,
+    ReverseSyncPreview,
     RunResult,
     SchemaSnapshotStore,
     Sync,
@@ -23,6 +25,7 @@ from adops.infrastructure.clock import SystemClock
 from adops.infrastructure.dagster_orchestrator import DagsterOrchestrator, JobCompileError
 from adops.infrastructure.dbt_transform import DbtTransform
 from adops.infrastructure.dlt_sync import DltSync
+from adops.infrastructure.postgres_reverse_sync import PostgresReverseSync
 from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
 
 SETTINGS_FILE = Path("adops.yaml")
@@ -35,12 +38,12 @@ class ProjectFileError(Exception):
     pass
 
 
-def build_sync(project: Path, pipeline: str, kind: str) -> Sync:
-    return DltSync(project, pipeline, warehouse_kind=kind)
+def build_sync(project: Path, pipeline: str, environment: str, kind: str) -> Sync:
+    return DltSync(project, pipeline, environment=environment, warehouse_kind=kind)
 
 
-def build_snapshot_store(project: Path, kind: str) -> SchemaSnapshotStore:
-    return WarehouseSnapshotStore(project, kind)
+def build_snapshot_store(project: Path, environment: str, kind: str) -> SchemaSnapshotStore:
+    return WarehouseSnapshotStore(project, kind, environment=environment)
 
 
 def build_clock() -> Clock:
@@ -55,6 +58,10 @@ def build_transform(project: Path, kind: str) -> Transform:
     return DbtTransform(project, warehouse_kind=kind)
 
 
+def build_reverse_sync(project: Path, environment: str, kind: str) -> ReverseSync:
+    return PostgresReverseSync(project, environment=environment, warehouse_kind=kind)
+
+
 def warehouse_kind(settings_text: str, environment: str) -> str:
     """The Warehouse type of the chosen Environment, so adapters are built for that kind."""
     settings = load_project_settings(settings_text)
@@ -67,6 +74,9 @@ def run(
     project: Annotated[Path, typer.Option(help="Project folder.")] = Path("."),
 ) -> None:
     """Run a Pipeline: sync its tables into the Warehouse, run its dbt Transforms and its Checks.
+
+    Reverse Sync Steps write their Target only in the stage and prod Environments; every other
+    Environment prints a Preview of what would change.
 
     Variables in the Project's .env are used unless the same name is set in your shell.
     """
@@ -99,11 +109,12 @@ def run_project(project: Path, pipeline: str, environment: str) -> RunResult:
             settings_text,
             environment,
             env,
-            build_sync(project, pipeline, kind),
-            build_snapshot_store(project, kind),
+            build_sync(project, pipeline, environment, kind),
+            build_snapshot_store(project, environment, kind),
             build_clock(),
             build_orchestrator(),
             build_transform(project, kind),
+            build_reverse_sync(project, environment, kind),
         )
 
 
@@ -142,8 +153,33 @@ def _print_result(result: RunResult) -> None:
         typer.echo(f"step {step.name}: {step.status}" + (f" — {rows}" if rows else ""))
         for check in step.checks:
             typer.echo(f"  check {check.table} {check.check}: {check.status}")
+        if step.preview is not None:
+            _print_preview(step.preview)
         if step.error:
             typer.echo(f"  {step.error}", err=True)
+
+
+def _print_preview(preview: ReverseSyncPreview) -> None:
+    if preview.written:
+        counts = [f"inserted {preview.inserts}", f"updated {preview.updates}"]
+        deleted = f"deleted {preview.deletes}"
+    else:
+        counts = [f"would insert {preview.inserts}", f"would update {preview.updates}"]
+        deleted = f"would delete {preview.deletes}"
+    counts.append(f"kept {preview.kept} (absent from dbt result)" if preview.kept else deleted)
+    typer.echo(f"  {'wrote' if preview.written else 'Preview'}: {', '.join(counts)}")
+    sample = preview.sample
+    _print_sample_keys("insert", sample.inserts)
+    if sample.updates:
+        changes = (f"{key} ({', '.join(columns)})" for key, columns in sample.updates)
+        typer.echo(f"  sample update keys: {'; '.join(changes)}")
+    _print_sample_keys("delete", sample.deletes)
+    _print_sample_keys("kept", sample.kept)
+
+
+def _print_sample_keys(kind: str, keys: tuple[object, ...]) -> None:
+    if keys:
+        typer.echo(f"  sample {kind} keys: {', '.join(str(key) for key in keys)}")
 
 
 def fail(*lines: str) -> NoReturn:

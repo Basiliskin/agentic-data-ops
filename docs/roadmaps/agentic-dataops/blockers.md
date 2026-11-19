@@ -7,7 +7,7 @@
 - 2026-11-17 | horizon 1 | How do Pipelines run on a schedule when Dagster runs in-process only (daemon/code location vs cron/CI)?
 - 2026-11-17 | horizon 1 | How do Branch Environment schemas line up with dlt datasets and dbt --defer --state, and where does stage dbt state live?
 - 2026-11-17 | horizon 1 | How can PR workflows reach the stage Warehouse without exposing secrets to forked PRs?
-- 2026-11-17 | horizon 1 | Which engine performs Reverse Sync into Postgres, how is the Preview diff computed without writing, and what are delete semantics?
+- 2026-11-17 | horizon 1 | Which engine performs Reverse Sync into Postgres, how is the Preview diff computed without writing, and what are delete semantics? — resolved by decision 2026-11-19
 - 2026-11-17 | horizon 1 | Does the single adops.yaml Environment model hold up for stage/prod deployments and generated Branch Environments?
 - 2026-11-17 | horizon 1 | How long and how stable is the Docker E2E job on GitHub Actions as Steps are added?
 - 2026-11-18 | horizon 2 | Do the planned horizon-2 names hold after execute (SchemaSnapshotStore, Clock, PlannedStep closures, CheckResult.check: str)?

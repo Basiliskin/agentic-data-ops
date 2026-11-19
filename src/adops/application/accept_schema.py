@@ -2,14 +2,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from adops.application.ports import SchemaSnapshotStore, Sync
-from adops.application.run_pipeline import (
-    StepError,
-    pick_environment,
+from adops.application.run_pipeline import StepError, pick_environment
+from adops.application.secrets import (
     resolve_connection,
+    resolve_secret_references,
     resolve_warehouse,
     secret_references,
 )
-from adops.application.secrets import resolve_secret_references
 from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import ensure_sources_defined, load_pipeline, load_project_settings
 from adops.domain.pipeline import Pipeline, SyncStep

@@ -1,5 +1,7 @@
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 
+from adops.application.ports import ResolvedConnection, ResolvedDuckDb, ResolvedWarehouse
+from adops.domain.environment import DuckDbConnection, PostgresConnection
 from adops.domain.secret_reference import SecretReference
 
 
@@ -22,3 +24,34 @@ def resolve_secret_references(
     if missing:
         raise MissingSecretError(missing)
     return {name: env[name] for name in names}
+
+
+def secret_references(
+    warehouse: PostgresConnection | DuckDbConnection,
+    sources: Sequence[PostgresConnection],
+    targets: Sequence[PostgresConnection] = (),
+) -> list[SecretReference]:
+    connections = [*sources, *targets]
+    if isinstance(warehouse, PostgresConnection):
+        connections.insert(0, warehouse)
+    return [connection.password_env for connection in connections]
+
+
+def resolve_warehouse(
+    connection: PostgresConnection | DuckDbConnection, secrets: Mapping[str, str]
+) -> ResolvedWarehouse:
+    if isinstance(connection, DuckDbConnection):
+        return ResolvedDuckDb(connection.path)
+    return resolve_connection(connection, secrets)
+
+
+def resolve_connection(
+    connection: PostgresConnection, secrets: Mapping[str, str]
+) -> ResolvedConnection:
+    return ResolvedConnection(
+        host=connection.host,
+        port=connection.port,
+        database=connection.database,
+        user=connection.user,
+        password=secrets[connection.password_env.name],
+    )

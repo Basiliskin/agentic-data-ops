@@ -6,6 +6,7 @@ from pydantic import BaseModel, ValidationError
 from adops.domain.environment import WAREHOUSE_TYPES, Environment, ProjectSettings
 from adops.domain.errors import Location, PipelineValidationError, RuleViolation
 from adops.domain.pipeline import DECLARED_CHECK_TYPES, STEP_TYPES, Pipeline, SyncStep
+from adops.domain.reverse_sync import ReverseSyncStep
 
 ROOT = "(root)"
 
@@ -23,6 +24,17 @@ def ensure_sources_defined(pipeline: Pipeline, environment: Environment) -> None
         f"{format_path(('steps', index, 'source'))}: no Source with this name in the Environment"
         for index, step in enumerate(pipeline.steps)
         if isinstance(step, SyncStep) and step.source not in environment.sources
+    ]
+    if problems:
+        raise PipelineValidationError(problems)
+
+
+def ensure_targets_defined(pipeline: Pipeline, environment: Environment) -> None:
+    problems = [
+        f"{format_path(('steps', index, 'target'))}: Step {step.name} writes to Target "
+        f"{step.target}, which the Environment does not define"
+        for index, step in enumerate(pipeline.steps)
+        if isinstance(step, ReverseSyncStep) and step.target not in environment.targets
     ]
     if problems:
         raise PipelineValidationError(problems)

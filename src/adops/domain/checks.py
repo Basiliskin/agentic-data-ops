@@ -7,8 +7,13 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from adops.domain.errors import RuleViolation
+
 if TYPE_CHECKING:
     from adops.domain.pipeline import SyncTable
+    from adops.domain.reverse_sync import ReverseSyncStep
 
 CursorValue = int | float | Decimal | str | date | datetime
 
@@ -21,6 +26,11 @@ class CheckName(StrEnum):
     ROW_COUNT_MATCHES = "row_count_matches"
     NO_ROW_LOSS = "no_row_loss"
     CURSOR_NOT_BACKWARDS = "cursor_not_backwards"
+    TARGET_COLUMNS_EXIST = "target_columns_exist"
+    KEY_UNIQUE = "key_unique"
+    KEY_NOT_NULL = "key_not_null"
+    MAX_CHANGE = "max_change"
+    RESULT_NOT_EMPTY = "result_not_empty"
 
 
 class SyncMode(StrEnum):
@@ -47,6 +57,31 @@ CHECKS_BY_MODE: dict[SyncMode, tuple[CheckName, ...]] = {
         CheckName.CURSOR_NOT_BACKWARDS,
     ),
 }
+
+
+REVERSE_SYNC_CHECKS = (
+    CheckName.TARGET_COLUMNS_EXIST,
+    CheckName.KEY_UNIQUE,
+    CheckName.KEY_NOT_NULL,
+    CheckName.MAX_CHANGE,
+    CheckName.RESULT_NOT_EMPTY,
+)
+
+
+class SkipChecks(BaseModel):
+    """An opt-out from Checks, allowed only with a written reason."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    checks: list[str] = Field(min_length=1)
+    reason: str
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_not_blank(cls, reason: str) -> str:
+        if not reason.strip():
+            raise RuleViolation([((), "must explain why these Checks are skipped")])
+        return reason
 
 
 class CheckStatus(StrEnum):
@@ -89,15 +124,37 @@ class LoadFacts:
     newest_values: Mapping[str, datetime | None] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ReverseSyncFacts:
+    """What the dbt result, the Reverse Sync target and their Diff look like before a write.
+
+    `diff_deletes` counts target rows absent from the dbt result, whether or not they are deleted.
+    """
+
+    target_table_exists: bool
+    missing_target_columns: tuple[str, ...]
+    result_rows: int
+    duplicate_keys: int
+    null_keys: int
+    target_rows: int
+    diff_updates: int
+    diff_deletes: int
+
+
 def evaluate_preflight_checks(table: SyncTable, source_facts: SourceFacts) -> list[CheckResult]:
     return _evaluate(
-        table, PREFLIGHT_CHECKS, lambda check: _PREFLIGHT_RULES[check](table, source_facts)
+        table.name,
+        table.skip_reason,
+        PREFLIGHT_CHECKS,
+        lambda check: _PREFLIGHT_RULES[check](table, source_facts),
     )
 
 
 def evaluate_load_checks(table: SyncTable, load_facts: LoadFacts) -> list[CheckResult]:
     load_checks = tuple(c for c in table.applicable_checks() if c not in PREFLIGHT_CHECKS)
-    return _evaluate(table, load_checks, lambda check: _LOAD_RULES[check](load_facts))
+    return _evaluate(
+        table.name, table.skip_reason, load_checks, lambda check: _LOAD_RULES[check](load_facts)
+    )
 
 
 def evaluate_declared_checks(
@@ -105,39 +162,56 @@ def evaluate_declared_checks(
 ) -> list[CheckResult]:
     declared = {check.name: check for check in table.checks}
     return _evaluate(
-        table,
+        table.name,
+        table.skip_reason,
         tuple(declared),
         lambda name: _DECLARED_RULES[declared[name].type](declared[name], load_facts, now),
     )
 
 
+def evaluate_reverse_sync(
+    step: ReverseSyncStep, facts: ReverseSyncFacts
+) -> tuple[CheckResult, ...]:
+    def skip_reason(check: str) -> str | None:
+        if step.skip_checks is not None and check in step.skip_checks.checks:
+            return step.skip_checks.reason
+        return None
+
+    return tuple(
+        _evaluate(
+            step.target_table,
+            skip_reason,
+            REVERSE_SYNC_CHECKS,
+            lambda check: _REVERSE_SYNC_RULES[check](step, facts),
+        )
+    )
+
+
 def _evaluate(
-    table: SyncTable,
+    subject: str,
+    skip_reason: Callable[[str], str | None],
     checks: Sequence[str],
     failure_of: Callable[[str], str | None],
 ) -> list[CheckResult]:
     results = []
     for check in checks:
-        reason = table.skip_reason(check)
+        reason = skip_reason(check)
         if reason is not None:
             results.append(
                 CheckResult(
-                    check,
-                    table.name,
-                    CheckStatus.SKIPPED,
-                    f"{table.name}: {check} skipped — {reason}",
+                    check, subject, CheckStatus.SKIPPED, f"{subject}: {check} skipped — {reason}"
                 )
             )
             continue
         failure = failure_of(check)
         if failure is None:
             results.append(
-                CheckResult(check, table.name, CheckStatus.PASS, f"{table.name}: {check} passed")
+                CheckResult(check, subject, CheckStatus.PASS, f"{subject}: {check} passed")
             )
         else:
             results.append(
                 CheckResult(
-                    check, table.name, CheckStatus.FAIL, f"{table.name}: {check} failed — {failure}"
+                    check, subject, CheckStatus.FAIL, f"{subject}: {check} failed — {failure}"
                 )
             )
     return results
@@ -260,4 +334,51 @@ _DECLARED_RULES: dict[str, Callable[[Any, LoadFacts, datetime], str | None]] = {
     "freshness": lambda check, facts, now: _freshness(
         facts, check.column, check.max_age_hours, now
     ),
+}
+
+
+def _target_columns_exist(step: ReverseSyncStep, facts: ReverseSyncFacts) -> str | None:
+    if not facts.target_table_exists:
+        return f"table {step.target_table} not found in the target {step.target}"
+    if facts.missing_target_columns:
+        return "missing columns in the target: " + ", ".join(facts.missing_target_columns)
+    return None
+
+
+def _key_unique(step: ReverseSyncStep, facts: ReverseSyncFacts) -> str | None:
+    if facts.duplicate_keys:
+        return f"{facts.duplicate_keys} duplicate {step.key} values in the dbt result"
+    return None
+
+
+def _key_not_null(step: ReverseSyncStep, facts: ReverseSyncFacts) -> str | None:
+    if facts.null_keys:
+        return f"{facts.null_keys} rows with an empty {step.key} in the dbt result"
+    return None
+
+
+def _max_change(step: ReverseSyncStep, facts: ReverseSyncFacts) -> str | None:
+    if facts.target_rows == 0:
+        return None
+    changes = facts.diff_updates + (facts.diff_deletes if step.delete_missing else 0)
+    if changes / facts.target_rows > step.max_change_share:
+        return (
+            f"{changes} of {facts.target_rows} target rows would change, "
+            f"more than the allowed share {step.max_change_share}"
+        )
+    return None
+
+
+def _result_not_empty(step: ReverseSyncStep, facts: ReverseSyncFacts) -> str | None:
+    if facts.result_rows == 0:
+        return f"the dbt model {step.model} has no rows"
+    return None
+
+
+_REVERSE_SYNC_RULES: dict[str, Callable[[ReverseSyncStep, ReverseSyncFacts], str | None]] = {
+    CheckName.TARGET_COLUMNS_EXIST: _target_columns_exist,
+    CheckName.KEY_UNIQUE: _key_unique,
+    CheckName.KEY_NOT_NULL: _key_not_null,
+    CheckName.MAX_CHANGE: _max_change,
+    CheckName.RESULT_NOT_EMPTY: _result_not_empty,
 }

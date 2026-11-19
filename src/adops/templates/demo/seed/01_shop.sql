@@ -12,6 +12,14 @@ CREATE TABLE orders (
     updated_at timestamptz NOT NULL
 );
 
+-- Filled by the shop_sync Reverse Sync in stage; dev only shows a Preview of it.
+CREATE TABLE customer_stats (
+    customer_id integer PRIMARY KEY,
+    order_count bigint NOT NULL,
+    total_amount numeric(12, 2) NOT NULL,
+    last_order_at timestamptz NOT NULL
+);
+
 INSERT INTO customers (id, email, updated_at)
 SELECT n,
        'customer' || n || '@example.com',

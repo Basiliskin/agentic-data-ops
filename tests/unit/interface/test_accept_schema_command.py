@@ -5,10 +5,11 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from adops.application.ports import ResolvedConnection
+from adops.application.ports import ResolvedConnection, ResolvedDuckDb
 from adops.domain.checks import SourceFacts
 from adops.domain.pipeline import SyncStep
 from adops.domain.schema_snapshot import TableShape
+from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
 from adops.interface import accept_schema_command, cli, run_command
 
 runner = CliRunner()
@@ -100,14 +101,14 @@ def project(tmp_path, monkeypatch):
 @pytest.fixture
 def sync(monkeypatch):
     fake = FakeSync()
-    monkeypatch.setattr(run_command, "build_sync", lambda project, pipeline, kind: fake)
+    monkeypatch.setattr(run_command, "build_sync", lambda *_: fake)
     return fake
 
 
 @pytest.fixture
 def store(monkeypatch):
     fake = InMemorySnapshotStore()
-    monkeypatch.setattr(run_command, "build_snapshot_store", lambda project, kind: fake)
+    monkeypatch.setattr(run_command, "build_snapshot_store", lambda *_: fake)
     return fake
 
 
@@ -208,7 +209,7 @@ def test_table_missing_in_source_is_refused(project, monkeypatch):
             return {table.name: SourceFacts(False, frozenset()) for table in step.tables}
 
     monkeypatch.setattr(
-        run_command, "build_sync", lambda project, pipeline, kind: MissingTableSync()
+        run_command, "build_sync", lambda project, pipeline, environment, kind: MissingTableSync()
     )
 
     result = invoke(project)
@@ -234,12 +235,12 @@ def test_builds_sync_and_store_through_run_commands_factories(project, monkeypat
     built: list[tuple[str, object]] = []
     store = InMemorySnapshotStore()
 
-    def build_sync(project_dir, pipeline, kind):
-        built.append(("sync", (project_dir, pipeline, kind)))
+    def build_sync(project_dir, pipeline, environment, kind):
+        built.append(("sync", (project_dir, pipeline, environment, kind)))
         return FakeSync()
 
-    def build_store(project_dir, kind):
-        built.append(("store", (project_dir, kind)))
+    def build_store(project_dir, environment, kind):
+        built.append(("store", (project_dir, environment, kind)))
         return store
 
     monkeypatch.setattr(run_command, "build_sync", build_sync)
@@ -248,7 +249,10 @@ def test_builds_sync_and_store_through_run_commands_factories(project, monkeypat
     accepted = accept_schema_command.accept_project_schema(project, "shop_sync", "orders", "dev")
 
     assert accepted.environment == "dev"
-    assert built == [("sync", (project, "shop_sync", "postgres")), ("store", (project, "postgres"))]
+    assert built == [
+        ("sync", (project, "shop_sync", "dev", "postgres")),
+        ("store", (project, "dev", "postgres")),
+    ]
 
 
 DUCKDB_ENVIRONMENT = """
@@ -263,14 +267,14 @@ DUCKDB_ENVIRONMENT = """
 @pytest.mark.parametrize(("env", "kind"), [("dev", "postgres"), ("ci", "duckdb")])
 def test_adapters_are_built_for_the_chosen_environments_kind(project, monkeypatch, env, kind):
     (project / "adops.yaml").write_text(SETTINGS + DUCKDB_ENVIRONMENT)
-    built: list[tuple[str, str]] = []
+    built: list[tuple[str, str, str]] = []
 
-    def build_sync(project_dir: Path, pipeline: str, kind: str) -> FakeSync:
-        built.append(("sync", kind))
+    def build_sync(project_dir: Path, pipeline: str, environment: str, kind: str) -> FakeSync:
+        built.append(("sync", environment, kind))
         return FakeSync()
 
-    def build_store(project_dir: Path, kind: str) -> InMemorySnapshotStore:
-        built.append(("store", kind))
+    def build_store(project_dir: Path, environment: str, kind: str) -> InMemorySnapshotStore:
+        built.append(("store", environment, kind))
         return InMemorySnapshotStore()
 
     monkeypatch.setattr(run_command, "build_sync", build_sync)
@@ -278,7 +282,7 @@ def test_adapters_are_built_for_the_chosen_environments_kind(project, monkeypatc
 
     accept_schema_command.accept_project_schema(project, "shop_sync", "orders", env)
 
-    assert built == [("sync", kind), ("store", kind)]
+    assert built == [("sync", env, kind), ("store", env, kind)]
 
 
 @pytest.mark.usefixtures("sync")
@@ -293,3 +297,49 @@ def test_unopenable_duckdb_file_fails_with_the_dedicated_message(project, monkey
     for leaked in ("missing/dir", str(Path.home()), "IOException", "unexpected"):
         assert leaked not in result.output
     assert not (project / "missing").exists()
+
+
+STAGE_DUCKDB_SETTINGS = """
+environments:
+  dev:
+    warehouse: {type: duckdb, path: dev.duckdb}
+    sources:
+      shop: {type: postgres, host: localhost, port: 5432, database: s, user: s,
+             password_env: ADOPS_TEST_SHOP_PASSWORD}
+  stage:
+    warehouse: {type: duckdb, path: stage.duckdb}
+    sources:
+      shop: {type: postgres, host: localhost, port: 5432, database: s, user: s,
+             password_env: ADOPS_TEST_SHOP_PASSWORD}
+"""
+
+
+def test_accept_schema_in_stage_uses_stage_local_state_and_finds_stage_snapshot(
+    project, sync, monkeypatch
+):
+    (project / "adops.yaml").write_text(STAGE_DUCKDB_SETTINGS)
+    for environment, extra_column in (("dev", "dev_only"), ("stage", "stage_only")):
+        REAL_BUILD_SNAPSHOT_STORE(project, environment, "duckdb").save(
+            ResolvedDuckDb(str(project / f"{environment}.duckdb")),
+            "shop_sync",
+            "shop",
+            "orders",
+            TableShape({**ORDERS, extra_column: "text"}),
+        )
+    built: list[WarehouseSnapshotStore] = []
+
+    def build_store(project_dir: Path, environment: str, kind: str) -> WarehouseSnapshotStore:
+        built.append(REAL_BUILD_SNAPSHOT_STORE(project_dir, environment, kind))
+        return built[-1]
+
+    monkeypatch.setattr(run_command, "build_snapshot_store", build_store)
+
+    result = invoke(project, "--env", "stage")
+
+    assert result.exit_code == 0, result.output
+    assert vars(built[0])["_pipelines_dir"] == project / ".adops" / "dlt" / "stage"
+    assert sync.nullable == ["stage_only"]
+    assert sorted(path.name for path in (project / ".adops" / "dlt").iterdir()) == [
+        "dev",
+        "stage",
+    ]

@@ -1,8 +1,17 @@
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    StringConstraints,
+    Tag,
+    model_validator,
+)
 
 from adops.domain.errors import RuleViolation
+from adops.domain.names import IDENTIFIER
 from adops.domain.secret_reference import SecretReference
 
 REQUIRED_ENVIRONMENTS = ("dev",)
@@ -68,6 +77,10 @@ class Environment(BaseModel):
 
     warehouse: WarehouseConnection
     sources: dict[str, PostgresConnection]
+    targets: dict[str, PostgresConnection] = Field(default_factory=dict)
+
+
+EnvironmentName = Annotated[str, StringConstraints(pattern=IDENTIFIER)]
 
 
 class ProjectSettings(BaseModel):
@@ -75,7 +88,7 @@ class ProjectSettings(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    environments: dict[str, Environment]
+    environments: dict[EnvironmentName, Environment]
 
     @model_validator(mode="after")
     def _required_environments_present(self) -> "ProjectSettings":

@@ -9,3 +9,5 @@
 - 2026-11-18 | horizon 3 | completed | 6 phases | 1 amendment — dbt Transform Step, dbt tests as Checks, empty Source table Check, fixed Source/Warehouse unreachable and load-failed errors, dlt output silenced
 - 2026-11-18 | horizon 4 | planned | 6 phases (DuckDB Warehouse runs the demo end to end); gate passed after fixes (0 blockers, 1 major fixed)
 - 2026-11-19 | horizon 4 | completed | 6 phases | 1 amendment — DuckDB Warehouse kind, kind read from settings, dlt[duckdb] + dbt-duckdb at runtime, demo E2E passes on Postgres and DuckDB in one stack (92s)
+- 2026-11-19 | horizon 5 | planned | 7 phases (Reverse Sync + Preview, stage Environment, demo E2E on both Warehouses); gate passed after fixes (0 blockers, 3 majors fixed)
+- 2026-11-19 | horizon 5 | completed | 7 phases | 1 amendment — Reverse Sync + Preview (writes only in stage/prod), per-Environment dlt state, demo stage Environment; E2E passes on Postgres and DuckDB (110s)

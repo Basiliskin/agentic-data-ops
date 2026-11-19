@@ -13,6 +13,8 @@ from adops.application.ports import (
     Clock,
     Orchestrator,
     ResolvedConnection,
+    ResolvedWarehouse,
+    ReverseSyncRead,
     RunPlan,
     RunResult,
     SchemaSnapshotStore,
@@ -24,6 +26,8 @@ from adops.application.ports import (
 from adops.application.run_pipeline import InOrderOrchestrator
 from adops.domain.checks import LoadFacts, SourceFacts
 from adops.domain.pipeline import SyncStep
+from adops.domain.reverse_sync import ReverseSyncStep
+from adops.domain.reverse_sync_diff import Diff, Row
 from adops.domain.schema_snapshot import TableShape
 from adops.domain.transform import DbtTestFacts, DbtTestStatus, TransformStep
 from adops.infrastructure.clock import SystemClock
@@ -34,6 +38,7 @@ from adops.infrastructure.dbt_transform import (
     render_postgres_profile,
 )
 from adops.infrastructure.dlt_sync import DltSync
+from adops.infrastructure.postgres_reverse_sync import PostgresReverseSync
 from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
 from adops.interface import cli, run_command
 
@@ -130,7 +135,7 @@ def project(tmp_path, monkeypatch):
 @pytest.fixture
 def sync(monkeypatch):
     fake = FakeSync()
-    monkeypatch.setattr(run_command, "build_sync", lambda project, pipeline, kind: fake)
+    monkeypatch.setattr(run_command, "build_sync", lambda *_: fake)
     return fake
 
 
@@ -157,7 +162,7 @@ class InMemorySnapshotStore:
 @pytest.fixture(autouse=True)
 def snapshot_store(monkeypatch):
     store = InMemorySnapshotStore()
-    monkeypatch.setattr(run_command, "build_snapshot_store", lambda project, kind: store)
+    monkeypatch.setattr(run_command, "build_snapshot_store", lambda *_: store)
     return store
 
 
@@ -384,7 +389,7 @@ def test_run_passes_the_project_snapshot_store_to_the_pipeline(project, monkeypa
     built_for: list[Path] = []
     received: list[object] = []
 
-    def build(project_dir: Path, kind: str) -> InMemorySnapshotStore:
+    def build(project_dir: Path, environment: str, kind: str) -> InMemorySnapshotStore:
         built_for.append(project_dir)
         return sentinel
 
@@ -439,6 +444,26 @@ def test_run_passes_the_transform_built_for_the_project_to_the_pipeline(project,
     assert built_for == [project.resolve()]
 
 
+def test_run_passes_the_reverse_sync_built_for_the_project_to_the_pipeline(project, monkeypatch):
+    built: list[FakeReverseSync] = []
+    received: list[object] = []
+
+    def build(project_dir: Path, environment: str, kind: str) -> FakeReverseSync:
+        assert (project_dir, environment, kind) == (project.resolve(), "dev", "postgres")
+        built.append(FakeReverseSync())
+        return built[-1]
+
+    def capture(*args: object) -> RunResult:
+        received.append(args[9])
+        return RunResult("shop_sync", "dev", ())
+
+    monkeypatch.setattr(run_command, "build_reverse_sync", build)
+    monkeypatch.setattr(run_command, "run_pipeline", capture)
+
+    assert invoke(project).exit_code == 0
+    assert len(built) == 1 and received[0] is built[0]
+
+
 def test_first_run_records_a_snapshot_for_every_table(project, sync, orchestrator, snapshot_store):
     assert invoke(project).exit_code == 0
 
@@ -450,12 +475,20 @@ def test_first_run_records_a_snapshot_for_every_table(project, sync, orchestrato
 
 def test_real_adapters_are_built_for_the_project(tmp_path, monkeypatch):
     monkeypatch.undo()
-    sync = run_command.build_sync(tmp_path, "shop_sync", "postgres")
+    sync = run_command.build_sync(tmp_path, "shop_sync", "stage", "postgres")
     orchestrator = run_command.build_orchestrator()
-    store = run_command.build_snapshot_store(tmp_path, "postgres")
+    store = run_command.build_snapshot_store(tmp_path, "stage", "postgres")
     clock = run_command.build_clock()
     transform = run_command.build_transform(tmp_path, "postgres")
+    reverse_sync = run_command.build_reverse_sync(tmp_path, "stage", "postgres")
 
+    assert isinstance(reverse_sync, PostgresReverseSync)
+    assert vars(reverse_sync) == {
+        "_project_dir": tmp_path,
+        "_pipelines_dir": tmp_path / ".adops" / "dlt" / "stage",
+        "_warehouse_kind": "postgres",
+        "_result_rows": {},
+    }
     assert isinstance(transform, DbtTransform)
     assert isinstance(transform, Transform)
     assert transform.project_root == tmp_path
@@ -470,12 +503,12 @@ def test_real_adapters_are_built_for_the_project(tmp_path, monkeypatch):
     assert isinstance(clock, Clock)
     assert vars(store) == {
         "_project": tmp_path,
-        "_pipelines_dir": tmp_path / ".adops" / "dlt",
+        "_pipelines_dir": tmp_path / ".adops" / "dlt" / "stage",
         "_warehouse_kind": "postgres",
     }
     assert vars(sync) == {
         "_project_dir": tmp_path,
-        "_pipelines_dir": tmp_path / ".adops" / "dlt",
+        "_pipelines_dir": tmp_path / ".adops" / "dlt" / "stage",
         "_pipeline": "shop_sync",
         "_source_kind": "postgres",
         "_warehouse_kind": "postgres",
@@ -504,35 +537,48 @@ def test_every_adapter_is_built_for_the_chosen_environments_kind(
     project, sync, snapshot_store, monkeypatch, env, kind
 ):
     (project / "adops.yaml").write_text(TWO_KINDS_SETTINGS)
-    built: list[tuple[str, str]] = []
+    built: list[tuple[str, ...]] = []
 
-    def build_sync(project_dir: Path, pipeline: str, kind: str) -> FakeSync:
-        built.append(("sync", kind))
+    def build_sync(project_dir: Path, pipeline: str, environment: str, kind: str) -> FakeSync:
+        built.append(("sync", environment, kind))
         return sync
 
-    def build_store(project_dir: Path, kind: str) -> InMemorySnapshotStore:
-        built.append(("store", kind))
+    def build_store(project_dir: Path, environment: str, kind: str) -> InMemorySnapshotStore:
+        built.append(("store", environment, kind))
         return snapshot_store
 
     def build_transform(project_dir: Path, kind: str) -> FakeTransform:
         built.append(("transform", kind))
         return FakeTransform()
 
+    def build_reverse_sync(project_dir: Path, environment: str, kind: str) -> FakeReverseSync:
+        built.append(("reverse_sync", environment, kind))
+        return FakeReverseSync()
+
     monkeypatch.setattr(run_command, "build_sync", build_sync)
     monkeypatch.setattr(run_command, "build_snapshot_store", build_store)
     monkeypatch.setattr(run_command, "build_transform", build_transform)
+    monkeypatch.setattr(run_command, "build_reverse_sync", build_reverse_sync)
 
     result = invoke(project, "--env", env)
 
     assert result.exit_code == 0, result.output
-    assert built == [("sync", kind), ("store", kind), ("transform", kind)]
+    assert built == [
+        ("sync", env, kind),
+        ("store", env, kind),
+        ("transform", kind),
+        ("reverse_sync", env, kind),
+    ]
 
 
 def test_real_adapters_are_built_for_a_duckdb_warehouse(tmp_path):
-    sync = run_command.build_sync(tmp_path, "shop_sync", "duckdb")
-    store = REAL_BUILD_SNAPSHOT_STORE(tmp_path, "duckdb")
+    sync = run_command.build_sync(tmp_path, "shop_sync", "dev", "duckdb")
+    store = REAL_BUILD_SNAPSHOT_STORE(tmp_path, "dev", "duckdb")
     transform = run_command.build_transform(tmp_path, "duckdb")
+    reverse_sync = run_command.build_reverse_sync(tmp_path, "dev", "duckdb")
 
+    assert isinstance(reverse_sync, PostgresReverseSync)
+    assert vars(reverse_sync)["_warehouse_kind"] == "duckdb"
     assert vars(sync)["_warehouse_kind"] == "duckdb"
     assert vars(store)["_warehouse_kind"] == "duckdb"
     assert isinstance(transform, DbtTransform)
@@ -568,9 +614,15 @@ def duckdb_project(project, monkeypatch):
     (project / "pipelines" / "shop_sync.yaml").write_text(CUSTOMERS_PIPELINE)
     kinds: list[str] = []
 
-    def sqlite_source_sync(project_dir: Path, pipeline: str, kind: str) -> DltSync:
+    def sqlite_source_sync(project_dir: Path, pipeline: str, environment: str, kind: str):
         kinds.append(kind)
-        return DltSync(project_dir, pipeline, source_kind="sqlite", warehouse_kind=kind)
+        return DltSync(
+            project_dir,
+            pipeline,
+            environment=environment,
+            source_kind="sqlite",
+            warehouse_kind=kind,
+        )
 
     monkeypatch.setattr(run_command, "build_sync", sqlite_source_sync)
     monkeypatch.setattr(run_command, "build_snapshot_store", REAL_BUILD_SNAPSHOT_STORE)
@@ -606,3 +658,192 @@ def test_unopenable_duckdb_file_fails_with_the_dedicated_message(project, duckdb
     for leaked in ("missing/dir", str(project), "IOException", "unexpected"):
         assert leaked not in result.output
     assert not (project / "missing").exists()
+
+
+VALUE_SENTINEL = "nonkey-value-sentinel"
+TARGET_SENTINEL = "s3cr3t-crm-target-sentinel"
+
+CRM_TARGET = """
+    targets:
+      crm: {type: postgres, host: crm.internal, port: 5440, database: crm, user: crm_writer,
+            password_env: ADOPS_TEST_CRM_PASSWORD}
+"""
+
+REVERSE_SETTINGS = f"""
+environments:
+  dev:
+    warehouse: {{type: duckdb, path: dev.duckdb}}
+    sources: {{}}{CRM_TARGET}
+  stage:
+    warehouse: {{type: postgres, host: localhost, port: 5433, database: w, user: w,
+                password_env: ADOPS_TEST_WAREHOUSE_PASSWORD}}
+    sources: {{}}{CRM_TARGET}
+"""
+
+
+def reverse_pipeline(delete_missing: bool = False) -> str:
+    return f"""
+name: shop_sync
+steps:
+  - type: reverse_sync
+    name: push_stats
+    model: customer_stats
+    target: crm
+    target_table: customer_stats
+    key: customer_id
+    mapping: {{order_count: orders, total_amount: total}}
+    delete_missing: {str(delete_missing).lower()}
+    max_change_share: 1
+"""
+
+
+RESULT_ROWS: tuple[Row, ...] = (
+    {"customer_id": 1, "order_count": 3, "total_amount": VALUE_SENTINEL},
+    {"customer_id": 2, "order_count": 9, "total_amount": "b"},
+    {"customer_id": 3, "order_count": 2, "total_amount": "c"},
+)
+
+TARGET_ROWS: tuple[Row, ...] = (
+    {"customer_id": 1, "orders": 3, "total": VALUE_SENTINEL},
+    {"customer_id": 2, "orders": 0, "total": "b"},
+    {"customer_id": 4, "orders": 1, "total": VALUE_SENTINEL},
+    {"customer_id": 5, "orders": 1, "total": "e"},
+)
+
+
+@dataclass
+class FakeReverseSync:
+    result_rows: tuple[Row, ...] = RESULT_ROWS
+    target_rows: tuple[Row, ...] = TARGET_ROWS
+    null_keys: int = 0
+    targets: list[ResolvedConnection] = field(default_factory=list)
+    applied: list[Diff] = field(default_factory=list)
+
+    def read(
+        self, step: ReverseSyncStep, warehouse: ResolvedWarehouse, target: ResolvedConnection
+    ) -> ReverseSyncRead:
+        self.targets.append(target)
+        return ReverseSyncRead(
+            result_rows=self.result_rows,
+            target_rows=self.target_rows,
+            target_table_exists=True,
+            missing_target_columns=(),
+            duplicate_keys=0,
+            null_keys=self.null_keys,
+        )
+
+    def apply(self, step: ReverseSyncStep, target: ResolvedConnection, diff: Diff) -> None:
+        self.applied.append(diff)
+
+
+@pytest.fixture
+def reverse_sync(project, monkeypatch):
+    (project / "adops.yaml").write_text(REVERSE_SETTINGS)
+    (project / "pipelines" / "shop_sync.yaml").write_text(reverse_pipeline())
+    monkeypatch.setenv("ADOPS_TEST_CRM_PASSWORD", TARGET_SENTINEL)
+    fake = FakeReverseSync()
+    monkeypatch.setattr(run_command, "build_reverse_sync", lambda *_: fake)
+    return fake
+
+
+def reverse_lines(result) -> list[str]:
+    assert result.exit_code == 0, result.output
+    for leaked in (VALUE_SENTINEL, TARGET_SENTINEL, SENTINEL, "Diff(", "RowUpdate("):
+        assert leaked not in result.output
+    return result.output.splitlines()
+
+
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_dev_prints_a_preview_with_kept_rows_and_writes_nothing(project, reverse_sync):
+    lines = reverse_lines(invoke(project))
+
+    assert lines[0] == "step push_stats: passed"
+    preview = lines.index(
+        "  Preview: would insert 1, would update 1, kept 2 (absent from dbt result)"
+    )
+    assert lines[preview + 1 :] == [
+        "  sample insert keys: 3",
+        "  sample update keys: 2 (orders)",
+        "  sample kept keys: 4, 5",
+        "Pipeline shop_sync passed in Environment dev.",
+    ]
+    assert not any("wrote" in line or "would delete" in line for line in lines)
+    assert reverse_sync.applied == []
+    assert reverse_sync.targets[0].password == TARGET_SENTINEL
+
+
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_dev_preview_names_deletes_when_the_step_deletes_missing_rows(project, reverse_sync):
+    (project / "pipelines" / "shop_sync.yaml").write_text(reverse_pipeline(delete_missing=True))
+
+    lines = reverse_lines(invoke(project))
+
+    assert "  Preview: would insert 1, would update 1, would delete 2" in lines
+    assert "  sample delete keys: 4, 5" in lines
+    assert not any("wrote" in line or "kept" in line for line in lines)
+    assert reverse_sync.applied == []
+
+
+@pytest.mark.usefixtures("sync", "orchestrator")
+@pytest.mark.parametrize(
+    ("delete_missing", "summary"),
+    [
+        (True, "  wrote: inserted 1, updated 1, deleted 2"),
+        (False, "  wrote: inserted 1, updated 1, kept 2 (absent from dbt result)"),
+    ],
+)
+def test_stage_prints_the_write_summary_and_no_preview(
+    project, reverse_sync, delete_missing, summary
+):
+    (project / "pipelines" / "shop_sync.yaml").write_text(reverse_pipeline(delete_missing))
+
+    lines = reverse_lines(invoke(project, "--env", "stage"))
+
+    assert summary in lines
+    assert not any("Preview" in line or "would" in line for line in lines)
+    assert len(reverse_sync.applied) == 1
+    assert lines[-1] == "Pipeline shop_sync passed in Environment stage."
+
+
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_stage_run_stopped_by_a_check_prints_neither_wrote_nor_preview(project, reverse_sync):
+    reverse_sync.null_keys = 1
+
+    result = invoke(project, "--env", "stage")
+
+    assert_clean_failure(result)
+    assert VALUE_SENTINEL not in result.output
+    assert not any(word in result.output for word in ("wrote", "Preview", "sample"))
+    assert reverse_sync.applied == []
+
+
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_preview_sample_shows_at_most_five_keys_per_kind(project, reverse_sync):
+    reverse_sync.result_rows = tuple(
+        {"customer_id": key, "order_count": key, "total_amount": VALUE_SENTINEL}
+        for key in range(10, 17)
+    )
+    reverse_sync.target_rows = ()
+
+    lines = reverse_lines(invoke(project))
+
+    assert "  Preview: would insert 7, would update 0, would delete 0" in lines
+    assert "  sample insert keys: 10, 11, 12, 13, 14" in lines
+    assert not any(line.startswith(("  sample update", "  sample kept")) for line in lines)
+
+
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_update_sample_lists_every_changed_column_name_without_values(project, reverse_sync):
+    reverse_sync.result_rows = (
+        {"customer_id": 1, "order_count": 4, "total_amount": "changed-total"},
+        {"customer_id": 2, "order_count": 0, "total_amount": "b"},
+    )
+    reverse_sync.target_rows = (
+        {"customer_id": 1, "orders": 3, "total": VALUE_SENTINEL},
+        {"customer_id": 2, "orders": 0, "total": "c"},
+    )
+
+    lines = reverse_lines(invoke(project))
+
+    assert "  sample update keys: 1 (orders, total); 2 (total)" in lines
+    assert "changed-total" not in "\n".join(lines)

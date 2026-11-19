@@ -7,8 +7,14 @@ import typer
 
 from adops.domain.environment import ProjectSettings
 from adops.domain.errors import PipelineValidationError
-from adops.domain.loader import ensure_sources_defined, load_pipeline, load_project_settings
+from adops.domain.loader import (
+    ensure_sources_defined,
+    ensure_targets_defined,
+    load_pipeline,
+    load_project_settings,
+)
 from adops.domain.pipeline import Pipeline, SyncStep
+from adops.domain.reverse_sync import ReverseSyncStep
 from adops.domain.transform import TransformStep
 
 SETTINGS_FILE = "adops.yaml"
@@ -31,7 +37,8 @@ def validate(
 ) -> None:
     """Check adops.yaml and Pipelines without connecting to anything.
 
-    Skipped Checks are listed as `table: check skipped — reason`.
+    Skipped Checks are listed as `table: check skipped — reason`, or `step: check skipped — reason`
+    for a Reverse Sync Step.
     """
     report = validate_project(project, pipeline)
     for line in report.skipped:
@@ -51,7 +58,7 @@ def validate_project(project: Path, pipeline: str | None) -> Report:
         if loaded is None:
             continue
         if settings is not None:
-            _check_sources(relative, loaded, settings, report)
+            _check_connections(relative, loaded, settings, report)
         _check_dbt_projects(project, relative, loaded, report)
         report.skipped.extend(_skipped_checks(loaded))
     return report
@@ -79,16 +86,17 @@ def _load[T](project: Path, relative: Path, loader: Callable[[str], T], report: 
         return None
 
 
-def _check_sources(
+def _check_connections(
     relative: Path, pipeline: Pipeline, settings: ProjectSettings, report: Report
 ) -> None:
     for name, environment in sorted(settings.environments.items()):
-        try:
-            ensure_sources_defined(pipeline, environment)
-        except PipelineValidationError as error:
-            report.problems.extend(
-                f"{relative}: {problem} (Environment {name})" for problem in error.problems
-            )
+        for ensure_defined in (ensure_sources_defined, ensure_targets_defined):
+            try:
+                ensure_defined(pipeline, environment)
+            except PipelineValidationError as error:
+                report.problems.extend(
+                    f"{relative}: {problem} (Environment {name})" for problem in error.problems
+                )
 
 
 def _check_dbt_projects(project: Path, relative: Path, pipeline: Pipeline, report: Report) -> None:
@@ -107,9 +115,18 @@ def _skipped_checks(pipeline: Pipeline) -> list[str]:
         (table for step in pipeline.steps if isinstance(step, SyncStep) for table in step.tables),
         key=lambda t: t.name,
     )
+    reverse_syncs = sorted(
+        (step for step in pipeline.steps if isinstance(step, ReverseSyncStep)),
+        key=lambda s: s.name,
+    )
     return [
         f"{table.name}: {check} skipped — {table.skip_checks.reason}"
         for table in tables
         if table.skip_checks is not None
         for check in sorted(table.skip_checks.checks)
+    ] + [
+        f"{step.name}: {check} skipped — {step.skip_checks.reason}"
+        for step in reverse_syncs
+        if step.skip_checks is not None
+        for check in sorted(step.skip_checks.checks)
     ]

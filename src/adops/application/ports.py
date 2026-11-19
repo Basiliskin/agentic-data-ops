@@ -6,6 +6,8 @@ from typing import Protocol, runtime_checkable
 
 from adops.domain.checks import CheckResult, LoadFacts, SourceFacts
 from adops.domain.pipeline import SyncStep, SyncTable
+from adops.domain.reverse_sync import ReverseSyncStep
+from adops.domain.reverse_sync_diff import Diff, PreviewSample, Row
 from adops.domain.schema_snapshot import TableShape
 from adops.domain.transform import DbtTestFacts, TransformStep
 
@@ -49,6 +51,14 @@ class SourceUnreachable(Exception):
 
 class WarehouseUnreachable(Exception):
     """An adapter could not connect to the Warehouse; it holds no driver text."""
+
+
+class TargetUnreachable(Exception):
+    """A Reverse Sync could not connect to its Target; it holds no driver text."""
+
+
+class WriteFailed(Exception):
+    """A Reverse Sync write was rolled back and left the Target unchanged; no driver text."""
 
 
 @dataclass(frozen=True)
@@ -96,6 +106,34 @@ class Transform(Protocol):
     def run(self, step: TransformStep, warehouse: ResolvedWarehouse) -> TransformResult: ...
 
 
+@dataclass(frozen=True)
+class ReverseSyncRead:
+    """The dbt result rows (dbt column names), the Target's rows (Target column names), measured.
+
+    `duplicate_keys` and `null_keys` count rows of the dbt result.
+    """
+
+    result_rows: tuple[Row, ...]
+    target_rows: tuple[Row, ...]
+    target_table_exists: bool
+    missing_target_columns: tuple[str, ...]
+    duplicate_keys: int
+    null_keys: int
+
+
+@runtime_checkable
+class ReverseSync(Protocol):
+    """Reads a dbt result from the Warehouse and applies a computed Diff to a Target table."""
+
+    def read(
+        self, step: ReverseSyncStep, warehouse: ResolvedWarehouse, target: ResolvedConnection
+    ) -> ReverseSyncRead: ...
+
+    def apply(self, step: ReverseSyncStep, target: ResolvedConnection, diff: Diff) -> None:
+        """Apply exactly `diff` in one transaction."""
+        ...
+
+
 @runtime_checkable
 class SchemaSnapshotStore(Protocol):
     """Keeps each Source table's last accepted shape in the Warehouse; it never judges a change."""
@@ -129,18 +167,32 @@ class StepStatus(StrEnum):
 
 
 @dataclass(frozen=True)
+class ReverseSyncPreview:
+    """How many Target rows a Reverse Sync changes, with a key-only sample; never row values."""
+
+    inserts: int
+    updates: int
+    deletes: int
+    kept: int
+    sample: PreviewSample
+    written: bool
+
+
+@dataclass(frozen=True)
 class StepReport:
     name: str
     status: StepStatus
     checks: tuple[CheckResult, ...] = ()
     rows_loaded: Mapping[str, int] = field(default_factory=dict)
     error: str | None = None
+    preview: ReverseSyncPreview | None = None
 
 
 @dataclass(frozen=True)
 class StepOutcome:
     checks: tuple[CheckResult, ...]
     rows_loaded: Mapping[str, int]
+    preview: ReverseSyncPreview | None = None
 
 
 class StepTask(Protocol):

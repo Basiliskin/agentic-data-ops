@@ -1,4 +1,5 @@
 # Passwords are never written here: each *_env names a variable set in .env.
+# Only an Environment named stage or prod writes to a target; dev prints a Preview instead.
 environments:
   dev:
     warehouse:
@@ -13,6 +14,42 @@ environments:
     #   type: duckdb
     #   path: .adops/warehouse.duckdb
     sources:
+      shop:
+        type: postgres
+        host: localhost
+        port: 15432
+        database: shop
+        user: shop
+        password_env: SHOP_PASSWORD
+    targets:
+      shop:
+        type: postgres
+        host: localhost
+        port: 15432
+        database: shop
+        user: shop
+        password_env: SHOP_PASSWORD
+  stage:
+    warehouse:
+      type: postgres
+      host: localhost
+      port: 15433
+      database: warehouse_stage
+      user: warehouse
+      password_env: WAREHOUSE_PASSWORD
+    # To keep the Warehouse in a local DuckDB file instead, replace the warehouse block above with:
+    # warehouse:
+    #   type: duckdb
+    #   path: .adops/warehouse_stage.duckdb
+    sources:
+      shop:
+        type: postgres
+        host: localhost
+        port: 15432
+        database: shop
+        user: shop
+        password_env: SHOP_PASSWORD
+    targets:
       shop:
         type: postgres
         host: localhost

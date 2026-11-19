@@ -7,11 +7,13 @@ import adops
 from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import (
     ensure_sources_defined,
+    ensure_targets_defined,
     format_path,
     load_pipeline,
     load_project_settings,
 )
 from adops.domain.pipeline import Pipeline, SyncStep
+from adops.domain.reverse_sync import ReverseSyncStep
 from adops.domain.transform import TransformStep
 
 SENTINEL = "LEAK-9f3a"
@@ -195,11 +197,12 @@ steps:
 
 def test_the_demo_pipeline_without_step_types_loads_as_sync_steps():
     text = DEMO_PIPELINE.read_text()
-    sync, transform = load_pipeline(text).steps
+    sync, transform, reverse_sync = load_pipeline(text).steps
 
     assert "type" not in yaml.safe_load(text)["steps"][0]
     assert isinstance(sync, SyncStep)
     assert isinstance(transform, TransformStep)
+    assert isinstance(reverse_sync, ReverseSyncStep)
 
 
 def test_sync_and_transform_steps_load_side_by_side():
@@ -231,7 +234,7 @@ def test_an_unknown_step_type_is_rejected_without_echoing_the_step(step_type):
 
     error = raised_by(load_pipeline, text)
 
-    assert error.problems == ("steps[1]: type must be one of: sync, transform",)
+    assert error.problems == ("steps[1]: type must be one of: sync, transform, reverse_sync",)
     assert_secret_free(error)
 
 
@@ -339,3 +342,69 @@ def test_a_source_named_warehouse_keeps_its_keys_in_the_path():
     assert raised_by(load_project_settings, text).problems == (
         "environments.dev.sources.warehouse.postgres: Extra inputs are not permitted",
     )
+
+
+REVERSE = """
+name: shop
+steps:
+  - type: transform
+    name: model_shop
+    project: dbt
+  - type: reverse_sync
+    name: push_stats
+    model: customer_stats
+    target: shop
+    target_table: customer_stats
+    key: customer_id
+    mapping: {customer_id: customer_id}
+"""
+
+TARGETS = """
+    targets:
+      shop: {type: postgres, host: h, port: 5432, database: d, user: u, password_env: TARGET_PW}
+"""
+
+
+def test_a_reverse_sync_target_must_be_defined_in_the_environment():
+    environment = load_project_settings(SETTINGS).environments["dev"]
+
+    error = raised_by(lambda p: ensure_targets_defined(p, environment), load_pipeline(REVERSE))
+
+    assert error.problems == (
+        "steps[1].target: Step push_stats writes to Target shop, which the Environment does "
+        "not define",
+    )
+
+
+def test_a_source_of_the_same_name_does_not_count_as_a_target():
+    environment = load_project_settings(SETTINGS).environments["dev"]
+
+    assert "shop" in environment.sources
+    with pytest.raises(PipelineValidationError):
+        ensure_targets_defined(load_pipeline(REVERSE), environment)
+
+
+def test_a_defined_target_passes_without_resolving_its_password(monkeypatch):
+    monkeypatch.delenv("TARGET_PW", raising=False)
+    environment = load_project_settings(SETTINGS + TARGETS).environments["dev"]
+
+    assert ensure_targets_defined(load_pipeline(REVERSE), environment) is None
+
+
+def test_pipelines_without_reverse_sync_need_no_targets():
+    environment = load_project_settings(SETTINGS).environments["dev"]
+
+    assert environment.targets == {}
+    assert ensure_targets_defined(load_pipeline(MIXED), environment) is None
+
+
+def test_target_errors_never_echo_the_password_value(monkeypatch):
+    monkeypatch.setenv("TARGET_PW", SENTINEL)
+    text = (SETTINGS + TARGETS).replace("password_env: TARGET_PW", f"password: {SENTINEL}")
+
+    error = raised_by(load_project_settings, text)
+
+    assert error.problems[0].startswith(
+        "environments.dev.targets.shop.password: literal passwords are not allowed"
+    )
+    assert_secret_free(error)

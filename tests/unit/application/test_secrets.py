@@ -1,6 +1,11 @@
 import pytest
 
-from adops.application.secrets import MissingSecretError, resolve_secret_references
+from adops.application.secrets import (
+    MissingSecretError,
+    resolve_secret_references,
+    secret_references,
+)
+from adops.domain.environment import DuckDbConnection, PostgresConnection
 from adops.domain.secret_reference import SecretReference
 
 
@@ -48,3 +53,42 @@ def test_variable_set_to_empty_string_counts_as_missing():
 
 def test_no_references_resolves_to_nothing():
     assert resolve_secret_references({"A": "1"}, []) == {}
+
+
+def postgres(password_env: str) -> PostgresConnection:
+    return PostgresConnection.model_validate(
+        {
+            "type": "postgres",
+            "host": "h",
+            "port": 5432,
+            "database": "d",
+            "user": "u",
+            "password_env": password_env,
+        }
+    )
+
+
+def test_target_passwords_are_secret_references_beside_the_warehouse_and_sources():
+    found = secret_references(
+        postgres("WH_PASSWORD"), [postgres("SRC_PASSWORD")], [postgres("TGT_PASSWORD")]
+    )
+
+    assert [ref.name for ref in found] == ["WH_PASSWORD", "SRC_PASSWORD", "TGT_PASSWORD"]
+
+
+def test_a_duckdb_warehouse_needs_only_the_target_password():
+    duckdb = DuckDbConnection(type="duckdb", path="w.duckdb")
+
+    found = secret_references(duckdb, [], [postgres("TGT_PASSWORD")])
+
+    assert [ref.name for ref in found] == ["TGT_PASSWORD"]
+
+
+def test_a_missing_target_password_is_named_and_its_value_never_shown():
+    refs_needed = secret_references(postgres("WH_PASSWORD"), [], [postgres("TGT_PASSWORD")])
+
+    with pytest.raises(MissingSecretError) as raised:
+        resolve_secret_references({"WH_PASSWORD": "wh-secret-value"}, refs_needed)
+
+    assert raised.value.names == ("TGT_PASSWORD",)
+    assert "wh-secret-value" not in str(raised.value)

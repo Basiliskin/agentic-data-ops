@@ -73,6 +73,11 @@ def _sqlite_engine(connection: ResolvedConnection) -> sa.Engine:
     return sa.create_engine(sa.URL.create("sqlite", database=connection.database))
 
 
+def local_state_dir(project_dir: Path, environment: str) -> Path:
+    """dlt's local state, the Incremental cursor included, is kept apart per Environment."""
+    return project_dir / ".adops" / "dlt" / environment
+
+
 def duckdb_file(project_dir: Path, path: str) -> Path:
     """A relative DuckDB path belongs to the Project folder, not the process cwd."""
     return project_dir / path
@@ -120,18 +125,19 @@ def warehouse_destination(
 
 
 class DltSync:
-    """The Sync port backed by dlt; Incremental Sync state lives under the Project's `.adops/`."""
+    """The Sync port backed by dlt; Incremental Sync state lives in the Environment's state dir."""
 
     def __init__(
         self,
         project_dir: Path,
         pipeline: str,
         *,
+        environment: str,
         warehouse_kind: str,
         source_kind: str = "postgres",
     ) -> None:
         self._project_dir = project_dir
-        self._pipelines_dir = project_dir / ".adops" / "dlt"
+        self._pipelines_dir = local_state_dir(project_dir, environment)
         self._pipeline = pipeline
         self._source_kind = source_kind
         self._warehouse_kind = warehouse_kind

@@ -26,6 +26,7 @@ services:
     ports:
       - "127.0.0.1:${WAREHOUSE_PORT:?set WAREHOUSE_PORT in .env}:5432"
     volumes:
+      - ./warehouse_init:/docker-entrypoint-initdb.d:ro
       - warehouse_data:/var/lib/postgresql/data
     healthcheck: *pg_ready
 

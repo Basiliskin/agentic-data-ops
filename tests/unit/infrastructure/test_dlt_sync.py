@@ -105,8 +105,14 @@ class Shop:
             for statement in statements:
                 connection.execute(statement)
 
-    def adapter(self) -> DltSync:
-        return DltSync(self.project, "shop", source_kind="sqlite", warehouse_kind="duckdb")
+    def adapter(self, environment: str = "dev") -> DltSync:
+        return DltSync(
+            self.project,
+            "shop",
+            environment=environment,
+            source_kind="sqlite",
+            warehouse_kind="duckdb",
+        )
 
     def sync(self, sync_step: SyncStep):
         return self.adapter().sync(sync_step, self.source, self.warehouse)
@@ -174,7 +180,7 @@ def test_second_incremental_sync_loads_only_advanced_rows_with_a_fresh_adapter(s
         shop.warehouse_rows("SELECT id FROM raw_shop.orders GROUP BY id HAVING count(*) > 1") == []
     )
     assert shop.warehouse_rows("SELECT amount FROM raw_shop.orders WHERE id = 2") == [(99,)]
-    assert (shop.project / ".adops" / "dlt" / "adops_shop_orders").is_dir()
+    assert (shop.project / ".adops" / "dlt" / "dev" / "adops_shop_orders").is_dir()
 
 
 def test_incremental_facts_carry_before_and_after_counts_and_cursor(shop):
@@ -515,7 +521,7 @@ def assert_project_holds_no_secret(project: Path) -> None:
 
 
 def test_preflight_against_an_unreachable_source_names_the_table(shop):
-    adapter = DltSync(shop.project, "shop", warehouse_kind="duckdb")
+    adapter = DltSync(shop.project, "shop", environment="dev", warehouse_kind="duckdb")
 
     with pytest.raises(SourceUnreachable) as raised:
         adapter.preflight(step(INCREMENTAL_ORDERS), unreachable_postgres())
@@ -530,7 +536,7 @@ def test_preflight_against_an_unreachable_source_names_the_table(shop):
     ids=["incremental", "full_refresh"],
 )
 def test_sync_against_an_unreachable_source_names_the_table(shop, table, name):
-    adapter = DltSync(shop.project, "shop", warehouse_kind="duckdb")
+    adapter = DltSync(shop.project, "shop", environment="dev", warehouse_kind="duckdb")
 
     with pytest.raises(SourceUnreachable) as raised:
         adapter.sync(step(table), unreachable_postgres(), shop.warehouse)
@@ -541,7 +547,9 @@ def test_sync_against_an_unreachable_source_names_the_table(shop, table, name):
 
 
 def test_sync_against_an_unreachable_warehouse_raises_warehouse_unreachable(shop):
-    adapter = DltSync(shop.project, "shop", source_kind="sqlite", warehouse_kind="postgres")
+    adapter = DltSync(
+        shop.project, "shop", environment="dev", source_kind="sqlite", warehouse_kind="postgres"
+    )
 
     with pytest.raises(WarehouseUnreachable) as raised:
         adapter.sync(step(INCREMENTAL_ORDERS), shop.source, unreachable_postgres())
@@ -574,7 +582,7 @@ def test_step_against_an_unreachable_source_fails_with_source_unreachable_error(
     )
 
     with pytest.raises(SourceUnreachableError) as raised:
-        planned(DltSync(shop.project, "shop", warehouse_kind="duckdb"))
+        planned(DltSync(shop.project, "shop", environment="dev", warehouse_kind="duckdb"))
 
     assert type(raised.value) is SourceUnreachableError
     assert str(raised.value) == "Pipeline shop, Step orders, table orders: Source is unreachable"
@@ -587,13 +595,21 @@ def test_step_against_an_unreachable_warehouse_fails_with_warehouse_unreachable_
 ):
     store = NoSnapshots()
     if first_contact == "snapshot store":
-        store = WarehouseSnapshotStore(shop.project, "postgres")
+        store = WarehouseSnapshotStore(shop.project, "postgres", environment="dev")
     planned = PlannedStep(
         step(INCREMENTAL_ORDERS), shop.source, unreachable_postgres(), "shop", store, FixedNow()
     )
 
     with pytest.raises(WarehouseUnreachableError) as raised:
-        planned(DltSync(shop.project, "shop", source_kind="sqlite", warehouse_kind="postgres"))
+        planned(
+            DltSync(
+                shop.project,
+                "shop",
+                environment="dev",
+                source_kind="sqlite",
+                warehouse_kind="postgres",
+            )
+        )
 
     assert type(raised.value) is WarehouseUnreachableError
     assert str(raised.value) == "Pipeline shop, Step orders: Warehouse is unreachable"
@@ -673,6 +689,47 @@ def test_unknown_warehouse_kind_is_rejected_clearly(kind, tmp_path):
 def test_the_warehouse_kind_must_be_given():
     with pytest.raises(TypeError, match="warehouse_kind"):
         DltSync(Path("."), "shop")  # type: ignore[call-arg]
+
+
+def test_the_environment_must_be_given():
+    with pytest.raises(TypeError, match="environment"):
+        DltSync(Path("."), "shop", warehouse_kind="duckdb")  # type: ignore[call-arg]
+
+
+def test_local_state_lives_in_the_environments_own_folder(tmp_path):
+    adapter = DltSync(tmp_path, "shop", environment="stage", warehouse_kind="duckdb")
+
+    assert vars(adapter)["_pipelines_dir"] == tmp_path / ".adops" / "dlt" / "stage"
+
+
+def test_a_stage_incremental_load_after_a_dev_load_loads_every_source_row(shop):
+    # A fresh dataset makes dlt drop its local state, so the shared-cursor bug only shows once
+    # stage already holds rows and dev has since moved the cursor past a row stage lacks.
+    orders = step(INCREMENTAL_ORDERS)
+    stage_path = shop.project / "stage.duckdb"
+    stage_warehouse = ResolvedDuckDb(str(stage_path))
+
+    shop.adapter("dev").sync(orders, shop.source, shop.warehouse)
+    shop.adapter("stage").sync(orders, shop.source, stage_warehouse)
+    shop.execute("INSERT INTO orders VALUES (4, 4, 40)")
+    dev = shop.adapter("dev").sync(orders, shop.source, shop.warehouse)
+    shop.execute("INSERT INTO orders VALUES (5, 5, 50)")
+    stage = shop.adapter("stage").sync(orders, shop.source, stage_warehouse)
+
+    assert dev.rows_loaded == {"orders": 1}
+    assert stage.rows_loaded == {"orders": 2}
+    with duckdb.connect(str(stage_path)) as connection:
+        stage_ids = connection.execute("SELECT id FROM raw_shop.orders ORDER BY id").fetchall()
+    assert stage_ids == shop.source_rows("SELECT id FROM orders ORDER BY id")
+    assert len(stage_ids) == 5
+    state = shop.project / ".adops" / "dlt"
+    assert sorted(path.name for path in state.iterdir()) == ["dev", "stage"]
+
+    shop.execute("INSERT INTO orders VALUES (6, 6, 60)")
+    dev_again = shop.adapter("dev").sync(orders, shop.source, shop.warehouse)
+
+    assert dev_again.rows_loaded == {"orders": 2}
+    assert shop.warehouse_rows("SELECT count(*) FROM raw_shop.orders") == [(6,)]
 
 
 def test_duckdb_file_joins_a_relative_path_to_the_project(tmp_path):
@@ -824,7 +881,9 @@ def test_make_columns_nullable_before_any_load_does_nothing(shop):
 
 def test_make_columns_nullable_against_an_unreachable_warehouse(shop):
     orders = step(INCREMENTAL_ORDERS)
-    adapter = DltSync(shop.project, "shop", source_kind="sqlite", warehouse_kind="postgres")
+    adapter = DltSync(
+        shop.project, "shop", environment="dev", source_kind="sqlite", warehouse_kind="postgres"
+    )
 
     with pytest.raises(WarehouseUnreachable) as raised:
         adapter.make_columns_nullable(orders, orders.tables[0], unreachable_postgres(), ["amount"])

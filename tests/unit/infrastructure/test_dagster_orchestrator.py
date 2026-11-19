@@ -12,6 +12,8 @@ import adops
 from adops.application.ports import (
     Orchestrator,
     ResolvedConnection,
+    ResolvedWarehouse,
+    ReverseSyncRead,
     RunPlan,
     RunResult,
     StepOutcome,
@@ -21,6 +23,8 @@ from adops.application.ports import (
 from adops.application.run_pipeline import InOrderOrchestrator, run_pipeline
 from adops.domain.checks import LoadFacts, SourceFacts
 from adops.domain.pipeline import SyncStep
+from adops.domain.reverse_sync import ReverseSyncStep
+from adops.domain.reverse_sync_diff import Diff
 from adops.domain.schema_snapshot import TableShape
 from adops.infrastructure import dagster_orchestrator
 from adops.infrastructure.dagster_orchestrator import (
@@ -420,6 +424,91 @@ def test_unexpected_error_fails_the_step_without_its_message(dagster_home: Path)
     ]
     for content in (p.read_bytes() for p in dagster_home.rglob("*") if p.is_file()):
         assert SOURCE_PASSWORD.encode() not in content
+
+
+TARGET_PASSWORD = "s3cr3t-dagster-target-sentinel"
+KEY_SENTINEL = "key-sentinel-4417"
+
+REVERSE_SETTINGS = """
+environments:
+  dev:
+    warehouse:
+      type: duckdb
+      path: dev.duckdb
+    sources: {}
+  stage:
+    warehouse:
+      type: duckdb
+      path: stage.duckdb
+    sources: {}
+    targets:
+      crm:
+        type: postgres
+        host: crm.internal
+        port: 5440
+        database: crm
+        user: crm_writer
+        password_env: CRM_TARGET_PASSWORD
+"""
+
+REVERSE_PIPELINE = """
+name: crm_push
+steps:
+  - type: reverse_sync
+    name: push_stats
+    model: customer_stats
+    target: crm
+    target_table: customer_stats
+    key: customer_id
+    mapping:
+      order_count: orders
+"""
+
+
+@dataclass
+class KeySentinelReverseSync:
+    applied: list[Diff] = field(default_factory=list)
+
+    def read(
+        self, step: ReverseSyncStep, warehouse: ResolvedWarehouse, target: ResolvedConnection
+    ) -> ReverseSyncRead:
+        return ReverseSyncRead(
+            result_rows=({"customer_id": KEY_SENTINEL, "order_count": 1},),
+            target_rows=(),
+            target_table_exists=True,
+            missing_target_columns=(),
+            duplicate_keys=0,
+            null_keys=0,
+        )
+
+    def apply(self, step: ReverseSyncStep, target: ResolvedConnection, diff: Diff) -> None:
+        self.applied.append(diff)
+
+
+def test_no_target_password_or_preview_key_reaches_dagster_storage(dagster_home: Path):
+    engine = KeySentinelReverseSync()
+
+    result = run_pipeline(
+        REVERSE_PIPELINE,
+        REVERSE_SETTINGS,
+        "stage",
+        {"CRM_TARGET_PASSWORD": TARGET_PASSWORD},
+        RecordingSync(),
+        FakeSnapshotStore(),
+        FixedClock(),
+        DagsterOrchestrator(),
+        reverse_sync=engine,
+    )
+
+    preview = result.steps[0].preview
+    assert result.succeeded and len(engine.applied) == 1
+    assert preview is not None and preview.sample.inserts == (KEY_SENTINEL,)
+    run_id = only_run_id()
+    texts = stored_texts(run_id) + [str(stored_check_metadata(run_id))]
+    files = [path.read_bytes() for path in dagster_home.rglob("*") if path.is_file()]
+    for sentinel in (TARGET_PASSWORD, KEY_SENTINEL):
+        assert all(sentinel not in text for text in texts)
+        assert all(sentinel.encode() not in content for content in files)
 
 
 def test_without_dagster_home_an_ephemeral_instance_writes_nothing(

@@ -11,9 +11,10 @@ from pydantic import (
     model_validator,
 )
 
-from adops.domain.checks import CHECKS_BY_MODE, CheckName, SyncMode
+from adops.domain.checks import CHECKS_BY_MODE, CheckName, SkipChecks, SyncMode
 from adops.domain.errors import RuleViolation
 from adops.domain.names import IDENTIFIER
+from adops.domain.reverse_sync import ReverseSyncStep
 from adops.domain.transform import TransformStep
 
 
@@ -91,22 +92,6 @@ DeclaredCheck = Annotated[
         custom_error_message="type must be one of: " + ", ".join(DECLARED_CHECK_TYPES),
     ),
 ]
-
-
-class SkipChecks(BaseModel):
-    """A per-table opt-out from Checks, allowed only with a written reason."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    checks: list[str] = Field(min_length=1)
-    reason: str
-
-    @field_validator("reason")
-    @classmethod
-    def _reason_not_blank(cls, reason: str) -> str:
-        if not reason.strip():
-            raise RuleViolation([((), "must explain why these Checks are skipped")])
-        return reason
 
 
 class SyncTable(BaseModel):
@@ -192,7 +177,7 @@ class SyncStep(BaseModel):
     tables: list[SyncTable] = Field(min_length=1)
 
 
-STEP_TYPES = ("sync", "transform")
+STEP_TYPES = ("sync", "transform", "reverse_sync")
 
 
 def _step_type(value: Any) -> str | None:
@@ -201,7 +186,9 @@ def _step_type(value: Any) -> str | None:
 
 
 Step = Annotated[
-    Annotated[SyncStep, Tag("sync")] | Annotated[TransformStep, Tag("transform")],
+    Annotated[SyncStep, Tag("sync")]
+    | Annotated[TransformStep, Tag("transform")]
+    | Annotated[ReverseSyncStep, Tag("reverse_sync")],
     Discriminator(
         _step_type,
         custom_error_type="step_type",

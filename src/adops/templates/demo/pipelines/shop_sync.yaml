@@ -17,3 +17,14 @@ steps:
   - name: transform_shop
     type: transform
     project: dbt
+  - name: reverse_sync_customer_stats
+    type: reverse_sync
+    model: customer_stats
+    target: shop
+    target_table: customer_stats
+    key: customer_id
+    mapping:
+      customer_id: customer_id
+      order_count: order_count
+      total_amount: total_amount
+      last_order_at: last_order_at

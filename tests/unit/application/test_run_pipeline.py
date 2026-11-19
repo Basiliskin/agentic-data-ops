@@ -6,10 +6,17 @@ from fakes import (
     DUCKDB_SETTINGS,
     ENV,
     PIPELINE,
+    REVERSE_ENV,
+    REVERSE_PIPELINE,
+    REVERSE_SETTINGS,
     SETTINGS,
     SOURCE_PASSWORD,
+    STAGE_WAREHOUSE_PASSWORD,
     TABLE_TYPES,
+    TARGET_PASSWORD,
+    TARGET_ROWS,
     WAREHOUSE_PASSWORD,
+    FakeReverseSync,
     FakeSnapshotStore,
     FakeTransform,
     FixedClock,
@@ -20,41 +27,51 @@ from fakes import (
     healthy_load,
 )
 
+from adops.application import run_pipeline as run_pipeline_module
 from adops.application.ports import (
     Clock,
     Orchestrator,
     ResolvedConnection,
     ResolvedDuckDb,
+    ReverseSync,
     RunPlan,
     RunResult,
     SchemaSnapshotStore,
     SourceUnreachable,
     StepStatus,
     Sync,
+    TargetUnreachable,
     TransformResult,
     WarehouseUnreachable,
+    WriteFailed,
 )
 from adops.application.run_pipeline import (
     BreakingChangeError,
     CheckFailedError,
     EmptySourceTableError,
     InOrderOrchestrator,
+    PlannedReverseSyncStep,
     PlannedStep,
     PlannedTransformStep,
+    ReverseSyncTargetUnreachableError,
+    ReverseSyncWriteFailedError,
     SourceUnreachableError,
     StepError,
     SyncFailedError,
     TransformFailedError,
     WarehouseUnreachableError,
+    _build_plan,
     run_pipeline,
 )
 from adops.application.secrets import MissingSecretError
 from adops.domain.checks import CheckName, CheckResult, CheckStatus, SourceFacts
 from adops.domain.errors import PipelineValidationError
-from adops.domain.loader import load_pipeline
+from adops.domain.loader import load_pipeline, load_project_settings
+from adops.domain.pipeline import Pipeline
+from adops.domain.reverse_sync_diff import Diff, PreviewSample, compute_diff
 from adops.domain.schema_snapshot import TableShape
 
-SENTINELS = (SOURCE_PASSWORD, WAREHOUSE_PASSWORD)
+SENTINELS = (SOURCE_PASSWORD, WAREHOUSE_PASSWORD, TARGET_PASSWORD, STAGE_WAREHOUSE_PASSWORD)
 CURSOR_SENTINEL = "cursor-sentinel-2031"
 
 
@@ -479,6 +496,7 @@ def test_fakes_and_default_runner_satisfy_the_ports():
     assert isinstance(InOrderOrchestrator(), Orchestrator)
     assert isinstance(FakeSnapshotStore(), SchemaSnapshotStore)
     assert isinstance(FixedClock(), Clock)
+    assert isinstance(FakeReverseSync(), ReverseSync)
 
 
 def test_check_failed_error_keeps_checks_and_rows():
@@ -1142,3 +1160,290 @@ def test_a_duckdb_run_leaves_error_text_without_secrets_unchanged():
     result = run_on_duckdb(sync)
 
     assert result.steps[0].error == "Step customers: RuntimeError: disk full"
+
+
+def run_reverse(
+    engine: FakeReverseSync | None,
+    environment: str = "dev",
+    env=REVERSE_ENV,
+    orchestrator=None,
+    pipeline: str = REVERSE_PIPELINE,
+    settings: str = REVERSE_SETTINGS,
+) -> RunResult:
+    return run_pipeline(
+        pipeline,
+        settings,
+        environment,
+        env,
+        RecordingSync(),
+        FakeSnapshotStore(),
+        FixedClock(),
+        orchestrator,
+        reverse_sync=engine,
+    )
+
+
+def planned_reverse(engine: FakeReverseSync, environment: str = "stage") -> PlannedReverseSyncStep:
+    return PlannedReverseSyncStep(
+        load_pipeline(REVERSE_PIPELINE).steps[0],
+        ResolvedConnection("w", 5432, "warehouse_stage", "adops", STAGE_WAREHOUSE_PASSWORD),
+        ResolvedConnection("t", 5440, "crm", "crm_writer", TARGET_PASSWORD),
+        environment,
+        "crm_push",
+        engine,
+    )
+
+
+SINGLE_REVERSE_SYNC = REVERSE_PIPELINE.split("  - type: reverse_sync\n    name: push_again")[0]
+EXPECTED_SAMPLE = PreviewSample(inserts=(3,), updates=((2, ("orders",)),), deletes=(), kept=(4, 5))
+
+
+@pytest.mark.parametrize("environment", ["dev", "staging"])
+def test_a_non_writing_environment_gets_a_preview_and_never_reaches_apply(environment):
+    engine = FakeReverseSync()
+
+    result = run_reverse(engine, environment)
+
+    assert result.succeeded
+    assert engine.applied == []
+    preview = result.steps[0].preview
+    assert preview is not None
+    assert (preview.inserts, preview.updates, preview.deletes, preview.kept) == (1, 1, 0, 2)
+    assert preview.sample == EXPECTED_SAMPLE
+    assert preview.written is False
+    assert [check.status for check in result.steps[0].checks] == [CheckStatus.PASS] * 5
+
+
+def test_stage_applies_the_very_diff_the_preview_reports(monkeypatch: pytest.MonkeyPatch):
+    computed: list[Diff] = []
+
+    def spy(*args, **kwargs) -> Diff:
+        computed.append(compute_diff(*args, **kwargs))
+        return computed[-1]
+
+    monkeypatch.setattr(run_pipeline_module, "compute_diff", spy)
+    engine = FakeReverseSync()
+
+    result = run_reverse(engine, "stage", pipeline=SINGLE_REVERSE_SYNC)
+
+    assert result.succeeded
+    assert len(computed) == 1
+    assert engine.applied_diff is computed[0]
+    preview = result.steps[0].preview
+    assert preview is not None and preview.written is True
+    assert (preview.inserts, preview.updates, preview.deletes, preview.kept) == (
+        len(computed[0].inserts),
+        len(computed[0].updates),
+        len(computed[0].deletes),
+        len(computed[0].kept),
+    )
+    assert preview.sample == EXPECTED_SAMPLE
+
+
+def test_the_engine_reads_from_the_selected_environments_own_warehouse_and_target():
+    dev, stage = FakeReverseSync(), FakeReverseSync()
+
+    run_reverse(dev, "dev")
+    run_reverse(stage, "stage")
+
+    _, dev_warehouse, dev_target = dev.reads[0]
+    _, stage_warehouse, stage_target = stage.reads[0]
+    assert dev_warehouse == ResolvedDuckDb("dev.duckdb")
+    assert stage_warehouse == ResolvedConnection(
+        "warehouse-stage.internal", 5432, "warehouse_stage", "adops", STAGE_WAREHOUSE_PASSWORD
+    )
+    assert dev_target == stage_target == ResolvedConnection(
+        "crm.internal", 5440, "crm", "crm_writer", TARGET_PASSWORD
+    )
+    assert stage.applied[0][1] == stage_target
+
+
+def test_a_failing_reverse_sync_check_writes_nothing_and_raises_check_failed():
+    every_row_changes = tuple({**row, "orders": 99} for row in TARGET_ROWS[:2])
+    engine = FakeReverseSync(target_rows=every_row_changes)
+
+    with pytest.raises(CheckFailedError) as raised:
+        planned_reverse(engine)(RecordingSync())
+
+    assert engine.applied == []
+    assert "max_change failed" in str(raised.value)
+
+
+def test_a_failed_reverse_sync_check_stops_every_later_step():
+    every_row_changes = tuple({**row, "orders": 99} for row in TARGET_ROWS[:2])
+    engine = FakeReverseSync(target_rows=every_row_changes)
+
+    result = run_reverse(engine, "stage")
+
+    assert statuses(result) == [
+        ("push_stats", StepStatus.CHECK_FAILED),
+        ("push_again", StepStatus.SKIPPED),
+    ]
+    assert engine.applied == []
+    assert [name for name, _, _ in engine.reads] == ["push_stats"]
+
+
+@pytest.mark.parametrize(
+    ("measured", "failing"),
+    [
+        ({"duplicate_keys": 2}, CheckName.KEY_UNIQUE),
+        ({"null_keys": 1}, CheckName.KEY_NOT_NULL),
+        ({"target_table_exists": False}, CheckName.TARGET_COLUMNS_EXIST),
+        ({"missing_target_columns": ("total",)}, CheckName.TARGET_COLUMNS_EXIST),
+        ({"result_rows": ()}, CheckName.RESULT_NOT_EMPTY),
+    ],
+)
+def test_every_measured_fact_reaches_its_check_before_anything_is_written(measured, failing):
+    engine = FakeReverseSync(**measured)
+
+    result = run_reverse(engine, "stage")
+
+    failed = [c.check for c in result.steps[0].checks if c.status is CheckStatus.FAIL]
+    assert failed == [failing]
+    assert engine.applied == []
+
+
+def test_a_delete_missing_step_previews_absent_target_rows_as_deletes():
+    pipeline = REVERSE_PIPELINE.replace(
+        "      total_amount: total\n",
+        "      total_amount: total\n    delete_missing: true\n    max_change_share: 1\n",
+    )
+
+    result = run_reverse(FakeReverseSync(), "dev", pipeline=pipeline)
+
+    preview = result.steps[0].preview
+    assert preview is not None
+    assert (preview.deletes, preview.kept, preview.sample.deletes) == (2, 0, (4, 5))
+
+
+@pytest.mark.parametrize(
+    ("engine", "error", "message"),
+    [
+        (
+            FakeReverseSync(fail_read=TargetUnreachable()),
+            ReverseSyncTargetUnreachableError,
+            "Pipeline crm_push, Step push_stats: Target crm is unreachable",
+        ),
+        (
+            FakeReverseSync(fail_apply=TargetUnreachable()),
+            ReverseSyncTargetUnreachableError,
+            "Pipeline crm_push, Step push_stats: Target crm is unreachable",
+        ),
+        (
+            FakeReverseSync(fail_apply=WriteFailed()),
+            ReverseSyncWriteFailedError,
+            "Pipeline crm_push, Step push_stats: the write to Target crm failed "
+            "and was rolled back; the Target was left unchanged",
+        ),
+        (
+            FakeReverseSync(fail_read=WarehouseUnreachable()),
+            WarehouseUnreachableError,
+            "Pipeline crm_push, Step push_stats: Warehouse is unreachable",
+        ),
+    ],
+    ids=["target on read", "target on apply", "write failed", "warehouse on read"],
+)
+def test_engine_markers_become_fixed_unchained_errors(engine, error, message):
+    with pytest.raises(error) as raised:
+        planned_reverse(engine)(RecordingSync())
+
+    assert type(raised.value) is error
+    assert str(raised.value) == message
+    assert_unchained(raised.value)
+    assert_no_secret_in(str(raised.value), repr(raised.value))
+
+
+def leaky_engine_error(environment: str) -> RuntimeError:
+    text = f"could not connect to postgresql://crm_writer:{TARGET_PASSWORD}@crm.internal/crm"
+    if environment == "stage":
+        text += f" (warehouse password={STAGE_WAREHOUSE_PASSWORD})"
+    return RuntimeError(text)
+
+
+@pytest.mark.parametrize(
+    ("environment", "stage"), [("dev", "read"), ("stage", "read"), ("stage", "apply")]
+)
+def test_an_unexpected_engine_error_fails_the_step_with_secrets_masked(environment, stage):
+    engine = FakeReverseSync(**{f"fail_{stage}": leaky_engine_error(environment)})
+
+    result = run_reverse(engine, environment)
+
+    report = result.steps[0]
+    assert statuses(result) == [
+        ("push_stats", StepStatus.FAILED),
+        ("push_again", StepStatus.SKIPPED),
+    ]
+    assert report.error is not None and report.error.startswith("Step push_stats: RuntimeError")
+    assert_no_secret_in(report.error, repr(result))
+
+
+def test_a_write_failure_fails_the_run_with_no_secret_and_skips_later_steps():
+    result = run_reverse(FakeReverseSync(fail_apply=WriteFailed()), "stage")
+
+    assert statuses(result) == [
+        ("push_stats", StepStatus.FAILED),
+        ("push_again", StepStatus.SKIPPED),
+    ]
+    assert result.steps[0].error is not None
+    assert "left unchanged" in result.steps[0].error
+    assert result.steps[0].preview is None
+    assert_no_secret_in(repr(result))
+
+
+def test_a_reverse_sync_step_without_an_engine_is_rejected_before_any_step_runs():
+    with pytest.raises(PipelineValidationError) as raised:
+        run_reverse(None)
+
+    assert raised.value.problems == (
+        "steps[0]: a Reverse Sync Step needs a Reverse Sync engine, and none is set",
+    )
+
+
+def test_a_reverse_sync_step_needs_its_target_defined_in_the_environment():
+    engine = FakeReverseSync()
+
+    with pytest.raises(PipelineValidationError) as raised:
+        run_reverse(engine, settings=SETTINGS, env=ENV)
+
+    assert raised.value.problems[0].startswith("steps[0].target: Step push_stats writes to Target")
+    assert engine.reads == []
+
+
+def test_a_missing_target_password_is_reported_by_name_before_any_step_runs():
+    engine = FakeReverseSync()
+
+    with pytest.raises(MissingSecretError) as raised:
+        run_reverse(engine, "stage", env={"STAGE_WAREHOUSE_PASSWORD": "x"})
+
+    assert raised.value.names == ("CRM_TARGET_PASSWORD",)
+    assert engine.reads == []
+
+
+def test_the_reverse_sync_plan_never_prints_a_password():
+    captured: list[RunPlan] = []
+
+    class CapturingOrchestrator:
+        def execute(self, plan: RunPlan, sync: Sync) -> RunResult:
+            captured.append(plan)
+            return InOrderOrchestrator().execute(plan, sync)
+
+    run_reverse(FakeReverseSync(), "stage", orchestrator=CapturingOrchestrator())
+
+    assert_no_secret_in(repr(captured[0]), str(captured[0]))
+
+
+def test_a_step_of_an_unknown_kind_is_a_programming_error():
+    settings = load_project_settings(REVERSE_SETTINGS)
+    pipeline = Pipeline.model_construct(name="odd", steps=[object()])
+
+    with pytest.raises(AssertionError):
+        _build_plan(
+            pipeline,
+            "dev",
+            settings.environments["dev"],
+            REVERSE_ENV,
+            FakeSnapshotStore(),
+            FixedClock(),
+            None,
+            None,
+        )

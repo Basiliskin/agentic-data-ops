@@ -5,11 +5,14 @@ from datetime import UTC, datetime
 from adops.application.ports import (
     ResolvedConnection,
     ResolvedWarehouse,
+    ReverseSyncRead,
     SyncResult,
     TransformResult,
 )
 from adops.domain.checks import LoadFacts, SourceFacts
 from adops.domain.pipeline import SyncStep, SyncTable
+from adops.domain.reverse_sync import ReverseSyncStep
+from adops.domain.reverse_sync_diff import Diff, Row
 from adops.domain.schema_snapshot import TableShape
 from adops.domain.transform import DbtTestFacts, DbtTestStatus, TransformStep
 
@@ -268,3 +271,123 @@ class FakeTransform:
         if self.fail_with is not None:
             raise self.fail_with
         return self.result
+
+
+TARGET_PASSWORD = "s3cr3t-target-sentinel"
+STAGE_WAREHOUSE_PASSWORD = "s3cr3t-stage-warehouse-sentinel"
+REVERSE_ENV = {
+    "CRM_TARGET_PASSWORD": TARGET_PASSWORD,
+    "STAGE_WAREHOUSE_PASSWORD": STAGE_WAREHOUSE_PASSWORD,
+}
+
+CRM_TARGET = """
+      crm:
+        type: postgres
+        host: crm.internal
+        port: 5440
+        database: crm
+        user: crm_writer
+        password_env: CRM_TARGET_PASSWORD
+"""
+
+REVERSE_SETTINGS = f"""
+environments:
+  dev:
+    warehouse:
+      type: duckdb
+      path: dev.duckdb
+    sources: {{}}
+    targets:{CRM_TARGET}
+  staging:
+    warehouse:
+      type: duckdb
+      path: staging.duckdb
+    sources: {{}}
+    targets:{CRM_TARGET}
+  stage:
+    warehouse:
+      type: postgres
+      host: warehouse-stage.internal
+      port: 5432
+      database: warehouse_stage
+      user: adops
+      password_env: STAGE_WAREHOUSE_PASSWORD
+    sources: {{}}
+    targets:{CRM_TARGET}
+"""
+
+REVERSE_PIPELINE = """
+name: crm_push
+steps:
+  - type: reverse_sync
+    name: push_stats
+    model: customer_stats
+    target: crm
+    target_table: customer_stats
+    key: customer_id
+    mapping:
+      order_count: orders
+      total_amount: total
+  - type: reverse_sync
+    name: push_again
+    model: customer_stats
+    target: crm
+    target_table: customer_stats_copy
+    key: customer_id
+    mapping:
+      order_count: orders
+"""
+
+RESULT_ROWS: tuple[Row, ...] = (
+    {"customer_id": 1, "order_count": 3, "total_amount": 30},
+    {"customer_id": 2, "order_count": 1, "total_amount": 10},
+    {"customer_id": 3, "order_count": 2, "total_amount": 25},
+)
+
+TARGET_ROWS: tuple[Row, ...] = (
+    {"customer_id": 1, "orders": 3, "total": 30},
+    {"customer_id": 2, "orders": 0, "total": 10},
+    {"customer_id": 4, "orders": 1, "total": 5},
+    {"customer_id": 5, "orders": 1, "total": 5},
+)
+
+
+@dataclass
+class FakeReverseSync:
+    """A Reverse Sync engine that reports fixed rows and facts and records every read and apply."""
+
+    result_rows: tuple[Row, ...] = RESULT_ROWS
+    target_rows: tuple[Row, ...] = TARGET_ROWS
+    target_table_exists: bool = True
+    missing_target_columns: tuple[str, ...] = ()
+    duplicate_keys: int = 0
+    null_keys: int = 0
+    fail_read: Exception | None = None
+    fail_apply: Exception | None = None
+    reads: list[tuple[str, ResolvedWarehouse, ResolvedConnection]] = field(default_factory=list)
+    applied: list[tuple[str, ResolvedConnection, Diff]] = field(default_factory=list)
+
+    @property
+    def applied_diff(self) -> Diff:
+        (applied,) = self.applied
+        return applied[2]
+
+    def read(
+        self, step: ReverseSyncStep, warehouse: ResolvedWarehouse, target: ResolvedConnection
+    ) -> ReverseSyncRead:
+        self.reads.append((step.name, warehouse, target))
+        if self.fail_read is not None:
+            raise self.fail_read
+        return ReverseSyncRead(
+            result_rows=self.result_rows,
+            target_rows=self.target_rows,
+            target_table_exists=self.target_table_exists,
+            missing_target_columns=self.missing_target_columns,
+            duplicate_keys=self.duplicate_keys,
+            null_keys=self.null_keys,
+        )
+
+    def apply(self, step: ReverseSyncStep, target: ResolvedConnection, diff: Diff) -> None:
+        self.applied.append((step.name, target, diff))
+        if self.fail_apply is not None:
+            raise self.fail_apply

@@ -9,7 +9,11 @@ from dlt.destinations.sql_client import SqlClientBase
 
 from adops.application.ports import ResolvedWarehouse
 from adops.domain.schema_snapshot import TableShape
-from adops.infrastructure.dlt_sync import warehouse_client, warehouse_destination
+from adops.infrastructure.dlt_sync import (
+    local_state_dir,
+    warehouse_client,
+    warehouse_destination,
+)
 
 SNAPSHOT_SCHEMA = "adops"
 SNAPSHOT_TABLE = "_adops_schema_snapshots"
@@ -18,9 +22,9 @@ SNAPSHOT_TABLE = "_adops_schema_snapshots"
 class WarehouseSnapshotStore:
     """The SchemaSnapshotStore port backed by a table in the Environment's own Warehouse."""
 
-    def __init__(self, project: Path, warehouse_kind: str) -> None:
+    def __init__(self, project: Path, warehouse_kind: str, *, environment: str) -> None:
         self._project = project
-        self._pipelines_dir = project / ".adops" / "dlt"
+        self._pipelines_dir = local_state_dir(project, environment)
         self._warehouse_kind = warehouse_kind
 
     def load(
