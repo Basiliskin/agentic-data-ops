@@ -19,3 +19,8 @@
 - 2026-11-18 | horizon 3 | adops validate checks only that <project>/dbt_project.yml exists; it does not run dbt parse in horizon 3 — user choice
 - 2026-11-18 | horizon 3 | Failed dlt loads get fixed sanitized messages ('load failed') and the dlt logger is silenced — fixed in horizon 3, not deferred
 - 2026-11-18 | horizon 3 | DuckDB Warehouse moves to horizon 4 — horizon 3 holds dbt Transform plus dedicated errors, user kept both in one 6-phase horizon
+- 2026-11-18 | horizon 4 | dlt[duckdb] and dbt-duckdb==1.11.1 are runtime dependencies; supersedes the horizon-3 'dbt-duckdb is a dev-only test stand-in' line — because installed users need DuckDB
+- 2026-11-18 | horizon 4 | The Warehouse kind is a required argument of DltSync, WarehouseSnapshotStore and DbtTransform, read from the selected Environment — because a silent 'postgres' default hides wiring bugs
+- 2026-11-18 | horizon 4 | A DuckDB warehouse is `type: duckdb` + `path`, relative to the Project unless absolute, with no secret; resolved as ResolvedDuckDb(path) — because ADR-0007 has nothing to resolve for a local file
+- 2026-11-18 | horizon 4 | The demo stays Postgres by default and ships a commented DuckDB warehouse block; no new Environment or init flag — user choice
+- 2026-11-18 | horizon 4 | The full Docker E2E scenario runs on both Warehouse kinds in one compose stack, reseeding the shop Source between runs; the 20-min CI timeout is not raised — user choice

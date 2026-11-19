@@ -3,7 +3,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ValidationError
 
-from adops.domain.environment import Environment, ProjectSettings
+from adops.domain.environment import WAREHOUSE_TYPES, Environment, ProjectSettings
 from adops.domain.errors import Location, PipelineValidationError, RuleViolation
 from adops.domain.pipeline import DECLARED_CHECK_TYPES, STEP_TYPES, Pipeline, SyncStep
 
@@ -86,13 +86,18 @@ _UNION_TAGS = {"steps": STEP_TYPES, "checks": DECLARED_CHECK_TYPES}
 
 
 def _without_union_tags(location: Location) -> Location:
-    # pydantic inserts the matched tag after `steps[i]` and `checks[k]`; it is not a YAML key.
+    # pydantic inserts the matched tag after `steps[i]`, `checks[k]` and an Environment's
+    # `warehouse`; it is not a YAML key.
     return tuple(
-        part
-        for index, part in enumerate(location)
-        if not (index >= 2 and _is_union_tag(location[index - 2], location[index - 1], part))
+        part for index, part in enumerate(location) if not _is_union_tag(location[:index], part)
     )
 
 
-def _is_union_tag(list_name: str | int, list_index: str | int, part: str | int) -> bool:
-    return isinstance(list_index, int) and part in _UNION_TAGS.get(str(list_name), ())
+def _is_union_tag(before: Location, part: str | int) -> bool:
+    if len(before) == 3 and before[0] == "environments" and before[2] == "warehouse":
+        return part in WAREHOUSE_TYPES
+    return (
+        len(before) >= 2
+        and isinstance(before[-1], int)
+        and part in _UNION_TAGS.get(str(before[-2]), ())
+    )

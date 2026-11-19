@@ -1,5 +1,7 @@
 import pytest
 from fakes import (
+    DUCKDB_PATH,
+    DUCKDB_SETTINGS,
     ENV,
     PIPELINE,
     SETTINGS,
@@ -8,10 +10,12 @@ from fakes import (
     FakeSnapshotStore,
     FixedClock,
     RecordingSync,
+    StrictEnv,
     facts_with_types,
 )
 
 from adops.application.accept_schema import AcceptedSchema, accept_schema
+from adops.application.ports import ResolvedDuckDb
 from adops.application.run_pipeline import StepError, run_pipeline
 from adops.application.secrets import MissingSecretError
 from adops.domain.checks import SourceFacts
@@ -48,10 +52,18 @@ steps:
 """
 
 
-def accept(table="orders", pipeline=PIPELINE, environment="dev", env=ENV, sync=None, store=None):
+def accept(
+    table="orders",
+    pipeline=PIPELINE,
+    environment="dev",
+    env=ENV,
+    sync=None,
+    store=None,
+    settings=SETTINGS,
+):
     return accept_schema(
         pipeline,
-        SETTINGS,
+        settings,
         environment,
         table,
         env,
@@ -207,3 +219,21 @@ def test_a_transform_step_in_the_pipeline_is_not_a_candidate():
     accepted = accept(table="products", pipeline=pipeline)
 
     assert accepted.step == "products"
+
+
+def test_a_duckdb_warehouse_needs_no_warehouse_secret():
+    sync = RecordingSync(source_facts={"orders": facts_with_types(CHANGED_ORDERS)})
+    store = FakeSnapshotStore({("shop", "shop", "orders"): TableShape(ORDERS_BEFORE)})
+
+    accepted = accept(
+        env=StrictEnv({"SHOP_DB_PASSWORD": SOURCE_PASSWORD}),
+        settings=DUCKDB_SETTINGS,
+        sync=sync,
+        store=store,
+    )
+
+    duckdb = ResolvedDuckDb(path=DUCKDB_PATH)
+    assert accepted.nullable_columns == ("customer_id",)
+    assert store.shapes[("shop", "shop", "orders")] == TableShape(CHANGED_ORDERS)
+    assert store.warehouses == [duckdb, duckdb]
+    assert sync.connections[1:] == [duckdb]

@@ -1,8 +1,13 @@
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from adops.application.ports import ResolvedConnection, SyncResult, TransformResult
+from adops.application.ports import (
+    ResolvedConnection,
+    ResolvedWarehouse,
+    SyncResult,
+    TransformResult,
+)
 from adops.domain.checks import LoadFacts, SourceFacts
 from adops.domain.pipeline import SyncStep, SyncTable
 from adops.domain.schema_snapshot import TableShape
@@ -48,6 +53,43 @@ environments:
       password_env: PROD_WAREHOUSE_PASSWORD
     sources: {}
 """
+
+DUCKDB_PATH = "warehouse.duckdb"
+
+DUCKDB_SETTINGS = f"""
+environments:
+  dev:
+    warehouse:
+      type: duckdb
+      path: {DUCKDB_PATH}
+    sources:
+      shop:
+        type: postgres
+        host: localhost
+        port: 5432
+        database: shop
+        user: shop
+        password_env: SHOP_DB_PASSWORD
+"""
+
+
+class StrictEnv(Mapping[str, str]):
+    """An environment that fails the test the moment anything reads a variable it does not hold."""
+
+    def __init__(self, values: Mapping[str, str]) -> None:
+        self._values = dict(values)
+
+    def __getitem__(self, name: str) -> str:
+        if name not in self._values:
+            raise AssertionError(f"unexpected lookup of environment variable {name}")
+        return self._values[name]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
 
 PIPELINE = """
 name: shop
@@ -115,7 +157,7 @@ class RecordingSync:
     fail_preflight_of: dict[str, Exception] = field(default_factory=dict)
     fail_sync_of: dict[str, Exception] = field(default_factory=dict)
     calls: list[tuple[str, str]] = field(default_factory=list)
-    connections: list[ResolvedConnection] = field(default_factory=list)
+    connections: list[ResolvedWarehouse] = field(default_factory=list)
     nullable: list[tuple[str, str, tuple[str, ...]]] = field(default_factory=list)
 
     def preflight(self, step: SyncStep, source: ResolvedConnection) -> Mapping[str, SourceFacts]:
@@ -129,7 +171,7 @@ class RecordingSync:
         }
 
     def sync(
-        self, step: SyncStep, source: ResolvedConnection, warehouse: ResolvedConnection
+        self, step: SyncStep, source: ResolvedConnection, warehouse: ResolvedWarehouse
     ) -> SyncResult:
         self.calls.append(("sync", step.name))
         self.connections.append(warehouse)
@@ -149,7 +191,7 @@ class RecordingSync:
         self,
         step: SyncStep,
         table: SyncTable,
-        warehouse: ResolvedConnection,
+        warehouse: ResolvedWarehouse,
         columns: Collection[str],
     ) -> None:
         self.connections.append(warehouse)
@@ -167,10 +209,10 @@ class FakeSnapshotStore:
     fail_load: Exception | None = None
     fail_save: Exception | None = None
     saves: list[SnapshotKey] = field(default_factory=list)
-    warehouses: list[ResolvedConnection] = field(default_factory=list)
+    warehouses: list[ResolvedWarehouse] = field(default_factory=list)
 
     def load(
-        self, warehouse: ResolvedConnection, pipeline: str, source: str, table: str
+        self, warehouse: ResolvedWarehouse, pipeline: str, source: str, table: str
     ) -> TableShape | None:
         self.warehouses.append(warehouse)
         if self.fail_load is not None:
@@ -179,7 +221,7 @@ class FakeSnapshotStore:
 
     def save(
         self,
-        warehouse: ResolvedConnection,
+        warehouse: ResolvedWarehouse,
         pipeline: str,
         source: str,
         table: str,
@@ -219,9 +261,9 @@ class FakeTransform:
         default_factory=lambda: TransformResult(tests=(), crashed=False, failed_models=())
     )
     fail_with: Exception | None = None
-    calls: list[tuple[str, ResolvedConnection]] = field(default_factory=list)
+    calls: list[tuple[str, ResolvedWarehouse]] = field(default_factory=list)
 
-    def run(self, step: TransformStep, warehouse: ResolvedConnection) -> TransformResult:
+    def run(self, step: TransformStep, warehouse: ResolvedWarehouse) -> TransformResult:
         self.calls.append((step.name, warehouse))
         if self.fail_with is not None:
             raise self.fail_with

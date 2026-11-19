@@ -33,7 +33,7 @@ def root(
         ),
     ] = False,
 ) -> None:
-    """adops: sync, transform and check data into your Postgres warehouse."""
+    """adops: sync, transform and check data into your Postgres or DuckDB warehouse."""
 
 
 def main() -> None:

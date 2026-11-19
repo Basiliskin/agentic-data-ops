@@ -8,6 +8,10 @@ environments:
       database: warehouse
       user: warehouse
       password_env: WAREHOUSE_PASSWORD
+    # To keep the Warehouse in a local DuckDB file instead, replace the warehouse block above with:
+    # warehouse:
+    #   type: duckdb
+    #   path: .adops/warehouse.duckdb
     sources:
       shop:
         type: postgres

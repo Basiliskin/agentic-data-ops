@@ -1,24 +1,38 @@
 import ast
 import os
+import sqlite3
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
+import duckdb
 import pytest
 import yaml
 from dagster import DagsterInstance
 from dbt.cli.main import dbtRunner, dbtRunnerResult
 
 import adops
-from adops.application.ports import ResolvedConnection, StepStatus, Transform, TransformResult
+from adops.application.ports import (
+    ResolvedConnection,
+    ResolvedDuckDb,
+    StepStatus,
+    Transform,
+    TransformResult,
+)
 from adops.application.run_pipeline import run_pipeline
+from adops.domain.pipeline import SyncStep
+from adops.domain.schema_snapshot import TableShape
 from adops.domain.transform import DbtTestFacts, DbtTestStatus, TransformStep
 from adops.infrastructure.dagster_orchestrator import DagsterOrchestrator
 from adops.infrastructure.dbt_transform import (
     PASSWORD_ENV,
     DbtTransform,
+    profile_renderer,
+    render_duckdb_profile,
     render_postgres_profile,
 )
+from adops.infrastructure.dlt_sync import DltSync, UnknownConnectionKindError
+from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
 
 PASSWORD = "s3cr3t-dbt-warehouse-sentinel"
 ERROR_SENTINEL = "dbt_error_text_sentinel_7731"
@@ -85,14 +99,14 @@ def write_dbt_project(
     return project
 
 
-def duckdb_profile(database: Path):
-    """A DuckDB stand-in for the Postgres profile, reading the password through env_var() too.
+def postgres_password_on_duckdb(database: Path):
+    """Runs the Postgres password path on a DuckDB file, reading the password through env_var().
 
     external_root is used only by external materializations, which these projects lack, so the
     field only proves the variable is set while dbt runs: dbt refuses an env_var() with no value.
     """
 
-    def render(profile_name: str, warehouse: ResolvedConnection) -> str:
+    def render(profile_name: str, warehouse: ResolvedConnection, _project_root: Path) -> str:
         target = {
             "type": "duckdb",
             "path": str(database),
@@ -113,8 +127,22 @@ def root(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def transform(tmp_path: Path, root: Path) -> DbtTransform:
-    return DbtTransform(root, duckdb_profile(tmp_path / "warehouse.duckdb"))
+def transform(root: Path) -> DbtTransform:
+    return DbtTransform(root, warehouse_kind="duckdb")
+
+
+@pytest.fixture
+def duck(tmp_path: Path) -> ResolvedDuckDb:
+    return ResolvedDuckDb(str(tmp_path / "warehouse.duckdb"))
+
+
+def password_transform(tmp_path: Path, root: Path, **kwargs) -> DbtTransform:
+    return DbtTransform(
+        root,
+        warehouse_kind="postgres",
+        render_profile=postgres_password_on_duckdb(tmp_path / "warehouse.duckdb"),
+        **kwargs,
+    )
 
 
 def facts_by_name(result: TransformResult) -> dict[str, DbtTestFacts]:
@@ -137,6 +165,16 @@ class ScanningRunner:
         return result
 
 
+class EnvironRecordingRunner:
+    """A real dbtRunner that remembers the environment dbt saw while it ran."""
+
+    seen: dict[str, str] = {}
+
+    def invoke(self, args: list[str]) -> dbtRunnerResult:
+        EnvironRecordingRunner.seen = dict(os.environ)
+        return dbtRunner().invoke(args)
+
+
 class ExplodingRunner:
     def invoke(self, args: list[str]) -> dbtRunnerResult:
         assert os.environ[PASSWORD_ENV] == PASSWORD
@@ -148,7 +186,7 @@ def test_dbt_transform_is_a_transform(transform: DbtTransform):
 
 
 def test_passing_build_reports_every_test_with_its_model_and_zero_failures(
-    root: Path, transform: DbtTransform
+    root: Path, transform: DbtTransform, duck: ResolvedDuckDb
 ):
     write_dbt_project(
         root,
@@ -156,7 +194,7 @@ def test_passing_build_reports_every_test_with_its_model_and_zero_failures(
         **{"tests/orders_have_ids.sql": "select * from {{ ref('orders') }} where id is null"},
     )
 
-    result = transform.run(STEP, WAREHOUSE)
+    result = transform.run(STEP, duck)
 
     assert result.crashed is False
     assert result.failed_models == ()
@@ -171,13 +209,13 @@ def test_passing_build_reports_every_test_with_its_model_and_zero_failures(
 
 
 def test_failing_test_reports_the_exact_number_of_failing_rows(
-    root: Path, transform: DbtTransform
+    root: Path, transform: DbtTransform, duck: ResolvedDuckDb
 ):
     write_dbt_project(
         root, {"orders": orders_sql((1, "paid"), (2, None), (3, None), (4, None))}
     )
 
-    facts = facts_by_name(transform.run(STEP, WAREHOUSE))
+    facts = facts_by_name(transform.run(STEP, duck))
 
     assert facts["not_null_orders_status"].status is DbtTestStatus.FAIL
     assert facts["not_null_orders_status"].failures == 3
@@ -185,11 +223,11 @@ def test_failing_test_reports_the_exact_number_of_failing_rows(
 
 
 def test_severity_warn_test_reports_warn_with_its_failing_rows(
-    root: Path, transform: DbtTransform
+    root: Path, transform: DbtTransform, duck: ResolvedDuckDb
 ):
     write_dbt_project(root, {"orders": orders_sql((1, "paid"), (2, "lost"), (3, "stolen"))})
 
-    result = transform.run(STEP, WAREHOUSE)
+    result = transform.run(STEP, duck)
 
     warned = facts_by_name(result)["accepted_values_orders_status__paid__shipped"]
     assert warned.status is DbtTestStatus.WARN
@@ -199,7 +237,7 @@ def test_severity_warn_test_reports_warn_with_its_failing_rows(
 
 
 def test_broken_model_is_a_failed_model_and_its_tests_are_skipped(
-    root: Path, transform: DbtTransform
+    root: Path, transform: DbtTransform, duck: ResolvedDuckDb
 ):
     schema = ORDERS_TESTS + "  - name: broken\n    columns:\n      - name: id\n"
     schema += "        data_tests: [not_null]\n"
@@ -209,7 +247,7 @@ def test_broken_model_is_a_failed_model_and_its_tests_are_skipped(
         schema=schema,
     )
 
-    result = transform.run(STEP, WAREHOUSE)
+    result = transform.run(STEP, duck)
 
     assert result.crashed is False
     assert result.failed_models == ("broken",)
@@ -223,7 +261,7 @@ def test_broken_model_is_a_failed_model_and_its_tests_are_skipped(
 
 
 def test_failing_dbt_unit_test_stops_the_build_as_a_failed_model(
-    root: Path, transform: DbtTransform
+    root: Path, transform: DbtTransform, duck: ResolvedDuckDb
 ):
     schema = ORDERS_TESTS + (
         "unit_tests:\n"
@@ -236,21 +274,22 @@ def test_failing_dbt_unit_test_stops_the_build_as_a_failed_model(
     )
     write_dbt_project(root, {"orders": HEALTHY_ORDERS}, schema=schema)
 
-    result = transform.run(STEP, WAREHOUSE)
+    result = transform.run(STEP, duck)
 
     assert result.crashed is False
     assert result.failed_models == ("orders_keep_their_ids",)
 
 
-def test_missing_project_folder_is_a_crash(transform: DbtTransform):
-    result = transform.run(STEP, WAREHOUSE)
+def test_missing_project_folder_is_a_crash(transform: DbtTransform, duck: ResolvedDuckDb):
+    result = transform.run(STEP, duck)
 
     assert result == TransformResult(tests=(), crashed=True, failed_models=())
 
 
 def test_same_adapter_twice_in_one_process_gives_independent_results(
-    root: Path, transform: DbtTransform, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    transform = password_transform(tmp_path, root)
     monkeypatch.setenv(PASSWORD_ENV, "value-from-before")
     before = dict(os.environ)
     write_dbt_project(root, {"orders": orders_sql((1, "paid"), (2, None))})
@@ -269,7 +308,7 @@ def test_same_adapter_twice_in_one_process_gives_independent_results(
 def test_password_leaves_the_environment_when_dbt_raises(root: Path, monkeypatch):
     monkeypatch.delenv(PASSWORD_ENV, raising=False)
     before = dict(os.environ)
-    transform = DbtTransform(root, render_postgres_profile, runner=ExplodingRunner)
+    transform = DbtTransform(root, warehouse_kind="postgres", runner=ExplodingRunner)
 
     with pytest.raises(RuntimeError, match="dbt blew up"):
         transform.run(STEP, WAREHOUSE)
@@ -282,9 +321,7 @@ def test_dbt_writes_nothing_into_the_project_and_no_file_holds_the_password(
     tmp_path: Path, root: Path
 ):
     project = write_dbt_project(root, {"orders": HEALTHY_ORDERS})
-    transform = DbtTransform(
-        root, duckdb_profile(tmp_path / "warehouse.duckdb"), runner=ScanningRunner
-    )
+    transform = password_transform(tmp_path, root, runner=ScanningRunner)
 
     result = transform.run(STEP, WAREHOUSE)
 
@@ -300,7 +337,7 @@ def test_dbt_writes_nothing_into_the_project_and_no_file_holds_the_password(
 
 
 def test_postgres_profile_reads_the_password_only_through_env_var():
-    text = render_postgres_profile("adops", WAREHOUSE)
+    text = render_postgres_profile("adops", WAREHOUSE, Path("unused"))
 
     assert PASSWORD not in text
     assert f"env_var('{PASSWORD_ENV}')" in text
@@ -315,6 +352,167 @@ def test_postgres_profile_reads_the_password_only_through_env_var():
         "schema": "analytics",
         "threads": 1,
     }
+
+
+def test_duckdb_profile_points_at_the_absolute_project_file_with_one_thread(tmp_path: Path):
+    text = render_duckdb_profile("adops", ResolvedDuckDb("data/wh.duckdb"), tmp_path)
+
+    target = yaml.safe_load(text)["adops"]["outputs"]["warehouse"]
+    assert target == {
+        "type": "duckdb",
+        "path": str(tmp_path / "data" / "wh.duckdb"),
+        "schema": "analytics",
+        "threads": 1,
+    }
+    assert Path(target["path"]).is_absolute()
+    assert "env_var" not in text
+
+
+def test_duckdb_profile_resolves_a_relative_project_folder_against_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.chdir(tmp_path)
+
+    text = render_duckdb_profile("adops", ResolvedDuckDb("wh.duckdb"), Path("project"))
+
+    path = yaml.safe_load(text)["adops"]["outputs"]["warehouse"]["path"]
+    assert path == str(tmp_path / "project" / "wh.duckdb")
+
+
+def test_duckdb_profile_keeps_an_absolute_path_as_given(tmp_path: Path):
+    elsewhere = tmp_path / "elsewhere" / "wh.duckdb"
+
+    text = render_duckdb_profile("adops", ResolvedDuckDb(str(elsewhere)), tmp_path / "project")
+
+    assert yaml.safe_load(text)["adops"]["outputs"]["warehouse"]["path"] == str(elsewhere)
+
+
+def test_relative_duckdb_path_builds_into_the_project_file_whatever_the_cwd(
+    tmp_path: Path, root: Path, transform: DbtTransform, monkeypatch: pytest.MonkeyPatch
+):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    project = write_dbt_project(root, {"orders": HEALTHY_ORDERS})
+
+    result = transform.run(STEP, ResolvedDuckDb("wh.duckdb"))
+
+    assert {f.status for f in result.tests} == {DbtTestStatus.PASS}
+    assert not (elsewhere / "wh.duckdb").exists()
+    assert not (project / "wh.duckdb").exists()
+    with duckdb.connect(str(root / "wh.duckdb")) as connection:
+        rows = connection.execute("select id, status from analytics.orders order by id").fetchall()
+    assert rows == [(1, "paid"), (2, "shipped")]
+
+
+def test_duckdb_run_leaves_the_environment_untouched_while_dbt_runs(
+    root: Path, duck: ResolvedDuckDb, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv(PASSWORD_ENV, raising=False)
+    before = dict(os.environ)
+    write_dbt_project(root, {"orders": HEALTHY_ORDERS})
+    transform = DbtTransform(root, warehouse_kind="duckdb", runner=EnvironRecordingRunner)
+
+    result = transform.run(STEP, duck)
+
+    assert result.tests
+    assert PASSWORD_ENV not in EnvironRecordingRunner.seen
+    assert EnvironRecordingRunner.seen == before
+    assert dict(os.environ) == before
+
+
+def test_duckdb_run_keeps_a_password_variable_the_caller_already_had(
+    root: Path, duck: ResolvedDuckDb, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv(PASSWORD_ENV, "callers-own-value")
+    write_dbt_project(root, {"orders": HEALTHY_ORDERS})
+    transform = DbtTransform(root, warehouse_kind="duckdb", runner=EnvironRecordingRunner)
+
+    transform.run(STEP, duck)
+
+    assert EnvironRecordingRunner.seen[PASSWORD_ENV] == "callers-own-value"
+    assert os.environ[PASSWORD_ENV] == "callers-own-value"
+
+
+def test_postgres_run_sets_the_password_only_while_dbt_runs(
+    tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv(PASSWORD_ENV, raising=False)
+    write_dbt_project(root, {"orders": HEALTHY_ORDERS})
+    transform = password_transform(tmp_path, root, runner=EnvironRecordingRunner)
+
+    result = transform.run(STEP, WAREHOUSE)
+
+    assert result.tests
+    assert EnvironRecordingRunner.seen[PASSWORD_ENV] == PASSWORD
+    assert PASSWORD_ENV not in os.environ
+
+
+def test_the_warehouse_kind_must_be_given(root: Path):
+    with pytest.raises(TypeError):
+        DbtTransform(root)  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize(
+    ("kind", "renderer"),
+    [("postgres", render_postgres_profile), ("duckdb", render_duckdb_profile)],
+)
+def test_warehouse_kind_picks_its_profile_renderer(root: Path, kind: str, renderer):
+    assert profile_renderer(kind) is renderer
+    assert DbtTransform(root, warehouse_kind=kind).render_profile is renderer
+
+
+def test_unknown_warehouse_kind_is_rejected_clearly(root: Path):
+    with pytest.raises(UnknownConnectionKindError, match="unknown Warehouse kind 'oracle'"):
+        profile_renderer("oracle")
+    with pytest.raises(UnknownConnectionKindError, match="known: duckdb, postgres"):
+        DbtTransform(root, warehouse_kind="oracle")
+
+
+SHOP_SOURCES = """
+version: 2
+sources:
+  - name: raw_shop
+    tables:
+      - name: orders
+"""
+
+
+def test_sync_then_snapshot_then_dbt_share_one_duckdb_file(tmp_path: Path, root: Path):
+    source_path = tmp_path / "shop.db"
+    with sqlite3.connect(source_path) as connection:
+        connection.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT)")
+        connection.execute("INSERT INTO orders VALUES (1, 'paid'), (2, 'shipped'), (3, 'paid')")
+    source = ResolvedConnection("", 0, str(source_path), "", "")
+    warehouse = ResolvedDuckDb("warehouse.duckdb")
+    sync_step = SyncStep.model_validate(
+        {
+            "name": "orders",
+            "source": "shop",
+            "tables": [{"name": "orders", "mode": "full_refresh", "primary_key": "id"}],
+        }
+    )
+    write_dbt_project(
+        root,
+        {"orders": "select id, status from {{ source('raw_shop', 'orders') }}"},
+        **{"models/sources.yml": SHOP_SOURCES},
+    )
+
+    synced = DltSync(root, "shop", source_kind="sqlite", warehouse_kind="duckdb").sync(
+        sync_step, source, warehouse
+    )
+    WarehouseSnapshotStore(root, "duckdb").save(
+        warehouse, "shop", "shop", "orders", TableShape({"id": "bigint", "status": "text"})
+    )
+    result = DbtTransform(root, warehouse_kind="duckdb").run(STEP, warehouse)
+
+    assert synced.rows_loaded == {"orders": 3}
+    assert result.crashed is False
+    assert result.failed_models == ()
+    assert {f.status for f in result.tests} == {DbtTestStatus.PASS}
+    with duckdb.connect(str(root / "warehouse.duckdb")) as connection:
+        (count,) = connection.execute("select count(*) from analytics.orders").fetchone()
+    assert count == 3
 
 
 class Unused:
@@ -341,7 +539,7 @@ def test_transform_step_runs_as_a_dagster_job_with_no_password_in_storage(
         Unused(),  # type: ignore[arg-type]
         Unused(),
         orchestrator=DagsterOrchestrator(),
-        transform=DbtTransform(root, duckdb_profile(tmp_path / "warehouse.duckdb")),
+        transform=password_transform(tmp_path, root),
     )
 
     (step,) = result.steps

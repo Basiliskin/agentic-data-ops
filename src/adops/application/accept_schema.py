@@ -2,7 +2,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from adops.application.ports import SchemaSnapshotStore, Sync
-from adops.application.run_pipeline import StepError, pick_environment, resolve_connection
+from adops.application.run_pipeline import (
+    StepError,
+    pick_environment,
+    resolve_connection,
+    resolve_warehouse,
+    secret_references,
+)
 from adops.application.secrets import resolve_secret_references
 from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import ensure_sources_defined, load_pipeline, load_project_settings
@@ -38,7 +44,7 @@ def accept_schema(
 
     source_connection = environment.sources[step.source]
     secrets = resolve_secret_references(
-        env, (environment.warehouse.password_env, source_connection.password_env)
+        env, secret_references(environment.warehouse, [source_connection])
     )
     facts = sync.preflight(step, resolve_connection(source_connection, secrets))[table]
     if not facts.table_exists:
@@ -47,7 +53,7 @@ def accept_schema(
         )
 
     shape = TableShape(facts.column_types)
-    warehouse = resolve_connection(environment.warehouse, secrets)
+    warehouse = resolve_warehouse(environment.warehouse, secrets)
     previous = snapshot_store.load(warehouse, pipeline.name, step.source, table)
     dropped = _dropped_columns(previous, shape)
     if dropped:

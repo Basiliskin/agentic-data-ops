@@ -7,6 +7,8 @@ from adops.application.ports import (
     Clock,
     Orchestrator,
     ResolvedConnection,
+    ResolvedDuckDb,
+    ResolvedWarehouse,
     RunPlan,
     RunResult,
     SchemaSnapshotStore,
@@ -30,7 +32,7 @@ from adops.domain.checks import (
     evaluate_load_checks,
     evaluate_preflight_checks,
 )
-from adops.domain.environment import Environment, PostgresConnection
+from adops.domain.environment import DuckDbConnection, Environment, PostgresConnection
 from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import (
     ensure_sources_defined,
@@ -40,6 +42,7 @@ from adops.domain.loader import (
 )
 from adops.domain.pipeline import Pipeline, SyncStep
 from adops.domain.schema_snapshot import BreakingChange, TableShape, find_breaking_changes
+from adops.domain.secret_reference import SecretReference
 from adops.domain.transform import TransformStep, evaluate_dbt_tests
 
 NOT_IN_SOURCE = SourceFacts(table_exists=False, columns=frozenset())
@@ -107,7 +110,7 @@ class BreakingChangeError(StepError):
 class PlannedStep:
     step: SyncStep
     source: ResolvedConnection
-    warehouse: ResolvedConnection
+    warehouse: ResolvedWarehouse
     pipeline: str
     snapshot_store: SchemaSnapshotStore
     clock: Clock
@@ -184,7 +187,10 @@ class PlannedStep:
         raise failure
 
     def _redact(self, text: str) -> str:
-        for secret in (self.source.password, self.warehouse.password):
+        secrets = [self.source.password]
+        if isinstance(self.warehouse, ResolvedConnection):
+            secrets.append(self.warehouse.password)
+        for secret in secrets:
             text = text.replace(secret, MASK)
         return URL_PATTERN.sub(MASK, text)
 
@@ -192,7 +198,7 @@ class PlannedStep:
 @dataclass(frozen=True)
 class PlannedTransformStep:
     step: TransformStep
-    warehouse: ResolvedConnection
+    warehouse: ResolvedWarehouse
     pipeline: str
     transform: Transform
 
@@ -295,11 +301,9 @@ def _build_plan(
     transform: Transform | None,
 ) -> RunPlan:
     sync_steps = [step for step in pipeline.steps if isinstance(step, SyncStep)]
-    connections = [environment.warehouse] + [
-        environment.sources[step.source] for step in sync_steps
-    ]
-    secrets = resolve_secret_references(env, (c.password_env for c in connections))
-    warehouse = resolve_connection(environment.warehouse, secrets)
+    connections = [environment.sources[step.source] for step in sync_steps]
+    secrets = resolve_secret_references(env, secret_references(environment.warehouse, connections))
+    warehouse = resolve_warehouse(environment.warehouse, secrets)
     steps: list[StepTask] = []
     for index, step in enumerate(pipeline.steps):
         if isinstance(step, SyncStep):
@@ -313,6 +317,21 @@ def _build_plan(
         else:
             steps.append(PlannedTransformStep(step, warehouse, pipeline.name, transform))
     return RunPlan(pipeline.name, environment_name, tuple(steps))
+
+
+def secret_references(
+    warehouse: PostgresConnection | DuckDbConnection, sources: Sequence[PostgresConnection]
+) -> list[SecretReference]:
+    connections = [warehouse, *sources] if isinstance(warehouse, PostgresConnection) else sources
+    return [connection.password_env for connection in connections]
+
+
+def resolve_warehouse(
+    connection: PostgresConnection | DuckDbConnection, secrets: Mapping[str, str]
+) -> ResolvedWarehouse:
+    if isinstance(connection, DuckDbConnection):
+        return ResolvedDuckDb(connection.path)
+    return resolve_connection(connection, secrets)
 
 
 def resolve_connection(

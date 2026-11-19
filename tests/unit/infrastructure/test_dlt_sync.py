@@ -9,6 +9,7 @@ import sqlalchemy as sa
 
 from adops.application.ports import (
     ResolvedConnection,
+    ResolvedDuckDb,
     SourceUnreachable,
     StepStatus,
     Sync,
@@ -33,6 +34,7 @@ from adops.infrastructure.dlt_sync import (
     DltSync,
     UnknownConnectionKindError,
     _silence_dlt_logger,
+    duckdb_file,
     source_engine,
     warehouse_destination,
 )
@@ -73,7 +75,7 @@ class Shop:
         self.source_path = project / "shop.db"
         self.warehouse_path = project / "warehouse.duckdb"
         self.source = file_connection(self.source_path)
-        self.warehouse = file_connection(self.warehouse_path)
+        self.warehouse = ResolvedDuckDb(str(self.warehouse_path))
         self.execute(
             "CREATE TABLE customers (id INTEGER PRIMARY KEY, email TEXT)",
             "INSERT INTO customers VALUES (1, 'a@x'), (2, 'b@x'), (3, 'c@x')",
@@ -539,7 +541,7 @@ def test_sync_against_an_unreachable_source_names_the_table(shop, table, name):
 
 
 def test_sync_against_an_unreachable_warehouse_raises_warehouse_unreachable(shop):
-    adapter = DltSync(shop.project, "shop", source_kind="sqlite")
+    adapter = DltSync(shop.project, "shop", source_kind="sqlite", warehouse_kind="postgres")
 
     with pytest.raises(WarehouseUnreachable) as raised:
         adapter.sync(step(INCREMENTAL_ORDERS), shop.source, unreachable_postgres())
@@ -591,7 +593,7 @@ def test_step_against_an_unreachable_warehouse_fails_with_warehouse_unreachable_
     )
 
     with pytest.raises(WarehouseUnreachableError) as raised:
-        planned(DltSync(shop.project, "shop", source_kind="sqlite"))
+        planned(DltSync(shop.project, "shop", source_kind="sqlite", warehouse_kind="postgres"))
 
     assert type(raised.value) is WarehouseUnreachableError
     assert str(raised.value) == "Pipeline shop, Step orders: Warehouse is unreachable"
@@ -650,18 +652,122 @@ def test_cursor_values_are_never_logged(shop, caplog):
 
 
 @pytest.mark.parametrize(
-    ("kind", "destination_type"),
-    [("postgres", "dlt.destinations.postgres"), ("duckdb", "dlt.destinations.duckdb")],
+    ("kind", "connection", "destination_type"),
+    [
+        ("postgres", unreachable_postgres(), "dlt.destinations.postgres"),
+        ("duckdb", ResolvedDuckDb("wh.duckdb"), "dlt.destinations.duckdb"),
+    ],
 )
-def test_warehouse_kind_maps_to_a_dlt_destination(kind, destination_type):
-    destination = warehouse_destination(kind, unreachable_postgres())
+def test_warehouse_kind_maps_to_a_dlt_destination(kind, connection, destination_type, tmp_path):
+    destination = warehouse_destination(kind, connection, tmp_path)
 
     assert destination.destination_type == destination_type
 
 
-def test_unknown_warehouse_kind_is_rejected_clearly():
-    with pytest.raises(UnknownConnectionKindError, match="unknown Warehouse kind 'mysql'"):
-        warehouse_destination("mysql", unreachable_postgres())
+@pytest.mark.parametrize("kind", ["mysql", "oracle"])
+def test_unknown_warehouse_kind_is_rejected_clearly(kind, tmp_path):
+    with pytest.raises(UnknownConnectionKindError, match=f"unknown Warehouse kind '{kind}'"):
+        warehouse_destination(kind, unreachable_postgres(), tmp_path)
+
+
+def test_the_warehouse_kind_must_be_given():
+    with pytest.raises(TypeError, match="warehouse_kind"):
+        DltSync(Path("."), "shop")  # type: ignore[call-arg]
+
+
+def test_duckdb_file_joins_a_relative_path_to_the_project(tmp_path):
+    assert duckdb_file(tmp_path, "wh.duckdb") == tmp_path / "wh.duckdb"
+    assert duckdb_file(tmp_path, "data/wh.duckdb") == tmp_path / "data" / "wh.duckdb"
+
+
+def test_duckdb_file_keeps_an_absolute_path_as_given(tmp_path):
+    elsewhere = tmp_path / "elsewhere" / "wh.duckdb"
+
+    assert duckdb_file(tmp_path / "project", str(elsewhere)) == elsewhere
+
+
+def other_cwd(tmp_path: Path, monkeypatch) -> Path:
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    return cwd
+
+
+def test_a_relative_duckdb_path_lands_in_the_project_not_the_cwd(shop, tmp_path, monkeypatch):
+    cwd = other_cwd(tmp_path, monkeypatch)
+
+    shop.adapter().sync(step(INCREMENTAL_ORDERS), shop.source, ResolvedDuckDb("wh.duckdb"))
+
+    assert (shop.project / "wh.duckdb").is_file()
+    assert not (cwd / "wh.duckdb").exists()
+    with duckdb.connect(str(shop.project / "wh.duckdb")) as db:
+        assert db.execute("SELECT count(*) FROM raw_shop.orders").fetchone() == (3,)
+
+
+def test_an_absolute_duckdb_path_is_used_exactly(shop, tmp_path, monkeypatch):
+    other_cwd(tmp_path, monkeypatch)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    shop.adapter().sync(
+        step(INCREMENTAL_ORDERS), shop.source, ResolvedDuckDb(str(elsewhere / "wh.duckdb"))
+    )
+
+    assert (elsewhere / "wh.duckdb").is_file()
+    assert not (shop.project / "wh.duckdb").exists()
+
+
+def test_a_duckdb_file_in_a_missing_folder_is_unreachable_and_not_created(shop):
+    with pytest.raises(WarehouseUnreachable) as raised:
+        shop.adapter().sync(
+            step(INCREMENTAL_ORDERS), shop.source, ResolvedDuckDb("missing/dir/wh.duckdb")
+        )
+
+    assert_no_secret(raised.value)
+    assert not (shop.project / "missing").exists()
+
+
+def test_a_duckdb_file_locked_by_another_process_is_unreachable(
+    shop, duckdb_held_by_another_process
+):
+    shop.sync(step(INCREMENTAL_ORDERS))
+
+    with (
+        duckdb_held_by_another_process(shop.warehouse_path),
+        pytest.raises(WarehouseUnreachable) as raised,
+    ):
+        shop.sync(step(INCREMENTAL_ORDERS))
+
+    assert_no_secret(raised.value)
+
+
+def assert_writable(path: Path) -> None:
+    with duckdb.connect(str(path)) as db:
+        db.execute("CREATE TABLE IF NOT EXISTS lock_probe (id INTEGER)")
+
+
+def test_sync_releases_the_duckdb_file(shop):
+    shop.sync(step(INCREMENTAL_ORDERS))
+
+    assert_writable(shop.warehouse_path)
+
+
+def test_a_sync_failing_mid_load_releases_the_duckdb_file(shop):
+    orders = force_not_null_violation(shop)
+
+    with pytest.raises(SyncFailedError):
+        shop.sync(orders)
+
+    assert_writable(shop.warehouse_path)
+
+
+def test_making_columns_nullable_releases_the_duckdb_file(shop):
+    orders = step(INCREMENTAL_ORDERS)
+    shop.sync(orders)
+
+    shop.adapter().make_columns_nullable(orders, orders.tables[0], shop.warehouse, ["amount"])
+
+    assert_writable(shop.warehouse_path)
 
 
 def test_postgres_source_engine_keeps_the_password_out_of_its_url_text():

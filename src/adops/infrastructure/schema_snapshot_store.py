@@ -7,7 +7,7 @@ from typing import Any
 import dlt
 from dlt.destinations.sql_client import SqlClientBase
 
-from adops.application.ports import ResolvedConnection
+from adops.application.ports import ResolvedWarehouse
 from adops.domain.schema_snapshot import TableShape
 from adops.infrastructure.dlt_sync import warehouse_client, warehouse_destination
 
@@ -19,11 +19,12 @@ class WarehouseSnapshotStore:
     """The SchemaSnapshotStore port backed by a table in the Environment's own Warehouse."""
 
     def __init__(self, project: Path, warehouse_kind: str) -> None:
+        self._project = project
         self._pipelines_dir = project / ".adops" / "dlt"
         self._warehouse_kind = warehouse_kind
 
     def load(
-        self, warehouse: ResolvedConnection, pipeline: str, source: str, table: str
+        self, warehouse: ResolvedWarehouse, pipeline: str, source: str, table: str
     ) -> TableShape | None:
         with self._client(warehouse) as (client, qualified):
             rows = client.execute_sql(
@@ -39,7 +40,7 @@ class WarehouseSnapshotStore:
 
     def save(
         self,
-        warehouse: ResolvedConnection,
+        warehouse: ResolvedWarehouse,
         pipeline: str,
         source: str,
         table: str,
@@ -63,11 +64,11 @@ class WarehouseSnapshotStore:
             )
 
     @contextmanager
-    def _client(self, warehouse: ResolvedConnection) -> Iterator[tuple[SqlClientBase[Any], str]]:
+    def _client(self, warehouse: ResolvedWarehouse) -> Iterator[tuple[SqlClientBase[Any], str]]:
         pipeline = dlt.pipeline(
             pipeline_name="adops_schema_snapshots",
             pipelines_dir=str(self._pipelines_dir),
-            destination=warehouse_destination(self._warehouse_kind, warehouse),
+            destination=warehouse_destination(self._warehouse_kind, warehouse, self._project),
             dataset_name=SNAPSHOT_SCHEMA,
         )
         with warehouse_client(pipeline) as client:

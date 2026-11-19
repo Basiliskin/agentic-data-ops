@@ -3,11 +3,14 @@ import shutil
 import subprocess
 import sys
 import uuid
+from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
+import duckdb
 import psycopg
 import pytest
+import yaml
 from dotenv import dotenv_values
 
 pytestmark = pytest.mark.e2e
@@ -47,21 +50,62 @@ def docker_available() -> bool:
     return subprocess.run(["docker", "info"], capture_output=True).returncode == 0
 
 
+@dataclass(frozen=True)
+class Demo:
+    project: Path
+    env: dict
+    warehouse_kind: str
+
+
+def init_demo(project):
+    subprocess.run([ADOPS, "init", str(project), "--demo"], check=True)
+    shutil.copy(project / ".env.example", project / ".env")
+
+
 @pytest.fixture(scope="module")
-def demo(tmp_path_factory):
+def stack(tmp_path_factory):
     if not docker_available():
         if os.environ.get("CI"):
             pytest.fail("Docker is required for the e2e tests in CI")
         pytest.skip("Docker is not available")
-    project = tmp_path_factory.mktemp("demo") / "shop"
-    subprocess.run([ADOPS, "init", str(project), "--demo"], check=True)
-    shutil.copy(project / ".env.example", project / ".env")
+    project = tmp_path_factory.mktemp("stack") / "shop"
+    init_demo(project)
     compose = ["docker", "compose", "-p", f"adops-e2e-{uuid.uuid4().hex[:8]}"]
     try:
         subprocess.run([*compose, "up", "--wait"], cwd=project, check=True)
-        yield project, dotenv_values(project / ".env")
+        yield project
     finally:
         subprocess.run([*compose, "down", "-v"], cwd=project, check=True)
+
+
+def use_shipped_duckdb_warehouse(settings):
+    """Uncomment the shipped DuckDB block and drop the Postgres warehouse block it replaces."""
+    lines = settings.read_text().splitlines()
+    start = lines.index("    # warehouse:")
+    end = start + 1
+    while lines[end].startswith("    #   "):
+        end += 1
+    duckdb_block = [line.replace("# ", "", 1) for line in lines[start:end]]
+    del lines[start:end]
+    postgres_start = lines.index("    warehouse:")
+    lines[postgres_start : lines.index("    sources:")] = duckdb_block
+    settings.write_text("\n".join(lines) + "\n")
+
+
+def reseed_shop(stack, env):
+    seed = (stack / "seed" / "01_shop.sql").read_text()
+    shop(env, f"DROP SCHEMA public CASCADE; CREATE SCHEMA public; {seed}")
+
+
+@pytest.fixture(params=["postgres", "duckdb"])
+def demo(request, stack, tmp_path):
+    project = tmp_path / "shop"
+    init_demo(project)
+    if request.param == "duckdb":
+        use_shipped_duckdb_warehouse(project / "adops.yaml")
+    env = dotenv_values(project / ".env")
+    reseed_shop(stack, env)
+    return Demo(project, env, request.param)
 
 
 def connect(env, prefix, user, database):
@@ -80,8 +124,13 @@ def shop(env, sql):
         conn.execute(sql)
 
 
-def warehouse(env, sql):
-    with connect(env, "WAREHOUSE", "warehouse", "warehouse") as conn:
+def warehouse(demo, sql):
+    if demo.warehouse_kind == "duckdb":
+        settings = yaml.safe_load((demo.project / "adops.yaml").read_text())
+        path = demo.project / settings["environments"]["dev"]["warehouse"]["path"]
+        with duckdb.connect(str(path), read_only=True) as conn:
+            return conn.execute(sql).fetchall()
+    with connect(demo.env, "WAREHOUSE", "warehouse", "warehouse") as conn:
         return conn.execute(sql).fetchall()
 
 
@@ -90,9 +139,9 @@ def dagster_meta(env, sql, *params):
         return conn.execute(sql, params).fetchall()
 
 
-def counts(env):
+def counts(demo):
     return {
-        table: warehouse(env, f"SELECT count(*) FROM raw_shop.{table}")[0][0]
+        table: warehouse(demo, f"SELECT count(*) FROM raw_shop.{table}")[0][0]
         for table in ("customers", "orders")
     }
 
@@ -129,12 +178,20 @@ def assert_transform_passed(output):
         assert f"  check {table} {check}: pass" in output
 
 
-def analytics_rows(env):
-    return warehouse(env, "SELECT count(*) FROM analytics.customer_orders")[0][0]
+def analytics_rows(demo):
+    return warehouse(demo, "SELECT count(*) FROM analytics.customer_orders")[0][0]
+
+
+def successful_runs(env):
+    try:
+        return dagster_meta(env, "SELECT count(*) FROM runs WHERE status = 'SUCCESS'")[0][0]
+    except psycopg.errors.UndefinedTable:
+        return 0
 
 
 def test_demo_incremental_breaking_change_and_missing_table(demo):
-    project, env = demo
+    project, env = demo.project, demo.env
+    successful_runs_before = successful_runs(env)
 
     code, output = adops_run(project, *RUN)
 
@@ -143,9 +200,9 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
     assert_all_checks_pass(output)
     assert_transform_passed(output)
     assert_no_secret_or_row_value(output, env)
-    assert counts(env) == {"customers": 20, "orders": 100}
-    assert analytics_rows(env) == 100
-    assert dagster_meta(env, "SELECT count(*) FROM runs WHERE status = 'SUCCESS'")[0][0] >= 1
+    assert counts(demo) == {"customers": 20, "orders": 100}
+    assert analytics_rows(demo) == 100
+    assert successful_runs(env) > successful_runs_before
 
     shop(
         env,
@@ -161,12 +218,12 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
     assert_all_checks_pass(output)
     assert_transform_passed(output)
     assert_no_secret_or_row_value(output, env)
-    assert counts(env) == {"customers": 20, "orders": 101}
-    assert analytics_rows(env) == 101
-    [(amount,)] = warehouse(env, "SELECT amount FROM raw_shop.orders WHERE id = 5")
+    assert counts(demo) == {"customers": 20, "orders": 101}
+    assert analytics_rows(demo) == 101
+    [(amount,)] = warehouse(demo, "SELECT amount FROM raw_shop.orders WHERE id = 5")
     assert amount == Decimal("999.99")
     duplicates = "SELECT id FROM raw_shop.orders GROUP BY id HAVING count(*) > 1"
-    assert warehouse(env, duplicates) == []
+    assert warehouse(demo, duplicates) == []
 
     shop(
         env,
@@ -186,12 +243,12 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
     assert "dbt run failed" not in output
     assert_no_secret_or_row_value(output, env)
     assert ORPHAN_CUSTOMER_ID not in output
-    assert counts(env) == {"customers": 20, "orders": 102}
+    assert counts(demo) == {"customers": 20, "orders": 102}
     orphans = (
         "SELECT count(*) FROM raw_shop.orders o"
         " WHERE NOT EXISTS (SELECT 1 FROM raw_shop.customers c WHERE c.id = o.customer_id)"
     )
-    assert warehouse(env, orphans) == [(1,)]
+    assert warehouse(demo, orphans) == [(1,)]
 
     shop(
         env,
@@ -206,16 +263,16 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
     assert_all_checks_pass(output)
     assert_transform_passed(output)
     assert_no_secret_or_row_value(output, env)
-    assert counts(env) == {"customers": 20, "orders": 102}
-    assert warehouse(env, orphans) == [(0,)]
-    assert analytics_rows(env) == 102
+    assert counts(demo) == {"customers": 20, "orders": 102}
+    assert warehouse(demo, orphans) == [(0,)]
+    assert analytics_rows(demo) == 102
 
     shop(
         env,
         "ALTER TABLE orders DROP COLUMN customer_id;"
         "INSERT INTO orders VALUES (102, 5.00, TIMESTAMPTZ '2026-03-15 00:00:00+00')",
     )
-    before_halt = counts(env)
+    before_halt = counts(demo)
 
     code, output = adops_run(project, *RUN)
 
@@ -223,7 +280,7 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
     assert "Breaking Change in orders: customer_id dropped" in output
     assert "step transform_shop: skipped" in output
     assert_no_secret_or_row_value(output, env)
-    assert counts(env) == before_halt
+    assert counts(demo) == before_halt
 
     code, output = adops_run(project, "accept-schema", "shop_sync", "orders")
 
@@ -239,7 +296,7 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
     assert_all_checks_pass(output)
     assert_transform_passed(output)
     assert_no_secret_or_row_value(output, env)
-    assert counts(env) == {"customers": 20, "orders": 103}
+    assert counts(demo) == {"customers": 20, "orders": 103}
 
     shop(env, "UPDATE customers SET email = NULL WHERE id = 7")
 
@@ -263,7 +320,7 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
     assert_transform_passed(output)
     assert_no_secret_or_row_value(output, env)
     nulls = "SELECT count(*) FROM raw_shop.customers WHERE email IS NULL"
-    assert warehouse(env, nulls) == [(0,)]
+    assert warehouse(demo, nulls) == [(0,)]
 
     shop(
         env,
@@ -278,7 +335,7 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
     assert "customers: source_tables_exist failed — table not found in the Source" in output
     assert "step transform_shop: skipped" in output
     assert_no_secret_or_row_value(output, env)
-    assert counts(env) == {"customers": 20, "orders": 103}
+    assert counts(demo) == {"customers": 20, "orders": 103}
 
     for name in ("SHOP_PASSWORD", "WAREHOUSE_PASSWORD"):
         leaks = (

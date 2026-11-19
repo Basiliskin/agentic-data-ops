@@ -15,6 +15,8 @@ from dlt.sources.sql_database import sql_table
 
 from adops.application.ports import (
     ResolvedConnection,
+    ResolvedDuckDb,
+    ResolvedWarehouse,
     SourceUnreachable,
     SyncResult,
     WarehouseUnreachable,
@@ -71,7 +73,12 @@ def _sqlite_engine(connection: ResolvedConnection) -> sa.Engine:
     return sa.create_engine(sa.URL.create("sqlite", database=connection.database))
 
 
-def _postgres_destination(connection: ResolvedConnection) -> Destination:
+def duckdb_file(project_dir: Path, path: str) -> Path:
+    """A relative DuckDB path belongs to the Project folder, not the process cwd."""
+    return project_dir / path
+
+
+def _postgres_destination(connection: ResolvedConnection, _project_dir: Path) -> Destination:
     return dlt.destinations.postgres(
         credentials={
             "host": connection.host,
@@ -83,8 +90,8 @@ def _postgres_destination(connection: ResolvedConnection) -> Destination:
     )
 
 
-def _duckdb_destination(connection: ResolvedConnection) -> Destination:
-    return dlt.destinations.duckdb(credentials=connection.database)
+def _duckdb_destination(connection: ResolvedDuckDb, project_dir: Path) -> Destination:
+    return dlt.destinations.duckdb(credentials=str(duckdb_file(project_dir, connection.path)))
 
 
 SOURCE_ENGINES: dict[str, Callable[[ResolvedConnection], sa.Engine]] = {
@@ -92,7 +99,7 @@ SOURCE_ENGINES: dict[str, Callable[[ResolvedConnection], sa.Engine]] = {
     "sqlite": _sqlite_engine,
 }
 
-WAREHOUSE_DESTINATIONS: dict[str, Callable[[ResolvedConnection], Destination]] = {
+WAREHOUSE_DESTINATIONS: dict[str, Callable[[Any, Path], Destination]] = {
     "postgres": _postgres_destination,
     "duckdb": _duckdb_destination,
 }
@@ -104,10 +111,12 @@ def source_engine(kind: str, connection: ResolvedConnection) -> sa.Engine:
     return SOURCE_ENGINES[kind](connection)
 
 
-def warehouse_destination(kind: str, connection: ResolvedConnection) -> Destination:
+def warehouse_destination(
+    kind: str, connection: ResolvedWarehouse, project_dir: Path
+) -> Destination:
     if kind not in WAREHOUSE_DESTINATIONS:
         raise UnknownConnectionKindError("Warehouse", kind, WAREHOUSE_DESTINATIONS)
-    return WAREHOUSE_DESTINATIONS[kind](connection)
+    return WAREHOUSE_DESTINATIONS[kind](connection, project_dir)
 
 
 class DltSync:
@@ -117,9 +126,11 @@ class DltSync:
         self,
         project_dir: Path,
         pipeline: str,
+        *,
+        warehouse_kind: str,
         source_kind: str = "postgres",
-        warehouse_kind: str = "postgres",
     ) -> None:
+        self._project_dir = project_dir
         self._pipelines_dir = project_dir / ".adops" / "dlt"
         self._pipeline = pipeline
         self._source_kind = source_kind
@@ -138,7 +149,7 @@ class DltSync:
         return facts
 
     def sync(
-        self, step: SyncStep, source: ResolvedConnection, warehouse: ResolvedConnection
+        self, step: SyncStep, source: ResolvedConnection, warehouse: ResolvedWarehouse
     ) -> SyncResult:
         engine = source_engine(self._source_kind, source)
         pipeline = self._warehouse_pipeline(step, warehouse)
@@ -157,7 +168,7 @@ class DltSync:
         self,
         step: SyncStep,
         table: SyncTable,
-        warehouse: ResolvedConnection,
+        warehouse: ResolvedWarehouse,
         columns: Collection[str],
     ) -> None:
         pipeline = self._warehouse_pipeline(step, warehouse)
@@ -181,11 +192,11 @@ class DltSync:
             f"Pipeline {self._pipeline}, Step {step.name}, table {table.name}: {reason}"
         )
 
-    def _warehouse_pipeline(self, step: SyncStep, warehouse: ResolvedConnection) -> dlt.Pipeline:
+    def _warehouse_pipeline(self, step: SyncStep, warehouse: ResolvedWarehouse) -> dlt.Pipeline:
         return dlt.pipeline(
             pipeline_name=f"adops_{self._pipeline}_{step.name}",
             pipelines_dir=str(self._pipelines_dir),
-            destination=warehouse_destination(self._warehouse_kind, warehouse),
+            destination=warehouse_destination(self._warehouse_kind, warehouse, self._project_dir),
             dataset_name=f"raw_{step.source}",
         )
 

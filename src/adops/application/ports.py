@@ -29,6 +29,16 @@ class ResolvedConnection:
         )
 
 
+@dataclass(frozen=True)
+class ResolvedDuckDb:
+    """A DuckDB Warehouse file, with the path exactly as the Project settings wrote it."""
+
+    path: str
+
+
+type ResolvedWarehouse = ResolvedConnection | ResolvedDuckDb
+
+
 class SourceUnreachable(Exception):
     """A Sync could not connect to the Source; it names the table and holds no driver text."""
 
@@ -55,7 +65,7 @@ class Sync(Protocol):
         ...
 
     def sync(
-        self, step: SyncStep, source: ResolvedConnection, warehouse: ResolvedConnection
+        self, step: SyncStep, source: ResolvedConnection, warehouse: ResolvedWarehouse
     ) -> SyncResult:
         ...
 
@@ -63,7 +73,7 @@ class Sync(Protocol):
         self,
         step: SyncStep,
         table: SyncTable,
-        warehouse: ResolvedConnection,
+        warehouse: ResolvedWarehouse,
         columns: Collection[str],
     ) -> None:
         """Let loaded columns that the Source no longer has hold NULL in the Warehouse."""
@@ -83,7 +93,7 @@ class TransformResult:
 class Transform(Protocol):
     """Runs a Transform Step's dbt models and tests in the Warehouse and reports what happened."""
 
-    def run(self, step: TransformStep, warehouse: ResolvedConnection) -> TransformResult: ...
+    def run(self, step: TransformStep, warehouse: ResolvedWarehouse) -> TransformResult: ...
 
 
 @runtime_checkable
@@ -91,12 +101,12 @@ class SchemaSnapshotStore(Protocol):
     """Keeps each Source table's last accepted shape in the Warehouse; it never judges a change."""
 
     def load(
-        self, warehouse: ResolvedConnection, pipeline: str, source: str, table: str
+        self, warehouse: ResolvedWarehouse, pipeline: str, source: str, table: str
     ) -> TableShape | None: ...
 
     def save(
         self,
-        warehouse: ResolvedConnection,
+        warehouse: ResolvedWarehouse,
         pipeline: str,
         source: str,
         table: str,

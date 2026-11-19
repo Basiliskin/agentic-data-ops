@@ -1,6 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
+from adops.domain.environment import DuckDbConnection
 from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import load_project_settings
 from adops.domain.secret_reference import SecretReference
@@ -101,7 +102,48 @@ def test_misspelled_connection_key_is_rejected_instead_of_ignored():
     )
 
 
-def test_only_postgres_connections_are_accepted():
-    text = settings().replace("type: postgres", "type: mysql", 1)
+@pytest.mark.parametrize("warehouse", ["{type: mysql, path: x}", "{path: x}"])
+def test_an_unknown_warehouse_type_names_the_supported_kinds(warehouse):
+    text = settings().replace(CONNECTION % "password_env: WAREHOUSE_DB_PASSWORD", warehouse)
 
-    assert problems_of(text) == ("environments.dev.warehouse.type: Input should be 'postgres'",)
+    assert problems_of(text) == (
+        "environments.dev.warehouse: type must be one of: postgres, duckdb",
+    )
+
+
+def duckdb_settings(warehouse):
+    return settings().replace(CONNECTION % "password_env: WAREHOUSE_DB_PASSWORD", warehouse)
+
+
+def test_a_duckdb_warehouse_needs_only_a_path():
+    environment = load_project_settings(
+        duckdb_settings("{type: duckdb, path: warehouse.duckdb}")
+    ).environments["dev"]
+
+    assert environment.warehouse == DuckDbConnection(type="duckdb", path="warehouse.duckdb")
+
+
+@pytest.mark.parametrize(
+    ("warehouse", "problem"),
+    [
+        (
+            "{type: duckdb, path: x, host: localhost}",
+            "environments.dev.warehouse.host: Extra inputs are not permitted",
+        ),
+        ("{type: duckdb}", "environments.dev.warehouse.path: Field required"),
+        (
+            "{type: duckdb, path: ''}",
+            "environments.dev.warehouse.path: String should have at least 1 character",
+        ),
+    ],
+)
+def test_a_malformed_duckdb_warehouse_is_rejected(warehouse, problem):
+    assert problems_of(duckdb_settings(warehouse)) == (problem,)
+
+
+def test_sources_stay_postgres_only():
+    text = settings().replace(
+        CONNECTION % "password_env: SHOP_DB_PASSWORD", "{type: duckdb, path: x}"
+    )
+
+    assert "environments.dev.sources.shop.type: Input should be 'postgres'" in problems_of(text)

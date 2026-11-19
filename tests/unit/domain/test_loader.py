@@ -301,3 +301,41 @@ def test_a_missing_source_is_still_found_next_to_a_transform_step():
     error = raised_by(lambda p: ensure_sources_defined(p, environment), pipeline)
 
     assert error.problems == ("steps[0].source: no Source with this name in the Environment",)
+
+
+@pytest.mark.parametrize(
+    ("warehouse", "problem"),
+    [
+        ("{type: duckdb}", "environments.dev.warehouse.path: Field required"),
+        (
+            f"{{type: duckdb, path: x, host: {SENTINEL}}}",
+            "environments.dev.warehouse.host: Extra inputs are not permitted",
+        ),
+        (
+            "{type: postgres, host: h, database: d, user: u, password_env: WH_PW}",
+            "environments.dev.warehouse.port: Field required",
+        ),
+        (
+            "{type: postgres, host: h, port: 5432, database: d, user: u, password_env: WH_PW,"
+            f" duckdb: {SENTINEL}}}",
+            "environments.dev.warehouse.duckdb: Extra inputs are not permitted",
+        ),
+    ],
+)
+def test_warehouse_errors_are_reported_without_the_warehouse_type(warehouse, problem):
+    text = SETTINGS.replace(SETTINGS.splitlines()[3].split("warehouse: ")[1], warehouse)
+
+    error = raised_by(load_project_settings, text)
+
+    assert error.problems == (problem,)
+    assert_secret_free(error)
+
+
+def test_a_source_named_warehouse_keeps_its_keys_in_the_path():
+    text = SETTINGS.replace("      shop:", "      warehouse:").replace(
+        "password_env: SHOP_PW}", "password_env: SHOP_PW, postgres: x}"
+    )
+
+    assert raised_by(load_project_settings, text).problems == (
+        "environments.dev.sources.warehouse.postgres: Extra inputs are not permitted",
+    )

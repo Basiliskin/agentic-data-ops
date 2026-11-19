@@ -1,5 +1,6 @@
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -11,6 +12,8 @@ from adops.domain.schema_snapshot import TableShape
 from adops.interface import accept_schema_command, cli, run_command
 
 runner = CliRunner()
+
+REAL_BUILD_SNAPSHOT_STORE = run_command.build_snapshot_store
 
 SENTINEL = "s3cr3t-accept-command-sentinel"
 
@@ -97,14 +100,14 @@ def project(tmp_path, monkeypatch):
 @pytest.fixture
 def sync(monkeypatch):
     fake = FakeSync()
-    monkeypatch.setattr(run_command, "build_sync", lambda project, pipeline: fake)
+    monkeypatch.setattr(run_command, "build_sync", lambda project, pipeline, kind: fake)
     return fake
 
 
 @pytest.fixture
 def store(monkeypatch):
     fake = InMemorySnapshotStore()
-    monkeypatch.setattr(run_command, "build_snapshot_store", lambda project: fake)
+    monkeypatch.setattr(run_command, "build_snapshot_store", lambda project, kind: fake)
     return fake
 
 
@@ -204,7 +207,9 @@ def test_table_missing_in_source_is_refused(project, monkeypatch):
         def preflight(self, step, source):
             return {table.name: SourceFacts(False, frozenset()) for table in step.tables}
 
-    monkeypatch.setattr(run_command, "build_sync", lambda project, pipeline: MissingTableSync())
+    monkeypatch.setattr(
+        run_command, "build_sync", lambda project, pipeline, kind: MissingTableSync()
+    )
 
     result = invoke(project)
 
@@ -229,12 +234,12 @@ def test_builds_sync_and_store_through_run_commands_factories(project, monkeypat
     built: list[tuple[str, object]] = []
     store = InMemorySnapshotStore()
 
-    def build_sync(project_dir, pipeline):
-        built.append(("sync", (project_dir, pipeline)))
+    def build_sync(project_dir, pipeline, kind):
+        built.append(("sync", (project_dir, pipeline, kind)))
         return FakeSync()
 
-    def build_store(project_dir):
-        built.append(("store", project_dir))
+    def build_store(project_dir, kind):
+        built.append(("store", (project_dir, kind)))
         return store
 
     monkeypatch.setattr(run_command, "build_sync", build_sync)
@@ -243,4 +248,48 @@ def test_builds_sync_and_store_through_run_commands_factories(project, monkeypat
     accepted = accept_schema_command.accept_project_schema(project, "shop_sync", "orders", "dev")
 
     assert accepted.environment == "dev"
-    assert built == [("sync", (project, "shop_sync")), ("store", project)]
+    assert built == [("sync", (project, "shop_sync", "postgres")), ("store", (project, "postgres"))]
+
+
+DUCKDB_ENVIRONMENT = """
+  ci:
+    warehouse: {type: duckdb, path: missing/dir/wh.duckdb}
+    sources:
+      shop: {type: postgres, host: localhost, port: 5432, database: s, user: s,
+             password_env: ADOPS_TEST_SHOP_PASSWORD}
+"""
+
+
+@pytest.mark.parametrize(("env", "kind"), [("dev", "postgres"), ("ci", "duckdb")])
+def test_adapters_are_built_for_the_chosen_environments_kind(project, monkeypatch, env, kind):
+    (project / "adops.yaml").write_text(SETTINGS + DUCKDB_ENVIRONMENT)
+    built: list[tuple[str, str]] = []
+
+    def build_sync(project_dir: Path, pipeline: str, kind: str) -> FakeSync:
+        built.append(("sync", kind))
+        return FakeSync()
+
+    def build_store(project_dir: Path, kind: str) -> InMemorySnapshotStore:
+        built.append(("store", kind))
+        return InMemorySnapshotStore()
+
+    monkeypatch.setattr(run_command, "build_sync", build_sync)
+    monkeypatch.setattr(run_command, "build_snapshot_store", build_store)
+
+    accept_schema_command.accept_project_schema(project, "shop_sync", "orders", env)
+
+    assert built == [("sync", kind), ("store", kind)]
+
+
+@pytest.mark.usefixtures("sync")
+def test_unopenable_duckdb_file_fails_with_the_dedicated_message(project, monkeypatch):
+    (project / "adops.yaml").write_text(SETTINGS + DUCKDB_ENVIRONMENT)
+    monkeypatch.setattr(run_command, "build_snapshot_store", REAL_BUILD_SNAPSHOT_STORE)
+
+    result = invoke(project, "--env", "ci")
+
+    assert_clean_failure(result)
+    assert result.output.strip() == "Pipeline shop_sync, table orders: Warehouse is unreachable"
+    for leaked in ("missing/dir", str(Path.home()), "IOException", "unexpected"):
+        assert leaked not in result.output
+    assert not (project / "missing").exists()

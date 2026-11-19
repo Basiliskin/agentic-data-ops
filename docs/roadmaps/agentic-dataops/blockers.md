@@ -15,7 +15,7 @@
 - 2026-11-18 | horizon 2 | Is dbtRunner safe to call several times in one process and inside an in-process Dagster op?
 - 2026-11-18 | horizon 2 | Which dbt outputs (logs, compiled SQL, run_results messages, exception text) echo profile values or the host?
 - 2026-11-18 | horizon 2 | Does DuckDB's single-writer lock break when dlt, the snapshot store and dbt-duckdb open the same file in one run?
-- 2026-11-18 | horizon 2 | Which dbt-duckdb version does the lock resolve to, and does it pin duckdb against the installed 1.5.6?
+- 2026-11-18 | horizon 2 | Which dbt-duckdb version does the lock resolve to, and does it pin duckdb against the installed 1.5.6? — resolved by decision 2026-11-18
 - 2026-11-18 | horizon 2 | Will a dbt build plus the failure scenarios fit the 20-minute Docker E2E job?
 - 2026-11-18 | horizon 2 | Do dlt destination connection failures surface a stable exception type to classify as 'Warehouse unreachable'?
 - 2026-11-18 | horizon 2 | Do dlt duckdb type mapping and identifier normalization differ enough from Postgres to break sources.yml, models or declared-Check measurements?

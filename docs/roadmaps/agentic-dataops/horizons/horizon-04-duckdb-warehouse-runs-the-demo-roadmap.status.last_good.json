@@ -1,0 +1,286 @@
+{
+  "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.json",
+  "roadmapTask": "Horizon 4: add DuckDB as a Warehouse kind — DuckDbConnection in the Environment union (no secret), Warehouse kind read from settings instead of the hard-coded 'postgres' in build_sync/build_snapshot_store, dlt[duckdb] and dbt-duckdb at runtime, the demo running end to end on DuckDB including the dbt Transform",
+  "createdAt": "2026-11-18T18:44:59Z",
+  "updatedAt": "2026-11-19T06:39:08Z",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "add-duckdb-connection-to-environment",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-18T18:44:59Z",
+      "completedAt": "2026-11-18T18:48:26Z",
+      "gateRun": {
+        "ranAt": "2026-11-18T18:47:29Z",
+        "commands": [
+          "uv sync --locked: pass",
+          "uv run ruff check: pass",
+          "uv run pytest tests/unit --cov --cov-report=term-missing: pass (100% branch)",
+          "adops validate on duckdb/bad-duckdb/snowflake/bad-postgres projects: expected output"
+        ]
+      },
+      "gradeResult": {
+        "phaseId": "add-duckdb-connection-to-environment",
+        "overallPass": true,
+        "dimensionScores": [
+          {
+            "dimensionId": "duckdb-block-shape",
+            "score": 9,
+            "pass": true,
+            "evidence": "valid/host/missing/empty path tests pass; extra=forbid, frozen, min_length=1, no secret; sources still Postgres-only (test + live run)"
+          },
+          {
+            "dimensionId": "tag-free-error-paths",
+            "score": 10,
+            "pass": true,
+            "evidence": "exact-location assertion + secret-free check; tag stripped only at environments.<env>.warehouse.<tag>; tests prove a user key named duckdb and a Source named warehouse keep their segments (the rubric failure cases)"
+          },
+          {
+            "dimensionId": "unknown-kind-message",
+            "score": 9,
+            "pass": true,
+            "evidence": "one line naming postgres and duckdb for unknown/missing/non-string type, no raw pydantic text or echoed value; CLI tests cover the four cases"
+          }
+        ]
+      },
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/{blockers,decisions,discoveries,state}.md, horizon-04 roadmap .json/.md | changed: src/adops/domain/environment.py, src/adops/domain/loader.py, tests/unit/domain/test_environment.py, tests/unit/domain/test_loader.py, tests/unit/interface/test_validate_command.py — DuckDbConnection{type,path} + WarehouseConnection discriminated union (custom unknown-type message) on Environment.warehouse; loader strips the postgres/duckdb tag only at environments.<env>.warehouse.<tag>",
+      "compensationInvoked": false,
+      "failures": [],
+      "baseRef": "48bd6a2ad1a5e5ad69b18226e18f1250dd75e9e6",
+      "baseDirty": true,
+      "unplannedFiles": []
+    },
+    {
+      "phaseId": "resolve-warehouse-by-kind",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-18T18:50:21Z",
+      "completedAt": "2026-11-18T18:54:36Z",
+      "gateRun": "g1 uv sync --locked: pass; g2 uv run ruff check: pass; g3 uv run pytest tests/unit --cov: pass; g4 wheel template check: pass; g5 uv run pytest tests/e2e -m e2e: fail (flake) then pass on rerun",
+      "gradeResult": {
+        "phaseId": "resolve-warehouse-by-kind",
+        "dimensionScores": [
+          {
+            "dimensionId": "no-secret-for-duckdb",
+            "score": 9,
+            "pass": true,
+            "evidence": "StrictEnv-backed DuckDB Sync+Transform and transform-only runs pass; accept_schema DuckDB case passes with only the Source secret; password_env reads guarded by isinstance dispatch."
+          },
+          {
+            "dimensionId": "adapters-receive-resolved-duckdb",
+            "score": 9,
+            "pass": true,
+            "evidence": "ResolvedDuckDb frozen, single path field; warehouse ports typed ResolvedWarehouse; fakes assert ResolvedDuckDb(warehouse.duckdb) for sync, store load/save, transform, make_columns_nullable; Postgres tests untouched."
+          },
+          {
+            "dimensionId": "redaction-still-masks",
+            "score": 9,
+            "pass": true,
+            "evidence": "_redact appends the warehouse password only for ResolvedConnection; DuckDB test masks the Source password; no-secret error text stays unchanged; Postgres both-masked test still passes."
+          }
+        ],
+        "overallPass": true
+      },
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,src/adops/domain/environment.py,src/adops/domain/loader.py,tests/unit/domain/test_environment.py,tests/unit/domain/test_loader.py,tests/unit/interface/test_validate_command.py,docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.status.last_good.json | changed: src/adops/application/{ports,run_pipeline,accept_schema}.py, tests/unit/application/{fakes,test_run_pipeline,test_accept_schema}.py — adds ResolvedDuckDb(path)+ResolvedWarehouse; resolve_warehouse/secret_references dispatch on connection type so a DuckDB warehouse needs no secret; _redact masks only existing passwords; StrictEnv fake fails on any unexpected env lookup.",
+      "compensationInvoked": false,
+      "failures": [
+        {
+          "at": "2026-11-18T18:53:31Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run pytest tests/e2e -m e2e",
+          "detail": "test_demo_incremental_breaking_change_and_missing_table: assert ORPHAN_CUSTOMER_ID (\"999\") not in output — matched inside a random Dagster run UUID (4d490f27-9997-...)",
+          "resolvedBy": "retry",
+          "resolution": "No code changed; rerun green. Flake comes from the test asserting a short id not in output that contains random Dagster UUIDs; logged in discoveries.md for the e2e phase."
+        }
+      ],
+      "baseRef": "48bd6a2ad1a5e5ad69b18226e18f1250dd75e9e6",
+      "baseDirty": true,
+      "unplannedFiles": []
+    },
+    {
+      "phaseId": "connect-dlt-and-snapshot-store-to-duckdb",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-18T18:55:44Z",
+      "completedAt": "2026-11-18T19:01:27Z",
+      "gateRun": "ruff: pass; uv sync --locked: pass; pytest tests/unit --cov (100% branch): pass (1 red fixed, see failures); pytest tests/e2e -m e2e: pass",
+      "gradeResult": {
+        "phaseId": "connect-dlt-and-snapshot-store-to-duckdb",
+        "dimensionScores": [
+          {
+            "dimensionId": "path-resolves-against-project",
+            "score": 9,
+            "pass": true,
+            "evidence": "relative path joined to Project under monkeypatch.chdir for both adapters; absolute used as given; store save/load from different cwds"
+          },
+          {
+            "dimensionId": "lock-released",
+            "score": 9,
+            "pass": true,
+            "evidence": "read-write connect + CREATE after sync, save, load, mid-load failure and failed save; pipeline not cached"
+          },
+          {
+            "dimensionId": "unreachable-maps-cleanly",
+            "score": 9,
+            "pass": true,
+            "evidence": "missing folder (not created) and subprocess-locked file raise WarehouseUnreachable from sync, save, load; unknown kind and missing warehouse_kind covered. Minor: lock-holder handshake has no timeout"
+          }
+        ],
+        "overallPass": true
+      },
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/accept_schema.py,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/domain/environment.py,src/adops/domain/loader.py,tests/unit/application/fakes.py,tests/unit/application/test_accept_schema.py,tests/unit/application/test_run_pipeline.py,tests/unit/domain/test_environment.py,tests/unit/domain/test_loader.py,tests/unit/interface/test_validate_command.py,docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.status.last_good.json | changed: src/adops/infrastructure/dlt_sync.py, src/adops/infrastructure/schema_snapshot_store.py, src/adops/interface/run_command.py, tests/unit/infrastructure/test_dlt_sync.py, tests/unit/infrastructure/test_schema_snapshot_store.py, tests/unit/infrastructure/conftest.py (new: shared fixture holding a DuckDB file from a second process). Change: duckdb_file(project_dir, path) joins relative paths to the Project; warehouse_destination takes project_dir; DltSync and WarehouseSnapshotStore keep the Project folder; DltSync warehouse_kind is keyword-only and required; build_sync passes postgres explicitly (interim); tests use ResolvedDuckDb and cover cwd, absolute path, missing folder, locked file, lock release incl. mid-load failure. No mapping code was needed: dlt/duckdb open failures already surface as WarehouseUnreachable via warehouse_client. test_run_command.py needed no change. | tests/unit/interface/test_run_command.py updated (adapter vars).",
+      "compensationInvoked": false,
+      "failures": [
+        {
+          "at": "2026-11-18T18:59:16Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "FAILED tests/unit/interface/test_run_command.py::test_real_adapters_are_built_for_the_project — vars() of built adapters now include _project / _project_dir",
+          "resolvedBy": "gate-fix",
+          "resolution": "test_run_command.py: vars() assertion now includes _project for the store and asserts the full DltSync state"
+        }
+      ],
+      "baseRef": "48bd6a2ad1a5e5ad69b18226e18f1250dd75e9e6",
+      "baseDirty": true,
+      "unplannedFiles": [
+        "tests/unit/infrastructure/conftest.py"
+      ]
+    },
+    {
+      "phaseId": "add-duckdb-dbt-profile",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-18T19:02:59Z",
+      "completedAt": "2026-11-18T19:10:10Z",
+      "gateRun": "ruff: pass; uv sync --locked: pass; pytest tests/unit --cov (100% branch, 551 passed): pass; uv build --wheel + template grep: pass; fresh-venv wheel install + import duckdb, dbt.adapters.duckdb: pass; pytest tests/e2e -m e2e: pass (55s)",
+      "gradeResult": {
+        "phaseId": "add-duckdb-dbt-profile",
+        "dimensions": [
+          {
+            "dimensionId": "duckdb-profile-correct",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "Exact profile dict asserted (absolute path, duckdb, analytics, threads 1, no env_var); real dbt-duckdb build from another cwd lands in <project>/wh.duckdb; Postgres profile still env_var only. Read-write instead of read-only verification connect (in-process dbt-duckdb handle)."
+          },
+          {
+            "dimensionId": "env-untouched-for-duckdb",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "nullcontext for ResolvedDuckDb; EnvironRecordingRunner snapshots environ during dbt; var absent and whole environ unchanged; Postgres path sets it only during the run; TypeError without kind; UnknownConnectionKindError for oracle."
+          },
+          {
+            "dimensionId": "sync-snapshot-dbt-sequence",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "test_sync_then_snapshot_then_dbt_share_one_duckdb_file: real dlt sqlite->duckdb, snapshot save, dbt model over source; analytics.orders count == 3 in the same file. Does not read back the snapshot row."
+          },
+          {
+            "dimensionId": "runtime-deps-only-move",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "pyproject runtime deps hold dlt[postgres,duckdb] and dbt-duckdb==1.11.1, dev group clean; uv.lock name/version lines unchanged; uv sync --locked no changes; fresh wheel install imports duckdb and dbt.adapters.duckdb."
+          }
+        ],
+        "overallPass": true
+      },
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md docs/roadmaps/agentic-dataops/decisions.md docs/roadmaps/agentic-dataops/discoveries.md docs/roadmaps/agentic-dataops/state.md src/adops/application/accept_schema.py src/adops/application/ports.py src/adops/application/run_pipeline.py src/adops/domain/environment.py src/adops/domain/loader.py src/adops/infrastructure/dlt_sync.py src/adops/infrastructure/schema_snapshot_store.py src/adops/interface/run_command.py tests/unit/application/fakes.py tests/unit/application/test_accept_schema.py tests/unit/application/test_run_pipeline.py tests/unit/domain/test_environment.py tests/unit/domain/test_loader.py tests/unit/infrastructure/test_dlt_sync.py tests/unit/infrastructure/test_schema_snapshot_store.py tests/unit/interface/test_run_command.py tests/unit/interface/test_validate_command.py docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.json docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.md docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.status.json docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.status.last_good.json tests/unit/infrastructure/conftest.py  || changed: src/adops/infrastructure/dbt_transform.py, tests/unit/infrastructure/test_dbt_transform.py, src/adops/interface/run_command.py, tests/unit/interface/test_run_command.py, pyproject.toml, uv.lock (+ discoveries.md memory line). render_duckdb_profile (absolute duckdb_file path, schema analytics, threads 1) + PROFILE_RENDERERS/profile_renderer registry; DbtTransform takes keyword-only required warehouse_kind, renderers get project_root; password env var set only for ResolvedConnection; build_transform passes interim warehouse_kind=postgres; dlt[postgres,duckdb] and dbt-duckdb==1.11.1 moved to runtime, uv.lock moves groups only. run_command.py/test_run_command.py were already dirty from phase 3 — this phase changed only build_transform and one assertion. || compensation known: revert pyproject.toml and uv.lock (git checkout of those two files), not needed.",
+      "compensationInvoked": false,
+      "failures": [],
+      "baseRef": "48bd6a2ad1a5e5ad69b18226e18f1250dd75e9e6",
+      "baseDirty": true,
+      "unplannedFiles": []
+    },
+    {
+      "phaseId": "read-warehouse-kind-in-cli",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-19T06:13:34Z",
+      "completedAt": "2026-11-19T06:20:00Z",
+      "gateRun": "g1 uv sync --locked: pass; g2 uv run ruff check: pass; g3 uv run pytest tests/unit --cov (100% branch): pass; g4/g5 not run (no template or e2e files touched; e2e is the next phase). ruff format --check is not a CI gate.",
+      "gradeResult": {
+        "phaseId": "read-warehouse-kind-in-cli",
+        "dimensionScores": [
+          {
+            "dimensionId": "builders-follow-kind",
+            "score": 9,
+            "pass": true,
+            "evidence": "run_command.py:38-61 builders take kind, warehouse_kind uses pick_environment on the selected Environment; no postgres literal; fakes have explicit signatures; per-Environment parametrized tests in both command test files. Not 10: per-kind tests record only the kind string."
+          },
+          {
+            "dimensionId": "accept-schema-unreachable-message",
+            "score": 9,
+            "pass": true,
+            "evidence": "accept_schema_command.py catches the ports WarehouseUnreachable marker with fixed text; amendment judged legitimate (run wording is Warehouse is unreachable); test asserts exact message, no path/home/IOException/unexpected, no folder created. Not 10: prefixes differ (table vs Step); run test cannot assert home dir absent."
+          },
+          {
+            "dimensionId": "in-process-duckdb-run",
+            "score": 9,
+            "pass": true,
+            "evidence": "Real DagsterOrchestrator + real DltSync(sqlite->duckdb) via CliRunner; read_only duckdb count(*) raw_shop.customers == 3; no run_config in dagster_orchestrator.py. Not 10: checks count only, not values."
+          }
+        ],
+        "overallPass": true
+      },
+      "notes": "already dirty at start (phases 1-4, uncommitted): docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,pyproject.toml,src/adops/application/accept_schema.py,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/domain/environment.py,src/adops/domain/loader.py,src/adops/infrastructure/dbt_transform.py,src/adops/infrastructure/dlt_sync.py,src/adops/infrastructure/schema_snapshot_store.py,src/adops/interface/run_command.py,tests/unit/application/fakes.py,tests/unit/application/test_accept_schema.py,tests/unit/application/test_run_pipeline.py,tests/unit/domain/test_environment.py,tests/unit/domain/test_loader.py,tests/unit/infrastructure/test_dbt_transform.py,tests/unit/infrastructure/test_dlt_sync.py,tests/unit/infrastructure/test_schema_snapshot_store.py,tests/unit/interface/test_run_command.py,tests/unit/interface/test_validate_command.py,uv.lock,docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.status.last_good.json,tests/unit/infrastructure/conftest.py || Changed this phase: docs/roadmaps/agentic-dataops/discoveries.md, src/adops/interface/accept_schema_command.py, src/adops/interface/cli.py, src/adops/interface/run_command.py, tests/unit/interface/test_accept_schema_command.py, tests/unit/interface/test_run_command.py. run/accept-schema read the selected Environment warehouse type via run_command.warehouse_kind and pass it to build_sync/build_snapshot_store/build_transform (no postgres literal); accept-schema maps WarehouseUnreachable to \"Pipeline <p>, table <t>: Warehouse is unreachable\"; cli help mentions DuckDB. Amendment 1: exact wording is \"Warehouse is unreachable\" (run's real text). discoveries.md line appended (Dagster stack frames in run output).",
+      "compensationInvoked": false,
+      "failures": [],
+      "baseRef": "48bd6a2ad1a5e5ad69b18226e18f1250dd75e9e6",
+      "baseDirty": true,
+      "amendments": [
+        {
+          "at": "2026-11-19T06:17:12Z",
+          "by": "execute",
+          "reason": "changes[3] and the rubric quote the message as \"Warehouse unreachable\", but the run-side WarehouseUnreachableError text this phase must match is \"Warehouse is unreachable\" (asserted in test_run_pipeline.py:1047 and test_dlt_sync.py:599). accept-schema uses run's actual wording; the rule (identical sanitized wording) is unchanged.",
+          "grounding": "src/adops/application/run_pipeline.py:85-87",
+          "before": {
+            "changes": [
+              "In run_command.py add `warehouse_kind(settings_text, environment) -> str` that calls load_project_settings and pick_environment and returns `environment.warehouse.type` (PipelineValidationError for a bad file or unknown Environment is already caught by `run`).",
+              "Change the builders to take the kind: `build_sync(project, pipeline, kind)` -> DltSync(project, pipeline, warehouse_kind=kind); `build_snapshot_store(project, kind)`; `build_transform(project, kind)` -> DbtTransform(project, warehouse_kind=kind). No 'postgres' literal remains in these builders.",
+              "Call warehouse_kind in run_project and accept_project_schema before building adapters.",
+              "In accept_schema_command.py catch the WarehouseUnreachable marker (from application.ports) and fail with the same sanitized 'Warehouse unreachable' wording WarehouseUnreachableError uses in run, without the file path or driver text.",
+              "Change cli.py:36 help text to 'into your Postgres or DuckDB warehouse' (check test_cli does not assert the old text).",
+              "Update the monkeypatched builder signatures in test_run_command.py (lines ~125-449) and test_accept_schema_command.py (~100-241); add tests that a duckdb settings file makes the builders receive 'duckdb', and that accept-schema on a DuckDB path inside a missing folder prints the dedicated message.",
+              "Add one CLI-level unit test running `adops run` on a DuckDB Environment end to end in process under the real DagsterOrchestrator (sqlite or monkeypatched Source as the existing run tests do), proving the closure-bound DuckDB warehouse reaches the ops."
+            ]
+          },
+          "after": {
+            "changes": [
+              "In run_command.py add `warehouse_kind(settings_text, environment) -> str` that calls load_project_settings and pick_environment and returns `environment.warehouse.type` (PipelineValidationError for a bad file or unknown Environment is already caught by `run`).",
+              "Change the builders to take the kind: `build_sync(project, pipeline, kind)` -> DltSync(project, pipeline, warehouse_kind=kind); `build_snapshot_store(project, kind)`; `build_transform(project, kind)` -> DbtTransform(project, warehouse_kind=kind). No 'postgres' literal remains in these builders.",
+              "Call warehouse_kind in run_project and accept_project_schema before building adapters.",
+              "In accept_schema_command.py catch the WarehouseUnreachable marker (from application.ports) and fail with the same fixed wording WarehouseUnreachableError uses in run — the literal text is \"Warehouse is unreachable\" (\"Pipeline <p>, table <t>: Warehouse is unreachable\") — without the file path or driver text.",
+              "Change cli.py:36 help text to 'into your Postgres or DuckDB warehouse' (check test_cli does not assert the old text).",
+              "Update the monkeypatched builder signatures in test_run_command.py (lines ~125-449) and test_accept_schema_command.py (~100-241); add tests that a duckdb settings file makes the builders receive 'duckdb', and that accept-schema on a DuckDB path inside a missing folder prints the dedicated message.",
+              "Add one CLI-level unit test running `adops run` on a DuckDB Environment end to end in process under the real DagsterOrchestrator (sqlite or monkeypatched Source as the existing run tests do), proving the closure-bound DuckDB warehouse reaches the ops."
+            ]
+          }
+        }
+      ],
+      "unplannedFiles": []
+    },
+    {
+      "phaseId": "run-e2e-on-both-warehouses",
+      "status": "awaiting-verification",
+      "attempts": 1,
+      "startedAt": "2026-11-19T06:28:49Z",
+      "completedAt": null,
+      "gateRun": null,
+      "gradeResult": null,
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,pyproject.toml,src/adops/application/accept_schema.py,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/domain/environment.py,src/adops/domain/loader.py,src/adops/infrastructure/dbt_transform.py,src/adops/infrastructure/dlt_sync.py,src/adops/infrastructure/schema_snapshot_store.py,src/adops/interface/accept_schema_command.py,src/adops/interface/cli.py,src/adops/interface/run_command.py,tests/unit/application/fakes.py,tests/unit/application/test_accept_schema.py,tests/unit/application/test_run_pipeline.py,tests/unit/domain/test_environment.py,tests/unit/domain/test_loader.py,tests/unit/infrastructure/test_dbt_transform.py,tests/unit/infrastructure/test_dlt_sync.py,tests/unit/infrastructure/test_schema_snapshot_store.py,tests/unit/interface/test_accept_schema_command.py,tests/unit/interface/test_run_command.py,tests/unit/interface/test_validate_command.py,uv.lock,docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-04-duckdb-warehouse-runs-the-demo-roadmap.status.last_good.json,tests/unit/infrastructure/conftest.py || changed: src/adops/templates/demo/adops.yaml (commented duckdb warehouse block under dev), tests/e2e/test_demo_sync.py (module stack fixture + per-kind demo fixture parametrized postgres/duckdb that uncomments the shipped block, public schema reseed of shop, kind-dispatching warehouse() helper, Dagster success count as a per-test delta), docs/roadmaps/agentic-dataops/discoveries.md (51s -> 92s wall-clock line; file was already dirty at start). Verified: both kinds pass in one stack, each alone, and duckdb-first order via a reversed-params scratch copy.",
+      "compensationInvoked": false,
+      "failures": [],
+      "baseRef": "48bd6a2ad1a5e5ad69b18226e18f1250dd75e9e6",
+      "baseDirty": true,
+      "unplannedFiles": []
+    }
+  ]
+}

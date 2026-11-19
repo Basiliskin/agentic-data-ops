@@ -2,6 +2,8 @@ from datetime import UTC, datetime
 
 import pytest
 from fakes import (
+    DUCKDB_PATH,
+    DUCKDB_SETTINGS,
     ENV,
     PIPELINE,
     SETTINGS,
@@ -12,6 +14,7 @@ from fakes import (
     FakeTransform,
     FixedClock,
     RecordingSync,
+    StrictEnv,
     dbt_test,
     facts_with_types,
     healthy_load,
@@ -21,6 +24,7 @@ from adops.application.ports import (
     Clock,
     Orchestrator,
     ResolvedConnection,
+    ResolvedDuckDb,
     RunPlan,
     RunResult,
     SchemaSnapshotStore,
@@ -63,11 +67,12 @@ def run(
     clock=None,
     pipeline=PIPELINE,
     transform=None,
+    settings=SETTINGS,
 ) -> RunResult:
     store = FakeSnapshotStore() if snapshot_store is None else snapshot_store
     clock = FixedClock() if clock is None else clock
     return run_pipeline(
-        pipeline, SETTINGS, environment, env, sync, store, clock, orchestrator, transform
+        pipeline, settings, environment, env, sync, store, clock, orchestrator, transform
     )
 
 
@@ -1066,3 +1071,74 @@ def test_a_step_error_from_the_sync_keeps_its_own_message():
 
     assert raised.value is failed
     assert str(raised.value) == "Pipeline shop, Step orders, table orders: load failed"
+
+
+SOURCE_ONLY_ENV = StrictEnv({"SHOP_DB_PASSWORD": SOURCE_PASSWORD})
+DUCKDB_WAREHOUSE = ResolvedDuckDb(path=DUCKDB_PATH)
+
+
+def run_on_duckdb(sync: RecordingSync, **options) -> RunResult:
+    return run(sync, env=SOURCE_ONLY_ENV, settings=DUCKDB_SETTINGS, **options)
+
+
+def test_a_duckdb_run_needs_only_the_source_secrets():
+    sync = RecordingSync()
+    store = FakeSnapshotStore()
+    transform = FakeTransform(transform_result(dbt_test("unique_orders_id")))
+
+    result = run_on_duckdb(
+        sync, snapshot_store=store, pipeline=SYNC_TRANSFORM_SYNC, transform=transform
+    )
+
+    assert statuses(result) == [
+        ("customers", StepStatus.PASSED),
+        ("transform", StepStatus.PASSED),
+        ("products", StepStatus.PASSED),
+    ]
+
+
+def test_a_duckdb_transform_only_run_needs_no_secret_at_all():
+    transform = FakeTransform()
+
+    result = run(
+        RecordingSync(),
+        env=StrictEnv({}),
+        settings=DUCKDB_SETTINGS,
+        pipeline=TRANSFORM_ONLY,
+        transform=transform,
+    )
+
+    assert result.succeeded
+    assert transform.calls == [("transform", DUCKDB_WAREHOUSE)]
+
+
+def test_a_duckdb_run_hands_every_warehouse_call_the_path_as_written():
+    sync = RecordingSync()
+    store = FakeSnapshotStore()
+    transform = FakeTransform()
+
+    run_on_duckdb(sync, snapshot_store=store, pipeline=SYNC_TRANSFORM_SYNC, transform=transform)
+
+    sources, warehouses = sync.connections[0::2], sync.connections[1::2]
+    assert [type(source) for source in sources] == [ResolvedConnection, ResolvedConnection]
+    assert warehouses == [DUCKDB_WAREHOUSE, DUCKDB_WAREHOUSE]
+    assert store.warehouses == [DUCKDB_WAREHOUSE] * 4
+    assert transform.calls == [("transform", DUCKDB_WAREHOUSE)]
+
+
+def test_a_duckdb_run_still_masks_the_source_password_in_errors():
+    leak = RuntimeError(f"auth failed for password {SOURCE_PASSWORD}")
+    sync = RecordingSync(fail_sync_of={"customers": leak})
+
+    result = run_on_duckdb(sync)
+
+    assert result.steps[0].error == "Step customers: RuntimeError: auth failed for password ***"
+    assert_no_secret_in(repr(result), str(result))
+
+
+def test_a_duckdb_run_leaves_error_text_without_secrets_unchanged():
+    sync = RecordingSync(fail_sync_of={"customers": RuntimeError("disk full")})
+
+    result = run_on_duckdb(sync)
+
+    assert result.steps[0].error == "Step customers: RuntimeError: disk full"

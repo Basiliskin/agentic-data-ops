@@ -303,3 +303,47 @@ def test_non_text_pipeline_is_reported(project):
 
     assert result.exit_code == 1
     assert result.output == "pipelines/p.yaml: not UTF-8 text\n"
+
+
+def write_warehouse(project, warehouse):
+    settings = SETTINGS.replace(
+        "{type: postgres, host: localhost, port: 5432, database: w, user: w,\n"
+        "                password_env: WAREHOUSE_PASSWORD}",
+        warehouse,
+    )
+    (project / "adops.yaml").write_text(settings)
+    write_pipeline(project, "p", pipeline_yaml("p", table_yaml("orders")))
+
+
+def test_a_duckdb_warehouse_validates(project):
+    write_warehouse(project, "{type: duckdb, path: warehouse.duckdb}")
+
+    result = validate("--project", str(project))
+
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize(
+    ("warehouse", "problem"),
+    [
+        (
+            f"{{type: {SENTINEL}, path: x}}",
+            "adops.yaml: environments.dev.warehouse: type must be one of: postgres, duckdb",
+        ),
+        (
+            f"{{type: duckdb, path: x, host: {SENTINEL}}}",
+            "adops.yaml: environments.dev.warehouse.host: Extra inputs are not permitted",
+        ),
+        ("{type: duckdb}", "adops.yaml: environments.dev.warehouse.path: Field required"),
+    ],
+)
+def test_a_malformed_warehouse_is_reported_at_its_yaml_path(project, warehouse, problem):
+    write_warehouse(project, warehouse)
+
+    result = validate("--project", str(project))
+
+    assert result.exit_code == 1
+    assert problem in result.output.splitlines()
+    assert SENTINEL not in result.output
+    assert ".duckdb." not in result.output
+    assert "union_tag" not in result.output

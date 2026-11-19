@@ -15,9 +15,10 @@ from adops.application.ports import (
     Sync,
     Transform,
 )
-from adops.application.run_pipeline import run_pipeline
+from adops.application.run_pipeline import pick_environment, run_pipeline
 from adops.application.secrets import MissingSecretError
 from adops.domain.errors import PipelineValidationError
+from adops.domain.loader import load_project_settings
 from adops.infrastructure.clock import SystemClock
 from adops.infrastructure.dagster_orchestrator import DagsterOrchestrator, JobCompileError
 from adops.infrastructure.dbt_transform import DbtTransform
@@ -34,12 +35,12 @@ class ProjectFileError(Exception):
     pass
 
 
-def build_sync(project: Path, pipeline: str) -> Sync:
-    return DltSync(project, pipeline)
+def build_sync(project: Path, pipeline: str, kind: str) -> Sync:
+    return DltSync(project, pipeline, warehouse_kind=kind)
 
 
-def build_snapshot_store(project: Path) -> SchemaSnapshotStore:
-    return WarehouseSnapshotStore(project, "postgres")
+def build_snapshot_store(project: Path, kind: str) -> SchemaSnapshotStore:
+    return WarehouseSnapshotStore(project, kind)
 
 
 def build_clock() -> Clock:
@@ -50,8 +51,14 @@ def build_orchestrator() -> Orchestrator:
     return DagsterOrchestrator()
 
 
-def build_transform(project: Path) -> Transform:
-    return DbtTransform(project)
+def build_transform(project: Path, kind: str) -> Transform:
+    return DbtTransform(project, warehouse_kind=kind)
+
+
+def warehouse_kind(settings_text: str, environment: str) -> str:
+    """The Warehouse type of the chosen Environment, so adapters are built for that kind."""
+    settings = load_project_settings(settings_text)
+    return pick_environment(settings.environments, environment).warehouse.type
 
 
 def run(
@@ -80,6 +87,7 @@ def run(
 
 def run_project(project: Path, pipeline: str, environment: str) -> RunResult:
     settings_text, pipeline_text = read_project_files(project, pipeline)
+    kind = warehouse_kind(settings_text, environment)
     env = project_env(project)
     dagster_env = {}
     if (project / DAGSTER_FILE).is_file():
@@ -91,11 +99,11 @@ def run_project(project: Path, pipeline: str, environment: str) -> RunResult:
             settings_text,
             environment,
             env,
-            build_sync(project, pipeline),
-            build_snapshot_store(project),
+            build_sync(project, pipeline, kind),
+            build_snapshot_store(project, kind),
             build_clock(),
             build_orchestrator(),
-            build_transform(project),
+            build_transform(project, kind),
         )
 
 

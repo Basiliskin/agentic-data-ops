@@ -1,9 +1,11 @@
 import os
 import re
+import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import duckdb
 import pytest
 from typer.testing import CliRunner
 
@@ -26,12 +28,18 @@ from adops.domain.schema_snapshot import TableShape
 from adops.domain.transform import DbtTestFacts, DbtTestStatus, TransformStep
 from adops.infrastructure.clock import SystemClock
 from adops.infrastructure.dagster_orchestrator import DagsterOrchestrator, JobCompileError
-from adops.infrastructure.dbt_transform import DbtTransform
+from adops.infrastructure.dbt_transform import (
+    DbtTransform,
+    render_duckdb_profile,
+    render_postgres_profile,
+)
 from adops.infrastructure.dlt_sync import DltSync
 from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
 from adops.interface import cli, run_command
 
 runner = CliRunner()
+
+REAL_BUILD_SNAPSHOT_STORE = run_command.build_snapshot_store
 
 SENTINEL = "s3cr3t-run-command-sentinel"
 
@@ -122,7 +130,7 @@ def project(tmp_path, monkeypatch):
 @pytest.fixture
 def sync(monkeypatch):
     fake = FakeSync()
-    monkeypatch.setattr(run_command, "build_sync", lambda project, pipeline: fake)
+    monkeypatch.setattr(run_command, "build_sync", lambda project, pipeline, kind: fake)
     return fake
 
 
@@ -149,7 +157,7 @@ class InMemorySnapshotStore:
 @pytest.fixture(autouse=True)
 def snapshot_store(monkeypatch):
     store = InMemorySnapshotStore()
-    monkeypatch.setattr(run_command, "build_snapshot_store", lambda project: store)
+    monkeypatch.setattr(run_command, "build_snapshot_store", lambda project, kind: store)
     return store
 
 
@@ -178,7 +186,7 @@ def dbt_test(name: str, table: str, status: DbtTestStatus, failures: int) -> Dbt
 def transform(project, monkeypatch):
     (project / "pipelines" / "shop_sync.yaml").write_text(PIPELINE + TRANSFORM_STEP)
     fake = FakeTransform()
-    monkeypatch.setattr(run_command, "build_transform", lambda project_dir: fake)
+    monkeypatch.setattr(run_command, "build_transform", lambda project_dir, kind: fake)
     return fake
 
 
@@ -376,7 +384,7 @@ def test_run_passes_the_project_snapshot_store_to_the_pipeline(project, monkeypa
     built_for: list[Path] = []
     received: list[object] = []
 
-    def build(project_dir: Path) -> InMemorySnapshotStore:
+    def build(project_dir: Path, kind: str) -> InMemorySnapshotStore:
         built_for.append(project_dir)
         return sentinel
 
@@ -414,7 +422,7 @@ def test_run_passes_the_transform_built_for_the_project_to_the_pipeline(project,
     built_for: list[Path] = []
     received: list[object] = []
 
-    def build(project_dir: Path) -> FakeTransform:
+    def build(project_dir: Path, kind: str) -> FakeTransform:
         built_for.append(project_dir)
         built.append(FakeTransform())
         return built[-1]
@@ -442,15 +450,16 @@ def test_first_run_records_a_snapshot_for_every_table(project, sync, orchestrato
 
 def test_real_adapters_are_built_for_the_project(tmp_path, monkeypatch):
     monkeypatch.undo()
-    sync = run_command.build_sync(tmp_path, "shop_sync")
+    sync = run_command.build_sync(tmp_path, "shop_sync", "postgres")
     orchestrator = run_command.build_orchestrator()
-    store = run_command.build_snapshot_store(tmp_path)
+    store = run_command.build_snapshot_store(tmp_path, "postgres")
     clock = run_command.build_clock()
-    transform = run_command.build_transform(tmp_path)
+    transform = run_command.build_transform(tmp_path, "postgres")
 
     assert isinstance(transform, DbtTransform)
     assert isinstance(transform, Transform)
     assert transform.project_root == tmp_path
+    assert transform.render_profile is render_postgres_profile
     assert isinstance(sync, DltSync)
     assert isinstance(sync, Sync)
     assert isinstance(orchestrator, DagsterOrchestrator)
@@ -460,6 +469,140 @@ def test_real_adapters_are_built_for_the_project(tmp_path, monkeypatch):
     assert isinstance(clock, SystemClock)
     assert isinstance(clock, Clock)
     assert vars(store) == {
+        "_project": tmp_path,
         "_pipelines_dir": tmp_path / ".adops" / "dlt",
         "_warehouse_kind": "postgres",
     }
+    assert vars(sync) == {
+        "_project_dir": tmp_path,
+        "_pipelines_dir": tmp_path / ".adops" / "dlt",
+        "_pipeline": "shop_sync",
+        "_source_kind": "postgres",
+        "_warehouse_kind": "postgres",
+    }
+
+
+TWO_KINDS_SETTINGS = """
+environments:
+  dev:
+    warehouse: {type: postgres, host: localhost, port: 5433, database: w, user: w,
+                password_env: ADOPS_TEST_WAREHOUSE_PASSWORD}
+    sources:
+      shop: {type: postgres, host: localhost, port: 5432, database: s, user: s,
+             password_env: ADOPS_TEST_SHOP_PASSWORD}
+  ci:
+    warehouse: {type: duckdb, path: warehouse.duckdb}
+    sources:
+      shop: {type: postgres, host: localhost, port: 5432, database: s, user: s,
+             password_env: ADOPS_TEST_SHOP_PASSWORD}
+"""
+
+
+@pytest.mark.usefixtures("orchestrator")
+@pytest.mark.parametrize(("env", "kind"), [("dev", "postgres"), ("ci", "duckdb")])
+def test_every_adapter_is_built_for_the_chosen_environments_kind(
+    project, sync, snapshot_store, monkeypatch, env, kind
+):
+    (project / "adops.yaml").write_text(TWO_KINDS_SETTINGS)
+    built: list[tuple[str, str]] = []
+
+    def build_sync(project_dir: Path, pipeline: str, kind: str) -> FakeSync:
+        built.append(("sync", kind))
+        return sync
+
+    def build_store(project_dir: Path, kind: str) -> InMemorySnapshotStore:
+        built.append(("store", kind))
+        return snapshot_store
+
+    def build_transform(project_dir: Path, kind: str) -> FakeTransform:
+        built.append(("transform", kind))
+        return FakeTransform()
+
+    monkeypatch.setattr(run_command, "build_sync", build_sync)
+    monkeypatch.setattr(run_command, "build_snapshot_store", build_store)
+    monkeypatch.setattr(run_command, "build_transform", build_transform)
+
+    result = invoke(project, "--env", env)
+
+    assert result.exit_code == 0, result.output
+    assert built == [("sync", kind), ("store", kind), ("transform", kind)]
+
+
+def test_real_adapters_are_built_for_a_duckdb_warehouse(tmp_path):
+    sync = run_command.build_sync(tmp_path, "shop_sync", "duckdb")
+    store = REAL_BUILD_SNAPSHOT_STORE(tmp_path, "duckdb")
+    transform = run_command.build_transform(tmp_path, "duckdb")
+
+    assert vars(sync)["_warehouse_kind"] == "duckdb"
+    assert vars(store)["_warehouse_kind"] == "duckdb"
+    assert isinstance(transform, DbtTransform)
+    assert transform.render_profile is render_duckdb_profile
+
+
+DUCKDB_SETTINGS = """
+environments:
+  dev:
+    warehouse: {{type: duckdb, path: {path}}}
+    sources:
+      shop: {{type: postgres, host: unused, port: 5432, database: "{source}", user: s,
+             password_env: ADOPS_TEST_SHOP_PASSWORD}}
+"""
+
+CUSTOMERS_PIPELINE = """
+name: shop_sync
+steps:
+  - name: sync_shop
+    source: shop
+    tables:
+      - {name: customers, mode: full_refresh, primary_key: id}
+"""
+
+
+@pytest.fixture
+def duckdb_project(project, monkeypatch):
+    """A Project whose Source is a SQLite file and whose dev Warehouse is a DuckDB file."""
+    source = project / "shop.db"
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE customers (id INTEGER PRIMARY KEY, email TEXT)")
+        connection.execute("INSERT INTO customers VALUES (1, 'a@x'), (2, 'b@x'), (3, 'c@x')")
+    (project / "pipelines" / "shop_sync.yaml").write_text(CUSTOMERS_PIPELINE)
+    kinds: list[str] = []
+
+    def sqlite_source_sync(project_dir: Path, pipeline: str, kind: str) -> DltSync:
+        kinds.append(kind)
+        return DltSync(project_dir, pipeline, source_kind="sqlite", warehouse_kind=kind)
+
+    monkeypatch.setattr(run_command, "build_sync", sqlite_source_sync)
+    monkeypatch.setattr(run_command, "build_snapshot_store", REAL_BUILD_SNAPSHOT_STORE)
+
+    def use_warehouse_path(path: str) -> list[str]:
+        (project / "adops.yaml").write_text(DUCKDB_SETTINGS.format(path=path, source=source))
+        return kinds
+
+    return use_warehouse_path
+
+
+def test_run_on_duckdb_loads_the_project_warehouse_under_the_real_orchestrator(
+    project, duckdb_project
+):
+    kinds = duckdb_project("warehouse.duckdb")
+
+    result = invoke(project)
+
+    assert result.exit_code == 0, result.output
+    assert kinds == ["duckdb"]
+    assert "step sync_shop: passed — customers 3 rows" in result.output
+    with duckdb.connect(str(project / "warehouse.duckdb"), read_only=True) as connection:
+        assert connection.execute("SELECT count(*) FROM raw_shop.customers").fetchone() == (3,)
+
+
+def test_unopenable_duckdb_file_fails_with_the_dedicated_message(project, duckdb_project):
+    duckdb_project("missing/dir/wh.duckdb")
+
+    result = invoke(project)
+
+    assert_clean_failure(result)
+    assert "Pipeline shop_sync, Step sync_shop: Warehouse is unreachable" in result.output
+    for leaked in ("missing/dir", str(project), "IOException", "unexpected"):
+        assert leaked not in result.output
+    assert not (project / "missing").exists()

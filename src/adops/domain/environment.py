@@ -1,6 +1,6 @@
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, model_validator
 
 from adops.domain.errors import RuleViolation
 from adops.domain.secret_reference import SecretReference
@@ -36,10 +36,37 @@ class PostgresConnection(BaseModel):
         return data
 
 
+class DuckDbConnection(BaseModel):
+    """Where a DuckDB Warehouse file lives; DuckDB has no password, so no Secret Reference."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: Literal["duckdb"]
+    path: str = Field(min_length=1)
+
+
+WAREHOUSE_TYPES = ("postgres", "duckdb")
+
+
+def _connection_type(value: Any) -> str | None:
+    tag = value.get("type") if isinstance(value, dict) else getattr(value, "type", None)
+    return tag if isinstance(tag, str) else None
+
+
+WarehouseConnection = Annotated[
+    Annotated[PostgresConnection, Tag("postgres")] | Annotated[DuckDbConnection, Tag("duckdb")],
+    Discriminator(
+        _connection_type,
+        custom_error_type="warehouse_type",
+        custom_error_message="type must be one of: " + ", ".join(WAREHOUSE_TYPES),
+    ),
+]
+
+
 class Environment(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    warehouse: PostgresConnection
+    warehouse: WarehouseConnection
     sources: dict[str, PostgresConnection]
 
 

@@ -2,8 +2,14 @@ from pathlib import Path
 
 import duckdb
 import pytest
+from dlt.destinations.exceptions import DatabaseException
 
-from adops.application.ports import ResolvedConnection, SchemaSnapshotStore, WarehouseUnreachable
+from adops.application.ports import (
+    ResolvedConnection,
+    ResolvedDuckDb,
+    SchemaSnapshotStore,
+    WarehouseUnreachable,
+)
 from adops.domain.schema_snapshot import TableShape
 from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
 
@@ -15,9 +21,7 @@ class Warehouse:
     def __init__(self, project: Path) -> None:
         self.project = project
         self.path = project / "warehouse.duckdb"
-        self.connection = ResolvedConnection(
-            host="", port=0, database=str(self.path), user="", password=""
-        )
+        self.connection = ResolvedDuckDb(str(self.path))
 
     def store(self) -> WarehouseSnapshotStore:
         return WarehouseSnapshotStore(self.project, "duckdb")
@@ -104,10 +108,9 @@ def test_quotes_in_keys_are_stored_as_values(warehouse):
     assert store.load(warehouse.connection, "shop", "shop", "orders") is None
 
 
-def test_stored_row_holds_only_names_and_types_and_no_credential(tmp_path):
-    secret = "s3cr3t-snapshot-sentinel"
+def test_stored_row_holds_only_names_and_types_and_no_connection_details(tmp_path):
     path = tmp_path / "warehouse.duckdb"
-    connection = ResolvedConnection(host="", port=0, database=str(path), user="", password=secret)
+    connection = ResolvedDuckDb(str(path))
     store = WarehouseSnapshotStore(tmp_path, "duckdb")
 
     store.save(connection, "shop", "shop", "orders", ORDERS)
@@ -120,8 +123,9 @@ def test_stored_row_holds_only_names_and_types_and_no_credential(tmp_path):
         "orders",
         '{"amount": "numeric(10, 2)", "id": "integer"}',
     )
-    assert all(secret not in str(value) and "://" not in str(value) for value in row)
+    assert all(str(path) not in str(value) and "://" not in str(value) for value in row)
     assert vars(store) == {
+        "_project": tmp_path,
         "_pipelines_dir": tmp_path / ".adops" / "dlt",
         "_warehouse_kind": "duckdb",
     }
@@ -155,3 +159,86 @@ def test_save_to_an_unreachable_warehouse_raises_warehouse_unreachable(tmp_path)
         store.save(UNREACHABLE, "shop", "shop", "orders", ORDERS)
 
     assert_holds_no_driver_text(raised.value)
+
+
+def other_cwd(tmp_path: Path, monkeypatch) -> Path:
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    return cwd
+
+
+def test_a_relative_path_is_saved_and_loaded_in_the_project_from_any_cwd(
+    warehouse, tmp_path, monkeypatch
+):
+    relative = ResolvedDuckDb("wh.duckdb")
+    save_cwd = other_cwd(tmp_path, monkeypatch)
+    warehouse.store().save(relative, "shop", "shop", "orders", ORDERS)
+    monkeypatch.chdir(warehouse.project)
+
+    assert warehouse.store().load(relative, "shop", "shop", "orders") == ORDERS
+    assert (warehouse.project / "wh.duckdb").is_file()
+    assert not (save_cwd / "wh.duckdb").exists()
+
+
+def test_an_absolute_path_is_used_exactly(warehouse, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    warehouse.store().save(
+        ResolvedDuckDb(str(elsewhere / "wh.duckdb")), "shop", "shop", "orders", ORDERS
+    )
+
+    assert (elsewhere / "wh.duckdb").is_file()
+    assert not (warehouse.project / "wh.duckdb").exists()
+
+
+def assert_writable(path: Path) -> None:
+    with duckdb.connect(str(path)) as db:
+        db.execute("CREATE TABLE IF NOT EXISTS lock_probe (id INTEGER)")
+
+
+def test_save_and_load_release_the_duckdb_file(warehouse):
+    warehouse.store().save(warehouse.connection, "shop", "shop", "orders", ORDERS)
+    assert_writable(warehouse.path)
+
+    warehouse.store().load(warehouse.connection, "shop", "shop", "orders")
+    assert_writable(warehouse.path)
+
+
+def test_a_save_failing_inside_its_transaction_releases_the_duckdb_file(warehouse, monkeypatch):
+    warehouse.store().save(warehouse.connection, "shop", "shop", "orders", ORDERS)
+    monkeypatch.setattr(
+        "adops.infrastructure.schema_snapshot_store.json.dumps", lambda *_, **__: object()
+    )
+
+    with pytest.raises(DatabaseException):
+        warehouse.store().save(warehouse.connection, "shop", "shop", "orders", ORDERS)
+
+    assert_writable(warehouse.path)
+
+
+def test_a_duckdb_file_in_a_missing_folder_is_unreachable_and_not_created(warehouse):
+    with pytest.raises(WarehouseUnreachable):
+        warehouse.store().save(
+            ResolvedDuckDb("missing/dir/wh.duckdb"), "shop", "shop", "orders", ORDERS
+        )
+
+    assert not (warehouse.project / "missing").exists()
+
+
+@pytest.mark.parametrize("call", ["save", "load"])
+def test_a_duckdb_file_locked_by_another_process_is_unreachable(
+    warehouse, duckdb_held_by_another_process, call
+):
+    store = warehouse.store()
+    store.save(warehouse.connection, "shop", "shop", "orders", ORDERS)
+
+    with (
+        duckdb_held_by_another_process(warehouse.path),
+        pytest.raises(WarehouseUnreachable),
+    ):
+        if call == "save":
+            store.save(warehouse.connection, "shop", "shop", "orders", ORDERS)
+        else:
+            store.load(warehouse.connection, "shop", "shop", "orders")
