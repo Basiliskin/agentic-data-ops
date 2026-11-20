@@ -5,7 +5,7 @@
 - 2026-11-17 | horizon 1 | Can dlt schema contracts detect renamed/dropped/retyped Postgres columns as a Breaking Change, or is an adops schema snapshot needed? — resolved by decision 2026-11-18
 - 2026-11-17 | horizon 1 | How does 'halt this Step and downstream' work once Steps form a graph rather than a linear chain? — resolved by decision 2026-11-18
 - 2026-11-17 | horizon 1 | How do Pipelines run on a schedule when Dagster runs in-process only (daemon/code location vs cron/CI)?
-- 2026-11-17 | horizon 1 | How do Branch Environment schemas line up with dlt datasets and dbt --defer --state, and where does stage dbt state live?
+- 2026-11-17 | horizon 1 | How do Branch Environment schemas line up with dlt datasets and dbt --defer --state, and where does stage dbt state live? — resolved by decision 2026-11-19
 - 2026-11-17 | horizon 1 | How can PR workflows reach the stage Warehouse without exposing secrets to forked PRs?
 - 2026-11-17 | horizon 1 | Which engine performs Reverse Sync into Postgres, how is the Preview diff computed without writing, and what are delete semantics? — resolved by decision 2026-11-19
 - 2026-11-17 | horizon 1 | Does the single adops.yaml Environment model hold up for stage/prod deployments and generated Branch Environments?
@@ -22,3 +22,8 @@
 - 2026-11-18 | horizon 2 | Which horizon redacts dlt load-failure output (row values, tracebacks) so a failed load never prints Source data? — resolved by decision 2026-11-18
 - 2026-11-18 | horizon 2 | When a Source column drops NOT NULL, the Warehouse column keeps it and the next load fails with a raw constraint error (row values on Postgres) — relax it automatically, or report it as a Breaking Change?
 - 2026-11-18 | horizon 3 | DbtTransform reports a dbt source test under the source name, not its table; fix _tested_model (e.g. from test_metadata model kwarg) before users write source tests
+- 2026-11-19 | horizon 6 | How does a GitHub-hosted runner reach the stage Warehouse when stage is localhost Postgres or a local DuckDB file?
+- 2026-11-19 | horizon 6 | Does merge→stage run every Pipeline or only changed ones, given stage writes the fingerprints branches compare against?
+- 2026-11-19 | horizon 6 | What happens when two PRs run --branch at once against the same stage Warehouse (no locking, single-writer DuckDB)?
+- 2026-11-19 | horizon 6 | How do generated workflows install adops at a pinned version while keeping ADR-0008 (no tool code copied into the Project)?
+- 2026-11-19 | horizon 6 | How is a Breaking Change in a PR branch handled unattended, given accept-schema --branch is a recorded gap?

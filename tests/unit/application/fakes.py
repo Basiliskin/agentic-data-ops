@@ -391,3 +391,33 @@ class FakeReverseSync:
         self.applied.append((step.name, target, diff))
         if self.fail_apply is not None:
             raise self.fail_apply
+
+
+@dataclass
+class FakeFingerprintStore:
+    """Holds Step Fingerprints per Pipeline in memory, in the order they were saved."""
+
+    fingerprints: dict[str, dict[str, str]] = field(default_factory=dict)
+    fail_save: Exception | None = None
+    saves: list[tuple[str, str]] = field(default_factory=list)
+
+    def load(self, pipeline: str) -> Mapping[str, str]:
+        return dict(self.fingerprints.get(pipeline, {}))
+
+    def save(self, pipeline: str, step: str, fingerprint: str) -> None:
+        if self.fail_save is not None:
+            raise self.fail_save
+        self.saves.append((pipeline, step))
+        self.fingerprints.setdefault(pipeline, {})[step] = fingerprint
+
+
+@dataclass
+class FakeProjectFiles:
+    """Serves fixed file trees per Project folder and records which folders were read."""
+
+    trees: dict[str, dict[str, bytes]] = field(default_factory=dict)
+    reads: list[str] = field(default_factory=list)
+
+    def read_tree(self, relative_dir: str) -> Mapping[str, bytes]:
+        self.reads.append(relative_dir)
+        return dict(self.trees.get(relative_dir, {}))

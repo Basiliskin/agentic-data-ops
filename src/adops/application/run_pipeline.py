@@ -7,6 +7,7 @@ from adops.application.ports import (
     MASK,
     Clock,
     Orchestrator,
+    ProjectFiles,
     ResolvedConnection,
     ResolvedWarehouse,
     ReverseSync,
@@ -16,6 +17,7 @@ from adops.application.ports import (
     RunResult,
     SchemaSnapshotStore,
     SourceUnreachable,
+    StepFingerprintStore,
     StepOutcome,
     StepReport,
     StepStatus,
@@ -32,6 +34,17 @@ from adops.application.secrets import (
     resolve_secret_references,
     resolve_warehouse,
     secret_references,
+)
+from adops.domain.branch_environment import (
+    STAGE,
+    SchemaLayout,
+    branch_environment_name,
+    canonical_step_json,
+    first_changed_step,
+    raw_schema_var,
+    saves_stage_fingerprint,
+    step_fingerprint,
+    uses_raw_schema_var,
 )
 from adops.domain.checks import (
     CheckName,
@@ -53,7 +66,7 @@ from adops.domain.loader import (
     load_pipeline,
     load_project_settings,
 )
-from adops.domain.pipeline import Pipeline, SyncStep
+from adops.domain.pipeline import Pipeline, Step, SyncStep
 from adops.domain.reverse_sync import ReverseSyncStep
 from adops.domain.reverse_sync_diff import Diff, compute_diff, preview_sample, writes_allowed
 from adops.domain.schema_snapshot import BreakingChange, TableShape, find_breaking_changes
@@ -133,6 +146,71 @@ class BreakingChangeError(StepError):
                 for table, found in self.changes.items()
             )
         )
+
+
+class StageNotRunError(Exception):
+    def __init__(self, pipeline: str) -> None:
+        super().__init__(
+            f"Pipeline {pipeline}: stage has no Step Fingerprints; run the Pipeline in stage first"
+        )
+
+
+class BranchSourcesNotParameterizedError(PipelineValidationError):
+    def __init__(self, transform_step: str, source: str) -> None:
+        self.source = source
+        variable = raw_schema_var(source)
+        schema = f"{{{{ var('{variable}', '{SchemaLayout.default().raw(source)}') }}}}"
+        super().__init__(
+            [
+                f"Step {transform_step}: the Branch rebuilds Source {source}, but the dbt sources "
+                f"do not read {variable}, so dbt would read stage's tables; set the schema of "
+                f'Source {source} in sources.yml to "{schema}"'
+            ]
+        )
+
+
+@dataclass(frozen=True)
+class StepFingerprinting:
+    store: StepFingerprintStore
+    files: ProjectFiles
+
+
+@dataclass(frozen=True)
+class BranchRun:
+    """A Branch Environment's run: Steps before `first_changed` are deferred to stage.
+
+    `first_changed` is None when every Step matches stage, so nothing needs to run.
+    """
+
+    environment: str
+    stage_fingerprints: Mapping[str, str]
+    first_changed: int | None
+
+
+@dataclass(frozen=True)
+class FingerprintSavingStep:
+    """Saves the Step's fingerprint once the Step, Checks included, has passed."""
+
+    task: StepTask
+    pipeline: str
+    fingerprint: str
+    store: StepFingerprintStore
+
+    @property
+    def name(self) -> str:
+        return self.task.name
+
+    def __call__(self, sync: Sync) -> StepOutcome:
+        outcome = self.task(sync)
+        try:
+            self.store.save(self.pipeline, self.name, self.fingerprint)
+            return outcome
+        except Exception as error:
+            # Only the type: the store's error text may hold a Warehouse secret.
+            failure = SyncFailedError(
+                f"Step {self.name}: step fingerprint store: {type(error).__name__}"
+            )
+        raise failure
 
 
 @dataclass(frozen=True)
@@ -379,12 +457,24 @@ def run_pipeline(
     orchestrator: Orchestrator | None = None,
     transform: Transform | None = None,
     reverse_sync: ReverseSync | None = None,
+    fingerprinting: StepFingerprinting | None = None,
+    branch: BranchRun | None = None,
 ) -> RunResult:
+    """Run a Pipeline; a Branch run uses stage's settings under the Branch Environment's name."""
     pipeline = load_pipeline(pipeline_text)
     settings = load_project_settings(settings_text)
-    environment = pick_environment(settings.environments, environment_name)
+    if branch is None:
+        environment = pick_environment(settings.environments, environment_name)
+        first: int | None = 0
+    else:
+        if branch.environment != environment_name:
+            raise ValueError("a Branch run must run under its Branch Environment's name")
+        environment = stage_environment(settings.environments)
+        first = branch.first_changed
     ensure_sources_defined(pipeline, environment)
     ensure_targets_defined(pipeline, environment)
+    if first is None:
+        return RunResult(pipeline.name, environment_name, _deferred(pipeline.steps))
     plan = _build_plan(
         pipeline,
         environment_name,
@@ -394,8 +484,85 @@ def run_pipeline(
         clock,
         transform,
         reverse_sync,
+        first,
     )
-    return (orchestrator or InOrderOrchestrator()).execute(plan, sync)
+    if fingerprinting is not None and saves_stage_fingerprint(environment_name):
+        plan = _saving_fingerprints(plan, pipeline, fingerprinting)
+    result = (orchestrator or InOrderOrchestrator()).execute(plan, sync)
+    deferred = _deferred(pipeline.steps[:first])
+    return RunResult(result.pipeline, result.environment, deferred + result.steps)
+
+
+def plan_branch_run(
+    pipeline_text: str, environment: str, fingerprinting: StepFingerprinting
+) -> BranchRun:
+    pipeline = load_pipeline(pipeline_text)
+    stage = fingerprinting.store.load(pipeline.name)
+    if not stage:
+        raise StageNotRunError(pipeline.name)
+    current = current_fingerprints(pipeline.steps, fingerprinting.files)
+    first = first_changed_step(current, stage)
+    if first is not None:
+        _ensure_sources_parameterized(pipeline.steps[first:], fingerprinting.files)
+    return BranchRun(environment, stage, first)
+
+
+def current_fingerprints(
+    steps: Sequence[Step], project_files: ProjectFiles
+) -> tuple[tuple[str, str], ...]:
+    """Each Step's name and fingerprint in Step order; a Transform's covers its dbt project."""
+    return tuple(
+        (step.name, step_fingerprint(canonical_step_json(step), _step_files(step, project_files)))
+        for step in steps
+    )
+
+
+def _step_files(step: Step, project_files: ProjectFiles) -> Mapping[str, bytes]:
+    if isinstance(step, TransformStep):
+        return project_files.read_tree(step.project)
+    return {}
+
+
+def _ensure_sources_parameterized(running: Sequence[Step], project_files: ProjectFiles) -> None:
+    rebuilt: dict[str, None] = {}
+    for step in running:
+        if isinstance(step, SyncStep):
+            rebuilt[step.source] = None
+        elif isinstance(step, TransformStep):
+            files = project_files.read_tree(step.project)
+            for source in rebuilt:
+                if not uses_raw_schema_var(files, source):
+                    raise BranchSourcesNotParameterizedError(step.name, source)
+
+
+def _saving_fingerprints(
+    plan: RunPlan, pipeline: Pipeline, fingerprinting: StepFingerprinting
+) -> RunPlan:
+    fingerprints = dict(current_fingerprints(pipeline.steps, fingerprinting.files))
+    steps = tuple(
+        FingerprintSavingStep(task, pipeline.name, fingerprints[task.name], fingerprinting.store)
+        for task in plan.steps
+    )
+    return RunPlan(plan.pipeline, plan.environment, steps)
+
+
+def _deferred(steps: Sequence[Step]) -> tuple[StepReport, ...]:
+    return tuple(StepReport(step.name, StepStatus.DEFERRED) for step in steps)
+
+
+def stage_environment(environments: Mapping[str, Environment]) -> Environment:
+    if STAGE not in environments:
+        location = format_path(("environments", STAGE))
+        raise PipelineValidationError(
+            [f"{location}: a Branch run needs a stage Environment in adops.yaml, and none is set"]
+        )
+    return environments[STAGE]
+
+
+def stage_branch_name(stage: Environment, branch: str) -> str:
+    """The Branch Environment a Git branch gets, sized to fit stage's longest Source name."""
+    longest_source = max(stage.sources, key=lambda name: len(name.encode()), default="")
+    return branch_environment_name(branch, longest_source)
 
 
 def pick_environment(environments: Mapping[str, Environment], name: str) -> Environment:
@@ -417,21 +584,19 @@ def _build_plan(
     clock: Clock,
     transform: Transform | None,
     reverse_sync: ReverseSync | None,
+    first: int = 0,
 ) -> RunPlan:
-    sources = [
-        environment.sources[step.source] for step in pipeline.steps if isinstance(step, SyncStep)
-    ]
+    running = pipeline.steps[first:]
+    sources = [environment.sources[step.source] for step in running if isinstance(step, SyncStep)]
     targets = [
-        environment.targets[step.target]
-        for step in pipeline.steps
-        if isinstance(step, ReverseSyncStep)
+        environment.targets[step.target] for step in running if isinstance(step, ReverseSyncStep)
     ]
     secrets = resolve_secret_references(
         env, secret_references(environment.warehouse, sources, targets)
     )
     warehouse = resolve_warehouse(environment.warehouse, secrets)
     steps: list[StepTask] = []
-    for index, step in enumerate(pipeline.steps):
+    for index, step in enumerate(running, start=first):
         if isinstance(step, SyncStep):
             source = resolve_connection(environment.sources[step.source], secrets)
             steps.append(PlannedStep(step, source, warehouse, pipeline.name, snapshot_store, clock))

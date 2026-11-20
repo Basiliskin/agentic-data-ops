@@ -4,6 +4,7 @@ import typer
 
 from adops import __version__
 from adops.interface.accept_schema_command import accept_schema
+from adops.interface.drop_branch_command import drop_branch
 from adops.interface.init_command import init
 from adops.interface.run_command import run
 from adops.interface.validate_command import validate
@@ -13,6 +14,7 @@ app.command()(init)
 app.command()(run)
 app.command()(validate)
 app.command()(accept_schema)
+app.command()(drop_branch)
 
 
 def _print_version(value: bool) -> None:

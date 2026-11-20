@@ -153,6 +153,22 @@ class SchemaSnapshotStore(Protocol):
 
 
 @runtime_checkable
+class StepFingerprintStore(Protocol):
+    """Keeps each Step's Step Fingerprint from stage's last successful run, in Step order."""
+
+    def load(self, pipeline: str) -> Mapping[str, str]: ...
+
+    def save(self, pipeline: str, step: str, fingerprint: str) -> None: ...
+
+
+@runtime_checkable
+class ProjectFiles(Protocol):
+    def read_tree(self, relative_dir: str) -> Mapping[str, bytes]:
+        """Every file under a Project folder, keyed by its POSIX path relative to that folder."""
+        ...
+
+
+@runtime_checkable
 class Clock(Protocol):
     def now(self) -> datetime:
         """The current moment, timezone-aware."""
@@ -164,6 +180,10 @@ class StepStatus(StrEnum):
     FAILED = "failed"
     CHECK_FAILED = "check_failed"
     SKIPPED = "skipped"
+    DEFERRED = "deferred"
+
+
+SUCCEEDED = frozenset({StepStatus.PASSED, StepStatus.DEFERRED})
 
 
 @dataclass(frozen=True)
@@ -219,7 +239,7 @@ class RunResult:
 
     @property
     def succeeded(self) -> bool:
-        return all(step.status is StepStatus.PASSED for step in self.steps)
+        return all(step.status in SUCCEEDED for step in self.steps)
 
 
 @runtime_checkable

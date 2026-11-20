@@ -33,3 +33,10 @@
 - 2026-11-19 | horizon 5 | The CI unit job runs a Postgres service and the Reverse Sync writer is unit-tested against it; the fixture fails, never skips, without ADOPS_TEST_POSTGRES_DSN — user choice
 - 2026-11-19 | horizon 5 | The Preview sample shows at most 5 keys per kind plus changed column names, never values — so no PII or secret reaches output
 - 2026-11-19 | horizon 5 | The demo ships a stage Environment (warehouse_stage DB) and Reverse Syncs a new per-customer dbt model customer_stats into shop.customer_stats — user choice; supersedes the h4 'no new Environment' line for stage
+- 2026-11-19 | horizon 6 | Branch schemas are per kind: br_<branch>__raw_<source>, br_<branch>__analytics, br_<branch>__adops in the stage Warehouse; clarifies ADR-0006 (env_<branch>) — user choice
+- 2026-11-19 | horizon 6 | A Changed Step is found by Step Fingerprint vs stage's last successful run (saved only after Checks pass, only in stage); no Git — user choice
+- 2026-11-19 | horizon 6 | Branch Environments are dropped by a manual `adops drop-branch <name>` (exact br_<name>__ prefix, quoted, CASCADE); CI automation is deferred — user choice
+- 2026-11-19 | horizon 6 | accept-schema --branch is a known gap: branch baselines start fresh, so a Breaking Change in a branch is rare — user choice
+- 2026-11-19 | horizon 6 | dbt sources read the raw schema via var('adops_raw_schema_<source>', 'raw_<source>'); a branch rebuilding a Sync fails fast if sources lack it
+- 2026-11-19 | horizon 6 | dlt dataset-name normalization is disabled only for non-default schemas, because it collapses '__' (verified on DuckDB); dev/stage stay byte-identical
+- 2026-11-20 | horizon 6 | ADR-0006 rewritten in place with a dated Clarification: br_<branch>__<schema> per kind, manual drop-branch, dlt __ normalization off, adops_raw_schema_<source> dbt var, accept-schema --branch gap

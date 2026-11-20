@@ -22,6 +22,7 @@ from adops.application.ports import (
     WarehouseUnreachable,
 )
 from adops.application.run_pipeline import SyncFailedError
+from adops.domain.branch_environment import SchemaLayout
 from adops.domain.checks import LoadFacts, SourceFacts, SyncMode
 from adops.domain.pipeline import (
     AcceptedValuesCheck,
@@ -34,6 +35,7 @@ from adops.domain.pipeline import (
 from adops.domain.schema_snapshot import DLT_COLUMN_PREFIX, normalize_column_type
 
 NAMING = NamingConvention()
+DEFAULT_LAYOUT = SchemaLayout.default()
 
 
 def _silence_dlt_logger() -> None:
@@ -83,7 +85,9 @@ def duckdb_file(project_dir: Path, path: str) -> Path:
     return project_dir / path
 
 
-def _postgres_destination(connection: ResolvedConnection, _project_dir: Path) -> Destination:
+def _postgres_destination(
+    connection: ResolvedConnection, _project_dir: Path, **options: Any
+) -> Destination:
     return dlt.destinations.postgres(
         credentials={
             "host": connection.host,
@@ -91,12 +95,17 @@ def _postgres_destination(connection: ResolvedConnection, _project_dir: Path) ->
             "database": connection.database,
             "username": connection.user,
             "password": connection.password,
-        }
+        },
+        **options,
     )
 
 
-def _duckdb_destination(connection: ResolvedDuckDb, project_dir: Path) -> Destination:
-    return dlt.destinations.duckdb(credentials=str(duckdb_file(project_dir, connection.path)))
+def _duckdb_destination(
+    connection: ResolvedDuckDb, project_dir: Path, **options: Any
+) -> Destination:
+    return dlt.destinations.duckdb(
+        credentials=str(duckdb_file(project_dir, connection.path)), **options
+    )
 
 
 SOURCE_ENGINES: dict[str, Callable[[ResolvedConnection], sa.Engine]] = {
@@ -104,7 +113,7 @@ SOURCE_ENGINES: dict[str, Callable[[ResolvedConnection], sa.Engine]] = {
     "sqlite": _sqlite_engine,
 }
 
-WAREHOUSE_DESTINATIONS: dict[str, Callable[[Any, Path], Destination]] = {
+WAREHOUSE_DESTINATIONS: dict[str, Callable[..., Destination]] = {
     "postgres": _postgres_destination,
     "duckdb": _duckdb_destination,
 }
@@ -117,11 +126,19 @@ def source_engine(kind: str, connection: ResolvedConnection) -> sa.Engine:
 
 
 def warehouse_destination(
-    kind: str, connection: ResolvedWarehouse, project_dir: Path
+    kind: str,
+    connection: ResolvedWarehouse,
+    project_dir: Path,
+    *,
+    branch_schemas: bool = False,
 ) -> Destination:
     if kind not in WAREHOUSE_DESTINATIONS:
         raise UnknownConnectionKindError("Warehouse", kind, WAREHOUSE_DESTINATIONS)
-    return WAREHOUSE_DESTINATIONS[kind](connection, project_dir)
+    options: dict[str, Any] = {}
+    if branch_schemas:
+        # dlt would otherwise collapse the "__" in Branch Schema names to "_".
+        options["enable_dataset_name_normalization"] = False
+    return WAREHOUSE_DESTINATIONS[kind](connection, project_dir, **options)
 
 
 class DltSync:
@@ -135,8 +152,10 @@ class DltSync:
         environment: str,
         warehouse_kind: str,
         source_kind: str = "postgres",
+        layout: SchemaLayout = DEFAULT_LAYOUT,
     ) -> None:
         self._project_dir = project_dir
+        self._layout = layout
         self._pipelines_dir = local_state_dir(project_dir, environment)
         self._pipeline = pipeline
         self._source_kind = source_kind
@@ -202,8 +221,13 @@ class DltSync:
         return dlt.pipeline(
             pipeline_name=f"adops_{self._pipeline}_{step.name}",
             pipelines_dir=str(self._pipelines_dir),
-            destination=warehouse_destination(self._warehouse_kind, warehouse, self._project_dir),
-            dataset_name=f"raw_{step.source}",
+            destination=warehouse_destination(
+                self._warehouse_kind,
+                warehouse,
+                self._project_dir,
+                branch_schemas=self._layout != DEFAULT_LAYOUT,
+            ),
+            dataset_name=self._layout.raw(step.source),
         )
 
 

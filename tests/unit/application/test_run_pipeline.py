@@ -1,7 +1,9 @@
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import pytest
 from fakes import (
+    CRM_TARGET,
     DUCKDB_PATH,
     DUCKDB_SETTINGS,
     ENV,
@@ -16,6 +18,8 @@ from fakes import (
     TARGET_PASSWORD,
     TARGET_ROWS,
     WAREHOUSE_PASSWORD,
+    FakeFingerprintStore,
+    FakeProjectFiles,
     FakeReverseSync,
     FakeSnapshotStore,
     FakeTransform,
@@ -31,6 +35,7 @@ from adops.application import run_pipeline as run_pipeline_module
 from adops.application.ports import (
     Clock,
     Orchestrator,
+    ProjectFiles,
     ResolvedConnection,
     ResolvedDuckDb,
     ReverseSync,
@@ -38,6 +43,8 @@ from adops.application.ports import (
     RunResult,
     SchemaSnapshotStore,
     SourceUnreachable,
+    StepFingerprintStore,
+    StepReport,
     StepStatus,
     Sync,
     TargetUnreachable,
@@ -46,6 +53,8 @@ from adops.application.ports import (
     WriteFailed,
 )
 from adops.application.run_pipeline import (
+    BranchRun,
+    BranchSourcesNotParameterizedError,
     BreakingChangeError,
     CheckFailedError,
     EmptySourceTableError,
@@ -56,19 +65,24 @@ from adops.application.run_pipeline import (
     ReverseSyncTargetUnreachableError,
     ReverseSyncWriteFailedError,
     SourceUnreachableError,
+    StageNotRunError,
     StepError,
+    StepFingerprinting,
     SyncFailedError,
     TransformFailedError,
     WarehouseUnreachableError,
     _build_plan,
+    current_fingerprints,
+    plan_branch_run,
     run_pipeline,
 )
 from adops.application.secrets import MissingSecretError
+from adops.domain.branch_environment import STAGE
 from adops.domain.checks import CheckName, CheckResult, CheckStatus, SourceFacts
 from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import load_pipeline, load_project_settings
 from adops.domain.pipeline import Pipeline
-from adops.domain.reverse_sync_diff import Diff, PreviewSample, compute_diff
+from adops.domain.reverse_sync_diff import Diff, PreviewSample, compute_diff, writes_allowed
 from adops.domain.schema_snapshot import TableShape
 
 SENTINELS = (SOURCE_PASSWORD, WAREHOUSE_PASSWORD, TARGET_PASSWORD, STAGE_WAREHOUSE_PASSWORD)
@@ -1447,3 +1461,353 @@ def test_a_step_of_an_unknown_kind_is_a_programming_error():
             None,
             None,
         )
+
+
+SHOP_SOURCE = """
+      shop:
+        type: postgres
+        host: localhost
+        port: 5432
+        database: shop
+        user: shop
+        password_env: SHOP_DB_PASSWORD
+"""
+
+BRANCH_SETTINGS = f"""
+environments:
+  dev:
+    warehouse:
+      type: duckdb
+      path: dev.duckdb
+    sources:{SHOP_SOURCE}
+    targets:{CRM_TARGET}
+  stage:
+    warehouse:
+      type: duckdb
+      path: stage.duckdb
+    sources:{SHOP_SOURCE}
+    targets:{CRM_TARGET}
+"""
+
+NO_STAGE_SETTINGS = BRANCH_SETTINGS.split("  stage:")[0]
+
+BRANCH_ENV = {"SHOP_DB_PASSWORD": SOURCE_PASSWORD, "CRM_TARGET_PASSWORD": TARGET_PASSWORD}
+
+BRANCH_PIPELINE = """
+name: shop
+steps:
+  - name: customers
+    source: shop
+    tables:
+      - name: customers
+        mode: full_refresh
+        primary_key: id
+  - {name: build, type: transform, project: dbt}
+  - type: reverse_sync
+    name: push_stats
+    model: customer_stats
+    target: crm
+    target_table: customer_stats
+    key: customer_id
+    mapping:
+      order_count: orders
+      total_amount: total
+"""
+
+BRANCH = "br_feat"
+STEP_NAMES = ["customers", "build", "push_stats"]
+PARAMETERIZED_SOURCES = b"schema: \"{{ var('adops_raw_schema_shop', 'raw_shop') }}\""
+HARD_CODED_SOURCES = b"schema: raw_shop"
+
+
+def dbt_files(
+    sources: bytes = PARAMETERIZED_SOURCES, model: bytes = b"select 1"
+) -> FakeProjectFiles:
+    return FakeProjectFiles(
+        {"dbt": {"models/sources.yml": sources, "models/customer_orders.sql": model}}
+    )
+
+
+def fingerprints_of(files: ProjectFiles) -> dict[str, str]:
+    return dict(current_fingerprints(load_pipeline(BRANCH_PIPELINE).steps, files))
+
+
+def store_matching(files: ProjectFiles, **changed: str) -> FakeFingerprintStore:
+    return FakeFingerprintStore({"shop": {**fingerprints_of(files), **changed}})
+
+
+@dataclass
+class CountingOrchestrator:
+    plans: list[RunPlan] = field(default_factory=list)
+
+    def execute(self, plan: RunPlan, sync: Sync) -> RunResult:
+        self.plans.append(plan)
+        return InOrderOrchestrator().execute(plan, sync)
+
+
+def run_with_fingerprints(
+    store: FakeFingerprintStore,
+    files: FakeProjectFiles,
+    environment: str = STAGE,
+    transform: FakeTransform | None = None,
+    engine: FakeReverseSync | None = None,
+) -> RunResult:
+    return run_pipeline(
+        BRANCH_PIPELINE,
+        BRANCH_SETTINGS,
+        environment,
+        BRANCH_ENV,
+        RecordingSync(),
+        FakeSnapshotStore(),
+        FixedClock(),
+        None,
+        transform or FakeTransform(),
+        engine or FakeReverseSync(),
+        StepFingerprinting(store, files),
+    )
+
+
+def run_branch(
+    store: FakeFingerprintStore,
+    files: FakeProjectFiles,
+    sync: RecordingSync | None = None,
+    orchestrator: CountingOrchestrator | None = None,
+    engine: FakeReverseSync | None = None,
+    settings: str = BRANCH_SETTINGS,
+    env=BRANCH_ENV,
+) -> RunResult:
+    fingerprinting = StepFingerprinting(store, files)
+    branch = plan_branch_run(BRANCH_PIPELINE, BRANCH, fingerprinting)
+    return run_pipeline(
+        BRANCH_PIPELINE,
+        settings,
+        BRANCH,
+        env,
+        sync or RecordingSync(),
+        FakeSnapshotStore(),
+        FixedClock(),
+        orchestrator,
+        FakeTransform(),
+        engine or FakeReverseSync(),
+        fingerprinting,
+        branch,
+    )
+
+
+def test_fingerprint_fakes_satisfy_their_ports():
+    assert isinstance(FakeFingerprintStore(), StepFingerprintStore)
+    assert isinstance(FakeProjectFiles(), ProjectFiles)
+
+
+def test_a_passing_stage_run_saves_every_steps_fingerprint_in_step_order():
+    store, files = FakeFingerprintStore(), dbt_files()
+
+    result = run_with_fingerprints(store, files)
+
+    assert result.succeeded
+    assert store.saves == [("shop", name) for name in STEP_NAMES]
+    assert store.fingerprints["shop"] == fingerprints_of(files)
+
+
+def test_a_failed_check_saves_the_earlier_steps_fingerprint_only():
+    store = FakeFingerprintStore()
+    failing = FakeTransform(transform_result(dbt_test("unique_id", status="fail")))
+
+    result = run_with_fingerprints(store, dbt_files(), transform=failing)
+
+    assert statuses(result) == [
+        ("customers", StepStatus.PASSED),
+        ("build", StepStatus.CHECK_FAILED),
+        ("push_stats", StepStatus.SKIPPED),
+    ]
+    assert store.saves == [("shop", "customers")]
+
+
+def test_a_raised_step_error_saves_no_fingerprint_for_that_step():
+    store = FakeFingerprintStore()
+
+    result = run_with_fingerprints(store, dbt_files(), transform=FakeTransform(fail_with=OSError()))
+
+    assert result.steps[1].status is StepStatus.FAILED
+    assert store.saves == [("shop", "customers")]
+
+
+@pytest.mark.parametrize("environment", ["dev", BRANCH])
+def test_dev_and_branch_runs_never_save_a_fingerprint(environment):
+    files = dbt_files()
+    store = store_matching(files, build="old")
+
+    if environment == BRANCH:
+        result = run_branch(store, files)
+    else:
+        result = run_with_fingerprints(store, files, environment)
+
+    assert result.succeeded
+    assert store.saves == []
+
+
+def test_the_fingerprint_stage_saves_is_the_one_a_branch_compares():
+    store, files = FakeFingerprintStore(), dbt_files()
+    run_with_fingerprints(store, files)
+
+    branch = plan_branch_run(BRANCH_PIPELINE, BRANCH, StepFingerprinting(store, files))
+
+    assert branch == BranchRun(BRANCH, fingerprints_of(files), None)
+
+
+def test_a_changed_dbt_file_changes_only_the_transform_steps_fingerprint():
+    store = FakeFingerprintStore()
+    run_with_fingerprints(store, dbt_files())
+
+    edited = dbt_files(model=b"select 2")
+    branch = plan_branch_run(BRANCH_PIPELINE, BRANCH, StepFingerprinting(store, edited))
+
+    assert branch.first_changed == 1
+    assert edited.reads == ["dbt", "dbt"]
+
+
+def test_a_branch_defers_steps_before_the_first_changed_one_and_runs_every_later_one():
+    files = dbt_files()
+    sync, orchestrator = RecordingSync(), CountingOrchestrator()
+
+    result = run_branch(store_matching(files, build="old"), files, sync, orchestrator)
+
+    [plan] = orchestrator.plans
+    assert [task.name for task in plan.steps] == ["build", "push_stats"]
+    assert sync.calls == []
+    assert statuses(result) == [
+        ("customers", StepStatus.DEFERRED),
+        ("build", StepStatus.PASSED),
+        ("push_stats", StepStatus.PASSED),
+    ]
+    assert result.environment == BRANCH
+    assert result.succeeded
+
+
+def test_a_branch_that_matches_stage_never_calls_the_orchestrator():
+    files = dbt_files()
+    sync, orchestrator = RecordingSync(), CountingOrchestrator()
+
+    result = run_branch(store_matching(files), files, sync, orchestrator)
+
+    assert orchestrator.plans == []
+    assert sync.calls == []
+    assert result == RunResult(
+        "shop", BRANCH, tuple(StepReport(name, StepStatus.DEFERRED) for name in STEP_NAMES)
+    )
+    assert result.succeeded
+
+
+def test_a_deferred_sync_needs_no_source_secret():
+    files = dbt_files()
+    env = StrictEnv({"CRM_TARGET_PASSWORD": TARGET_PASSWORD})
+
+    result = run_branch(store_matching(files, build="old"), files, env=env)
+
+    assert result.succeeded
+
+
+def test_a_failed_step_after_a_deferred_one_fails_the_run():
+    result = RunResult(
+        "shop",
+        BRANCH,
+        (StepReport("a", StepStatus.DEFERRED), StepReport("b", StepStatus.CHECK_FAILED)),
+    )
+
+    assert not result.succeeded
+
+
+def test_a_branch_before_any_stage_run_is_told_to_run_stage_first():
+    with pytest.raises(StageNotRunError, match="run the Pipeline in stage first"):
+        plan_branch_run(
+            BRANCH_PIPELINE, BRANCH, StepFingerprinting(FakeFingerprintStore(), dbt_files())
+        )
+
+
+def test_a_branch_run_without_a_stage_environment_is_rejected_by_name():
+    files = dbt_files()
+
+    with pytest.raises(PipelineValidationError) as raised:
+        run_branch(store_matching(files, build="old"), files, settings=NO_STAGE_SETTINGS)
+
+    assert raised.value.problems == (
+        "environments.stage: a Branch run needs a stage Environment in adops.yaml, "
+        "and none is set",
+    )
+
+
+def test_a_branch_run_must_run_under_its_branch_environments_name():
+    branch = BranchRun(BRANCH, {"customers": "x"}, 0)
+
+    with pytest.raises(ValueError, match="Branch Environment's name"):
+        run_pipeline(
+            BRANCH_PIPELINE,
+            BRANCH_SETTINGS,
+            STAGE,
+            BRANCH_ENV,
+            RecordingSync(),
+            FakeSnapshotStore(),
+            FixedClock(),
+            branch=branch,
+        )
+
+
+def test_a_branch_reverse_sync_previews_even_though_stage_settings_write():
+    files = dbt_files()
+    stage_engine, branch_engine = FakeReverseSync(), FakeReverseSync()
+    orchestrator = CountingOrchestrator()
+    run_with_fingerprints(FakeFingerprintStore(), files, engine=stage_engine)
+
+    result = run_branch(
+        store_matching(files, build="old"), files, orchestrator=orchestrator, engine=branch_engine
+    )
+
+    assert writes_allowed(STAGE)
+    assert len(stage_engine.applied) == 1
+    reverse_task = orchestrator.plans[0].steps[-1]
+    assert isinstance(reverse_task, PlannedReverseSyncStep)
+    assert reverse_task.environment.startswith("br_")
+    assert branch_engine.applied == []
+    assert len(branch_engine.reads) == 1
+    preview = result.steps[-1].preview
+    assert preview is not None and preview.written is False
+
+
+def test_a_rebuilt_sync_with_hard_coded_dbt_sources_fails_before_any_step_runs():
+    files = dbt_files(sources=HARD_CODED_SOURCES)
+    sync, orchestrator = RecordingSync(), CountingOrchestrator()
+
+    with pytest.raises(BranchSourcesNotParameterizedError) as raised:
+        run_branch(store_matching(files, customers="old"), files, sync, orchestrator)
+
+    message = str(raised.value)
+    assert "shop" in message and "adops_raw_schema_shop" in message
+    assert "{{ var('adops_raw_schema_shop', 'raw_shop') }}" in message
+    assert isinstance(raised.value, PipelineValidationError)
+    assert raised.value.source == "shop"
+    assert orchestrator.plans == [] and sync.calls == []
+
+
+def test_a_rebuilt_sync_with_parameterized_dbt_sources_runs_every_step():
+    files = dbt_files()
+
+    result = run_branch(store_matching(files, customers="old"), files)
+
+    assert [status for _, status in statuses(result)] == [StepStatus.PASSED] * 3
+
+
+def test_hard_coded_dbt_sources_are_fine_when_the_sync_is_deferred():
+    files = dbt_files(sources=HARD_CODED_SOURCES)
+
+    result = run_branch(store_matching(files, build="old"), files)
+
+    assert result.succeeded
+
+
+def test_a_fingerprint_store_failure_fails_the_step_without_its_text():
+    store = FakeFingerprintStore(fail_save=RuntimeError(f"connect {WAREHOUSE_PASSWORD}"))
+
+    result = run_with_fingerprints(store, dbt_files())
+
+    assert statuses(result)[:2] == [("customers", StepStatus.FAILED), ("build", StepStatus.SKIPPED)]
+    assert result.steps[0].error == "Step customers: step fingerprint store: RuntimeError"

@@ -10,7 +10,9 @@ from adops.application.ports import (
     SchemaSnapshotStore,
     WarehouseUnreachable,
 )
+from adops.domain.branch_environment import SchemaLayout
 from adops.domain.schema_snapshot import TableShape
+from adops.infrastructure.dlt_sync import warehouse_destination
 from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
 
 ORDERS = TableShape({"id": "integer", "amount": "numeric(10, 2)"})
@@ -128,6 +130,7 @@ def test_stored_row_holds_only_names_and_types_and_no_connection_details(tmp_pat
         "_project": tmp_path,
         "_pipelines_dir": tmp_path / ".adops" / "dlt" / "dev",
         "_warehouse_kind": "duckdb",
+        "_layout": SchemaLayout.default(),
     }
 
 
@@ -242,3 +245,76 @@ def test_a_duckdb_file_locked_by_another_process_is_unreachable(
             store.save(warehouse.connection, "shop", "shop", "orders", ORDERS)
         else:
             store.load(warehouse.connection, "shop", "shop", "orders")
+
+
+BRANCH = SchemaLayout.for_branch("br_x")
+ADOPS_SCHEMAS = (
+    "SELECT schema_name FROM information_schema.schemata WHERE schema_name LIKE '%adops%'"
+)
+
+
+def built_destinations(monkeypatch) -> list[dict]:
+    built: list[dict] = []
+
+    def recording(*args, **kwargs):
+        destination = warehouse_destination(*args, **kwargs)
+        built.append(dict(destination.config_params))
+        return destination
+
+    monkeypatch.setattr(
+        "adops.infrastructure.schema_snapshot_store.warehouse_destination", recording
+    )
+    return built
+
+
+@pytest.mark.parametrize("layout", [{}, {"layout": SchemaLayout.default()}])
+def test_the_default_layout_writes_adops_with_default_destination_options(
+    warehouse, monkeypatch, layout
+):
+    built = built_destinations(monkeypatch)
+    store = WarehouseSnapshotStore(warehouse.project, "duckdb", environment="stage", **layout)
+
+    store.save(warehouse.connection, "shop", "shop", "orders", ORDERS)
+
+    assert warehouse.rows(ADOPS_SCHEMAS) == [("adops",)]
+    assert built and all(set(params) == {"credentials"} for params in built)
+
+
+def test_a_branch_layout_builds_the_destination_without_name_normalization(warehouse, monkeypatch):
+    built = built_destinations(monkeypatch)
+    store = WarehouseSnapshotStore(warehouse.project, "duckdb", environment="br_x", layout=BRANCH)
+
+    store.save(warehouse.connection, "shop", "shop", "orders", ORDERS)
+
+    assert built and all(p["enable_dataset_name_normalization"] is False for p in built)
+
+
+def test_a_branch_layout_keeps_its_snapshots_in_the_branch_adops_schema_on_duckdb(warehouse):
+    stage = warehouse.store()
+    branch = WarehouseSnapshotStore(warehouse.project, "duckdb", environment="br_x", layout=BRANCH)
+    stage.save(warehouse.connection, "shop", "shop", "orders", ORDERS)
+
+    branch.save(warehouse.connection, "shop", "shop", "orders", ORDERS_RETYPED)
+
+    assert sorted(warehouse.rows(ADOPS_SCHEMAS)) == [("adops",), ("br_x__adops",)]
+    assert branch.load(warehouse.connection, "shop", "shop", "orders") == ORDERS_RETYPED
+    assert stage.load(warehouse.connection, "shop", "shop", "orders") == ORDERS
+
+
+def test_a_branch_layout_keeps_its_snapshots_in_the_branch_adops_schema_on_postgres(
+    tmp_path, postgres_warehouse
+):
+    branch = WarehouseSnapshotStore(tmp_path, "postgres", environment="br_x", layout=BRANCH)
+
+    branch.save(postgres_warehouse.connection, "shop", "shop", "orders", ORDERS)
+
+    assert {name for name in postgres_warehouse.schemas() if "adops" in name} == {"br_x__adops"}
+    assert branch.load(postgres_warehouse.connection, "shop", "shop", "orders") == ORDERS
+
+
+def test_the_default_layout_on_postgres_keeps_the_adops_schema(tmp_path, postgres_warehouse):
+    store = WarehouseSnapshotStore(tmp_path, "postgres", environment="stage")
+
+    store.save(postgres_warehouse.connection, "shop", "shop", "orders", ORDERS)
+
+    assert {name for name in postgres_warehouse.schemas() if "adops" in name} == {"adops"}

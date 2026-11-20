@@ -1,47 +1,14 @@
 import os
-import subprocess
-import sys
-from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import Iterator
 from dataclasses import dataclass
-from pathlib import Path
 from uuid import uuid4
 
 import psycopg
 import pytest
 from psycopg import sql
-from psycopg.conninfo import conninfo_to_dict
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from adops.application.ports import ResolvedConnection
-
-HOLD_DUCKDB_FILE = (
-    "import sys, duckdb; db = duckdb.connect(sys.argv[1]); print('locked', flush=True);"
-    " sys.stdin.read()"
-)
-
-
-@contextmanager
-def _duckdb_held_by_another_process(path: Path) -> Iterator[None]:
-    holder = subprocess.Popen(
-        [sys.executable, "-c", HOLD_DUCKDB_FILE, str(path)],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        text=True,
-    )
-    try:
-        assert holder.stdout is not None
-        assert holder.stdout.readline().strip() == "locked"
-        yield
-    finally:
-        holder.kill()
-        holder.wait()
-
-
-@pytest.fixture
-def duckdb_held_by_another_process() -> Callable[[Path], AbstractContextManager[None]]:
-    """Holds a read-write DuckDB connection on a file from a second process, as a writer would."""
-    return _duckdb_held_by_another_process
-
 
 TEST_POSTGRES_DSN = "ADOPS_TEST_POSTGRES_DSN"
 LOCAL_POSTGRES_HINT = (
@@ -61,17 +28,9 @@ class PostgresTarget:
 @pytest.fixture
 def postgres_target() -> Iterator[PostgresTarget]:
     """A freshly created Target table in the test Postgres, dropped after the test."""
-    dsn = os.environ.get(TEST_POSTGRES_DSN)
-    if not dsn:
-        pytest.fail(LOCAL_POSTGRES_HINT, pytrace=False)
+    dsn = _test_postgres_dsn()
     params = conninfo_to_dict(dsn)
-    connection = ResolvedConnection(
-        host=str(params.get("host", "localhost")),
-        port=int(params.get("port", 5432)),
-        database=str(params["dbname"]),
-        user=str(params["user"]),
-        password=str(params.get("password", "")),
-    )
+    connection = _resolved(params, str(params["dbname"]))
     table = f"target_{uuid4().hex[:12]}"
     with psycopg.connect(dsn, autocommit=True) as admin:
         admin.execute(
@@ -84,3 +43,57 @@ def postgres_target() -> Iterator[PostgresTarget]:
     finally:
         with psycopg.connect(dsn, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(table)))
+
+
+def _test_postgres_dsn() -> str:
+    dsn = os.environ.get(TEST_POSTGRES_DSN)
+    if not dsn:
+        pytest.fail(LOCAL_POSTGRES_HINT, pytrace=False)
+    return dsn
+
+
+def _resolved(params: dict[str, object], database: str) -> ResolvedConnection:
+    return ResolvedConnection(
+        host=str(params.get("host", "localhost")),
+        port=int(str(params.get("port", 5432))),
+        database=database,
+        user=str(params["user"]),
+        password=str(params.get("password", "")),
+    )
+
+
+@dataclass(frozen=True)
+class PostgresWarehouse:
+    connection: ResolvedConnection
+    dsn: str
+
+    def rows(self, query: str, *parameters: object) -> list[tuple]:
+        with psycopg.connect(self.dsn) as connection:
+            return connection.execute(query, parameters).fetchall()
+
+    def execute(self, *statements: str) -> None:
+        with psycopg.connect(self.dsn, autocommit=True) as connection:
+            for statement in statements:
+                connection.execute(statement)
+
+    def schemas(self) -> set[str]:
+        return {row[0] for row in self.rows("SELECT schema_name FROM information_schema.schemata")}
+
+
+@pytest.fixture
+def postgres_warehouse() -> Iterator[PostgresWarehouse]:
+    """A freshly created, empty database in the test Postgres, dropped after the test."""
+    dsn = _test_postgres_dsn()
+    params = conninfo_to_dict(dsn)
+    database = f"adops_test_{uuid4().hex[:12]}"
+    with psycopg.connect(dsn, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
+    try:
+        yield PostgresWarehouse(
+            _resolved(params, database), make_conninfo(**{**params, "dbname": database})
+        )
+    finally:
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(database))
+            )

@@ -23,6 +23,7 @@ from adops.application.run_pipeline import (
     WarehouseUnreachableError,
     run_step,
 )
+from adops.domain.branch_environment import SchemaLayout
 from adops.domain.checks import CheckName, CheckStatus
 from adops.domain.pipeline import SyncStep
 from adops.domain.schema_snapshot import (
@@ -105,13 +106,14 @@ class Shop:
             for statement in statements:
                 connection.execute(statement)
 
-    def adapter(self, environment: str = "dev") -> DltSync:
+    def adapter(self, environment: str = "dev", **layout: SchemaLayout) -> DltSync:
         return DltSync(
             self.project,
             "shop",
             environment=environment,
             source_kind="sqlite",
             warehouse_kind="duckdb",
+            **layout,
         )
 
     def sync(self, sync_step: SyncStep):
@@ -914,3 +916,122 @@ def test_silencing_replaces_a_handler_dlt_installed_first(monkeypatch):
     _silence_dlt_logger()
 
     assert [type(handler) for handler in dlt_logger.handlers] == [logging.NullHandler]
+
+
+BRANCH = SchemaLayout.for_branch("br_x")
+SCHEMATA = "SELECT schema_name FROM information_schema.schemata"
+
+
+def raw_schemas(names) -> set[str]:
+    return {name for name in names if "raw_shop" in name}
+
+
+@pytest.mark.parametrize(
+    ("kind", "connection"),
+    [("postgres", unreachable_postgres()), ("duckdb", ResolvedDuckDb("wh.duckdb"))],
+)
+def test_shared_schemas_build_the_destination_with_only_its_credentials(
+    kind, connection, tmp_path
+):
+    assert set(warehouse_destination(kind, connection, tmp_path).config_params) == {"credentials"}
+    assert set(
+        warehouse_destination(kind, connection, tmp_path, branch_schemas=False).config_params
+    ) == {"credentials"}
+
+
+@pytest.mark.parametrize(
+    ("kind", "connection"),
+    [("postgres", unreachable_postgres()), ("duckdb", ResolvedDuckDb("wh.duckdb"))],
+)
+def test_branch_schemas_turn_off_dataset_name_normalization(kind, connection, tmp_path):
+    destination = warehouse_destination(kind, connection, tmp_path, branch_schemas=True)
+
+    assert destination.config_params["enable_dataset_name_normalization"] is False
+
+
+def test_the_default_sync_pipeline_writes_raw_source_with_default_destination_options(shop):
+    pipeline = shop.adapter()._warehouse_pipeline(step(INCREMENTAL_ORDERS), shop.warehouse)
+
+    assert pipeline.dataset_name == "raw_shop"
+    assert "enable_dataset_name_normalization" not in pipeline.destination.config_params
+
+
+def test_a_branch_sync_pipeline_writes_the_branch_schema_unnormalized(shop):
+    adapter = shop.adapter("br_x", layout=BRANCH)
+    pipeline = adapter._warehouse_pipeline(step(INCREMENTAL_ORDERS), shop.warehouse)
+
+    assert pipeline.dataset_name == "br_x__raw_shop"
+    assert pipeline.destination.config_params["enable_dataset_name_normalization"] is False
+
+
+def test_a_default_layout_sync_keeps_the_raw_schema_names(shop):
+    shop.adapter(layout=SchemaLayout.default()).sync(
+        step(INCREMENTAL_ORDERS), shop.source, shop.warehouse
+    )
+
+    assert raw_schemas(row[0] for row in shop.warehouse_rows(SCHEMATA)) == {
+        "raw_shop",
+        "raw_shop_staging",
+    }
+
+
+def test_a_branch_sync_on_duckdb_keeps_the_double_underscore_in_every_schema(shop):
+    adapter = shop.adapter("br_x", layout=BRANCH)
+
+    adapter.sync(step(INCREMENTAL_ORDERS, FULL_REFRESH_CUSTOMERS), shop.source, shop.warehouse)
+
+    assert raw_schemas(row[0] for row in shop.warehouse_rows(SCHEMATA)) == {
+        "br_x__raw_shop",
+        "br_x__raw_shop_staging",
+    }
+    assert shop.warehouse_rows("SELECT count(*) FROM br_x__raw_shop.orders") == [(3,)]
+    assert shop.warehouse_rows("SELECT count(*) FROM br_x__raw_shop.customers") == [(3,)]
+
+
+def test_a_branch_sync_on_duckdb_makes_columns_nullable_in_its_own_schemas(shop):
+    adapter = shop.adapter("br_x", layout=BRANCH)
+    adapter.sync(step(INCREMENTAL_ORDERS), shop.source, shop.warehouse)
+    shop.warehouse_execute(
+        "ALTER TABLE br_x__raw_shop.orders ALTER COLUMN amount SET NOT NULL",
+        "ALTER TABLE br_x__raw_shop_staging.orders ALTER COLUMN amount SET NOT NULL",
+    )
+
+    adapter.make_columns_nullable(
+        step(INCREMENTAL_ORDERS), step(INCREMENTAL_ORDERS).tables[0], shop.warehouse, ["amount"]
+    )
+
+    for schema in ("br_x__raw_shop", "br_x__raw_shop_staging"):
+        assert "amount" not in not_null_columns(shop, "orders", schema)
+
+
+def test_a_branch_sync_on_postgres_keeps_the_double_underscore_in_every_schema(
+    shop, postgres_warehouse
+):
+    adapter = DltSync(
+        shop.project,
+        "shop",
+        environment="br_x",
+        source_kind="sqlite",
+        warehouse_kind="postgres",
+        layout=BRANCH,
+    )
+
+    adapter.sync(
+        step(INCREMENTAL_ORDERS, FULL_REFRESH_CUSTOMERS), shop.source, postgres_warehouse.connection
+    )
+
+    assert raw_schemas(postgres_warehouse.schemas()) == {
+        "br_x__raw_shop",
+        "br_x__raw_shop_staging",
+    }
+    assert postgres_warehouse.rows("SELECT count(*) FROM br_x__raw_shop.orders") == [(3,)]
+
+
+def test_a_default_layout_sync_on_postgres_keeps_the_raw_schema_names(shop, postgres_warehouse):
+    adapter = DltSync(
+        shop.project, "shop", environment="stage", source_kind="sqlite", warehouse_kind="postgres"
+    )
+
+    adapter.sync(step(INCREMENTAL_ORDERS), shop.source, postgres_warehouse.connection)
+
+    assert raw_schemas(postgres_warehouse.schemas()) == {"raw_shop", "raw_shop_staging"}

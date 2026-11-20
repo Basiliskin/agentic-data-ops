@@ -8,6 +8,7 @@ from pathlib import Path
 import duckdb
 import pytest
 import yaml
+from conftest import PostgresWarehouse
 from dagster import DagsterInstance
 from dbt.cli.main import dbtRunner, dbtRunnerResult
 
@@ -26,6 +27,7 @@ from adops.domain.transform import DbtTestFacts, DbtTestStatus, TransformStep
 from adops.infrastructure.dagster_orchestrator import DagsterOrchestrator
 from adops.infrastructure.dbt_transform import (
     PASSWORD_ENV,
+    TARGET_SCHEMA,
     DbtTransform,
     profile_renderer,
     render_duckdb_profile,
@@ -106,7 +108,9 @@ def postgres_password_on_duckdb(database: Path):
     field only proves the variable is set while dbt runs: dbt refuses an env_var() with no value.
     """
 
-    def render(profile_name: str, warehouse: ResolvedConnection, _project_root: Path) -> str:
+    def render(
+        profile_name: str, warehouse: ResolvedConnection, _project_root: Path, _schema: str
+    ) -> str:
         target = {
             "type": "duckdb",
             "path": str(database),
@@ -578,3 +582,180 @@ def test_only_the_dbt_adapter_imports_dbt():
                 importers.add(source.relative_to(package).as_posix())
 
     assert importers == {"infrastructure/dbt_transform.py"}
+
+
+BRANCH_ANALYTICS = "br_x__analytics"
+BRANCH_RAW = "br_x__raw_shop"
+DEMO_SOURCES = (
+    Path(adops.__file__).parent / "templates" / "demo" / "dbt" / "models" / "sources.yml"
+).read_text()
+
+
+class ArgvRecordingRunner:
+    """A real dbtRunner that keeps the argv and profiles.yml dbt was given."""
+
+    argv: list[str] = []
+    profile: dict = {}
+
+    def invoke(self, args: list[str]) -> dbtRunnerResult:
+        ArgvRecordingRunner.argv = list(args)
+        work = Path(args[args.index("--profiles-dir") + 1])
+        ArgvRecordingRunner.profile = yaml.safe_load((work / "profiles.yml").read_text())
+        return dbtRunner().invoke(args)
+
+
+def expected_argv(root: Path, work: str) -> list[str]:
+    return [
+        "build",
+        "--project-dir",
+        str(root / "dbt"),
+        "--profiles-dir",
+        work,
+        "--profile",
+        "adops",
+        "--target",
+        "warehouse",
+        "--target-path",
+        f"{work}/target",
+        "--log-path",
+        f"{work}/logs",
+        "--quiet",
+        "--no-send-anonymous-usage-stats",
+    ]
+
+
+def test_the_default_run_builds_into_analytics_with_the_argv_it_always_had(
+    root: Path, duck: ResolvedDuckDb
+):
+    write_dbt_project(root, {"orders": HEALTHY_ORDERS})
+    transform = DbtTransform(root, warehouse_kind="duckdb", runner=ArgvRecordingRunner)
+
+    result = transform.run(STEP, duck)
+
+    argv = ArgvRecordingRunner.argv
+    work = argv[argv.index("--profiles-dir") + 1]
+    assert argv == expected_argv(root, work)
+    assert "--vars" not in argv
+    assert ArgvRecordingRunner.profile["adops"]["outputs"]["warehouse"]["schema"] == "analytics"
+    assert (transform.target_schema, dict(transform.raw_schemas)) == (TARGET_SCHEMA, {})
+    assert {f.status for f in result.tests} == {DbtTestStatus.PASS}
+
+
+def test_the_default_postgres_profile_text_is_unchanged():
+    text = render_postgres_profile("adops", WAREHOUSE, Path("unused"))
+
+    assert "      schema: analytics\n" in text
+
+
+@pytest.mark.parametrize(
+    ("render", "warehouse"),
+    [(render_postgres_profile, WAREHOUSE), (render_duckdb_profile, ResolvedDuckDb("wh.duckdb"))],
+)
+def test_both_profiles_render_the_target_schema_with_its_double_underscore(
+    tmp_path: Path, render, warehouse
+):
+    text = render("adops", warehouse, tmp_path, BRANCH_ANALYTICS)
+
+    assert yaml.safe_load(text)["adops"]["outputs"]["warehouse"]["schema"] == BRANCH_ANALYTICS
+
+
+def test_raw_schemas_reach_dbt_as_vars_serialized_as_json(root: Path, duck: ResolvedDuckDb):
+    write_dbt_project(root, {"orders": HEALTHY_ORDERS})
+    transform = DbtTransform(
+        root,
+        warehouse_kind="duckdb",
+        runner=ArgvRecordingRunner,
+        raw_schemas={"shop": "raw_shop", "crm": 'odd"name'},
+    )
+
+    transform.run(STEP, duck)
+
+    argv = ArgvRecordingRunner.argv
+    payload = argv[argv.index("--vars") + 1]
+    assert yaml.safe_load(payload) == {
+        "adops_raw_schema_shop": "raw_shop",
+        "adops_raw_schema_crm": 'odd"name',
+    }
+
+
+def test_the_demo_sources_read_raw_shop_unless_the_var_names_another_schema():
+    assert "{{ var('adops_raw_schema_shop', 'raw_shop') }}" in DEMO_SOURCES
+
+
+SHOP_ORDERS_MODEL = "select id, status from {{ source('raw_shop', 'orders') }}"
+
+
+def run_demo_sources(root: Path, warehouse, kind: str, **keywords) -> TransformResult:
+    write_dbt_project(
+        root,
+        {"orders": SHOP_ORDERS_MODEL},
+        schema="version: 2\n",
+        **{"models/sources.yml": DEMO_SOURCES},
+    )
+    return DbtTransform(root, warehouse_kind=kind, **keywords).run(STEP, warehouse)
+
+
+def seed_duckdb_raw(path: Path, schema: str, rows: str) -> None:
+    with duckdb.connect(str(path)) as connection:
+        connection.execute(f"CREATE SCHEMA {schema}")
+        connection.execute(
+            f"CREATE TABLE {schema}.orders AS SELECT * FROM (VALUES {rows}) t(id, status)"
+        )
+
+
+def test_a_branch_run_on_duckdb_reads_the_raw_schema_from_vars_and_writes_its_own_analytics(
+    root: Path, duck: ResolvedDuckDb
+):
+    seed_duckdb_raw(Path(duck.path), "raw_shop", "(1, 'stage')")
+    seed_duckdb_raw(Path(duck.path), BRANCH_RAW, "(1, 'branch'), (2, 'branch')")
+
+    result = run_demo_sources(
+        root,
+        duck,
+        "duckdb",
+        target_schema=BRANCH_ANALYTICS,
+        raw_schemas={"shop": BRANCH_RAW},
+    )
+
+    assert (result.crashed, result.failed_models) == (False, ())
+    with duckdb.connect(duck.path) as connection:
+        branch = connection.execute(f"select id, status from {BRANCH_ANALYTICS}.orders").fetchall()
+        schemas = connection.execute("select schema_name from duckdb_schemas()").fetchall()
+    assert sorted(branch) == [(1, "branch"), (2, "branch")]
+    assert ("analytics",) not in schemas
+
+
+def test_the_demo_sources_fall_back_to_raw_shop_without_vars(root: Path, duck: ResolvedDuckDb):
+    seed_duckdb_raw(Path(duck.path), "raw_shop", "(1, 'stage')")
+
+    result = run_demo_sources(root, duck, "duckdb")
+
+    assert (result.crashed, result.failed_models) == (False, ())
+    with duckdb.connect(duck.path) as connection:
+        rows = connection.execute("select id, status from analytics.orders").fetchall()
+    assert rows == [(1, "stage")]
+
+
+def test_a_branch_run_on_postgres_reads_the_raw_schema_from_vars_and_writes_its_own_analytics(
+    root: Path, postgres_warehouse: PostgresWarehouse
+):
+    postgres_warehouse.execute(
+        "CREATE SCHEMA raw_shop",
+        "CREATE TABLE raw_shop.orders AS SELECT 1 AS id, 'stage' AS status",
+        f"CREATE SCHEMA {BRANCH_RAW}",
+        f"CREATE TABLE {BRANCH_RAW}.orders AS SELECT 2 AS id, 'branch' AS status",
+    )
+
+    result = run_demo_sources(
+        root,
+        postgres_warehouse.connection,
+        "postgres",
+        target_schema=BRANCH_ANALYTICS,
+        raw_schemas={"shop": BRANCH_RAW},
+    )
+
+    assert (result.crashed, result.failed_models) == (False, ())
+    assert postgres_warehouse.rows(f"SELECT id, status FROM {BRANCH_ANALYTICS}.orders") == [
+        (2, "branch")
+    ]
+    assert "analytics" not in postgres_warehouse.schemas()

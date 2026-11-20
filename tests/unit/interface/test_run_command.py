@@ -13,6 +13,7 @@ from adops.application.ports import (
     Clock,
     Orchestrator,
     ResolvedConnection,
+    ResolvedDuckDb,
     ResolvedWarehouse,
     ReverseSyncRead,
     RunPlan,
@@ -23,8 +24,14 @@ from adops.application.ports import (
     Transform,
     TransformResult,
 )
-from adops.application.run_pipeline import InOrderOrchestrator
+from adops.application.run_pipeline import (
+    InOrderOrchestrator,
+    StepFingerprinting,
+    current_fingerprints,
+)
+from adops.domain.branch_environment import SchemaLayout
 from adops.domain.checks import LoadFacts, SourceFacts
+from adops.domain.loader import load_pipeline
 from adops.domain.pipeline import SyncStep
 from adops.domain.reverse_sync import ReverseSyncStep
 from adops.domain.reverse_sync_diff import Diff, Row
@@ -40,11 +47,14 @@ from adops.infrastructure.dbt_transform import (
 from adops.infrastructure.dlt_sync import DltSync
 from adops.infrastructure.postgres_reverse_sync import PostgresReverseSync
 from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
+from adops.infrastructure.step_fingerprint_store import ProjectTree, WarehouseFingerprintStore
 from adops.interface import cli, run_command
 
 runner = CliRunner()
 
 REAL_BUILD_SNAPSHOT_STORE = run_command.build_snapshot_store
+REAL_BUILD_FINGERPRINT_STORE = run_command.build_fingerprint_store
+DEFAULT_LAYOUT = SchemaLayout.default()
 
 SENTINEL = "s3cr3t-run-command-sentinel"
 
@@ -163,6 +173,32 @@ class InMemorySnapshotStore:
 def snapshot_store(monkeypatch):
     store = InMemorySnapshotStore()
     monkeypatch.setattr(run_command, "build_snapshot_store", lambda *_: store)
+    return store
+
+
+@dataclass
+class InMemoryFingerprintStore:
+    saved: dict[str, dict[str, str]] = field(default_factory=dict)
+    built_for: list[tuple[str, str, ResolvedWarehouse]] = field(default_factory=list)
+
+    def load(self, pipeline: str) -> Mapping[str, str]:
+        return dict(self.saved.get(pipeline, {}))
+
+    def save(self, pipeline: str, step: str, fingerprint: str) -> None:
+        self.saved.setdefault(pipeline, {})[step] = fingerprint
+
+
+@pytest.fixture(autouse=True)
+def fingerprint_store(monkeypatch):
+    store = InMemoryFingerprintStore()
+
+    def build(
+        project_dir: Path, environment: str, kind: str, warehouse: ResolvedWarehouse
+    ) -> InMemoryFingerprintStore:
+        store.built_for.append((environment, kind, warehouse))
+        return store
+
+    monkeypatch.setattr(run_command, "build_fingerprint_store", build)
     return store
 
 
@@ -487,6 +523,7 @@ def test_real_adapters_are_built_for_the_project(tmp_path, monkeypatch):
         "_project_dir": tmp_path,
         "_pipelines_dir": tmp_path / ".adops" / "dlt" / "stage",
         "_warehouse_kind": "postgres",
+        "_analytics_schema": "analytics",
         "_result_rows": {},
     }
     assert isinstance(transform, DbtTransform)
@@ -505,9 +542,11 @@ def test_real_adapters_are_built_for_the_project(tmp_path, monkeypatch):
         "_project": tmp_path,
         "_pipelines_dir": tmp_path / ".adops" / "dlt" / "stage",
         "_warehouse_kind": "postgres",
+        "_layout": SchemaLayout.default(),
     }
     assert vars(sync) == {
         "_project_dir": tmp_path,
+        "_layout": SchemaLayout.default(),
         "_pipelines_dir": tmp_path / ".adops" / "dlt" / "stage",
         "_pipeline": "shop_sync",
         "_source_kind": "postgres",
@@ -847,3 +886,357 @@ def test_update_sample_lists_every_changed_column_name_without_values(project, r
 
     assert "  sample update keys: 1 (orders, total); 2 (total)" in lines
     assert "changed-total" not in "\n".join(lines)
+
+
+STAGE_SECRET = "S3cr3t-xyz-stage-warehouse"
+
+BRANCH_SETTINGS = f"""
+environments:
+  dev:
+    warehouse: {{type: duckdb, path: dev.duckdb}}
+    sources:
+      shop: {{type: postgres, host: localhost, port: 5432, database: s, user: s,
+             password_env: ADOPS_TEST_SHOP_PASSWORD}}{CRM_TARGET}
+  stage:
+    warehouse: {{type: postgres, host: stage-warehouse, port: 5434, database: w, user: w,
+                password_env: ADOPS_TEST_STAGE_PASSWORD}}
+    sources:
+      shop: {{type: postgres, host: localhost, port: 5432, database: s, user: s,
+             password_env: ADOPS_TEST_SHOP_PASSWORD}}{CRM_TARGET}
+"""
+
+REVERSE_STEP = """
+  - type: reverse_sync
+    name: push_stats
+    model: customer_stats
+    target: crm
+    target_table: customer_stats
+    key: customer_id
+    mapping: {order_count: orders, total_amount: total}
+    max_change_share: 1
+"""
+
+BRANCH_PIPELINE = PIPELINE + TRANSFORM_STEP + REVERSE_STEP
+
+SOURCES_YML = """
+sources:
+  - name: shop
+    schema: "{{ var('adops_raw_schema_shop', 'raw_shop') }}"
+"""
+
+
+@dataclass
+class BranchBuilds:
+    sync: list[tuple[str, str, SchemaLayout]] = field(default_factory=list)
+    store: list[tuple[str, str, SchemaLayout]] = field(default_factory=list)
+    transform: list[tuple[str, str, Mapping[str, str] | None]] = field(default_factory=list)
+    reverse_sync: list[tuple[str, str, str]] = field(default_factory=list)
+    transforms: list[FakeTransform] = field(default_factory=list)
+    reverse_syncs: list[FakeReverseSync] = field(default_factory=list)
+
+
+def stage_fingerprints(project: Path, pipeline_text: str) -> dict[str, str]:
+    steps = load_pipeline(pipeline_text).steps
+    return dict(current_fingerprints(steps, ProjectTree(project)))
+
+
+@pytest.fixture
+def branch_project(project, sync, orchestrator, snapshot_store, fingerprint_store, monkeypatch):
+    (project / "adops.yaml").write_text(BRANCH_SETTINGS)
+    (project / "pipelines" / "shop_sync.yaml").write_text(BRANCH_PIPELINE)
+    (project / "dbt" / "models").mkdir(parents=True)
+    (project / "dbt" / "models" / "sources.yml").write_text(SOURCES_YML)
+    (project / "dbt" / "models" / "customer_stats.sql").write_text("select 1 as customer_id\n")
+    monkeypatch.setenv("ADOPS_TEST_STAGE_PASSWORD", STAGE_SECRET)
+    monkeypatch.setenv("ADOPS_TEST_CRM_PASSWORD", TARGET_SENTINEL)
+    builds = BranchBuilds()
+
+    def build_sync(
+        project_dir: Path,
+        pipeline: str,
+        environment: str,
+        kind: str,
+        *,
+        layout: SchemaLayout = DEFAULT_LAYOUT,
+    ) -> FakeSync:
+        builds.sync.append((environment, kind, layout))
+        return sync
+
+    def build_store(
+        project_dir: Path,
+        environment: str,
+        kind: str,
+        *,
+        layout: SchemaLayout = DEFAULT_LAYOUT,
+    ) -> InMemorySnapshotStore:
+        builds.store.append((environment, kind, layout))
+        return snapshot_store
+
+    def build_transform(
+        project_dir: Path,
+        kind: str,
+        *,
+        target_schema: str = "analytics",
+        raw_schemas: Mapping[str, str] | None = None,
+    ) -> FakeTransform:
+        builds.transform.append((kind, target_schema, raw_schemas))
+        builds.transforms.append(FakeTransform())
+        return builds.transforms[-1]
+
+    def build_reverse_sync(
+        project_dir: Path, environment: str, kind: str, *, analytics_schema: str = "analytics"
+    ) -> FakeReverseSync:
+        builds.reverse_sync.append((environment, kind, analytics_schema))
+        builds.reverse_syncs.append(FakeReverseSync())
+        return builds.reverse_syncs[-1]
+
+    monkeypatch.setattr(run_command, "build_sync", build_sync)
+    monkeypatch.setattr(run_command, "build_snapshot_store", build_store)
+    monkeypatch.setattr(run_command, "build_transform", build_transform)
+    monkeypatch.setattr(run_command, "build_reverse_sync", build_reverse_sync)
+    return builds
+
+
+def assert_no_secret(result):
+    for leaked in (STAGE_SECRET, SENTINEL, TARGET_SENTINEL, "Traceback"):
+        assert leaked not in result.output
+
+
+def stage_ran(project: Path, store: InMemoryFingerprintStore, pipeline_text: str) -> None:
+    store.saved["shop_sync"] = stage_fingerprints(project, pipeline_text)
+
+
+def test_branch_with_a_changed_transform_rebuilds_from_it_reading_stage_raw(
+    project, branch_project, fingerprint_store
+):
+    stage_ran(project, fingerprint_store, BRANCH_PIPELINE)
+    stage_saved = dict(fingerprint_store.saved["shop_sync"])
+    (project / "dbt" / "models" / "customer_stats.sql").write_text("select 2 as customer_id\n")
+
+    result = invoke(project, "--branch", "feat")
+
+    assert result.exit_code == 0, result.output
+    assert_no_secret(result)
+    branch = SchemaLayout.for_branch("br_feat")
+    assert branch_project.sync == [("br_feat", "postgres", branch)]
+    assert branch_project.store == [("br_feat", "postgres", branch)]
+    assert branch_project.transform == [("postgres", "br_feat__analytics", {"shop": "raw_shop"})]
+    assert branch_project.reverse_sync == [("br_feat", "postgres", "br_feat__analytics")]
+    [(store_env, store_kind, store_warehouse)] = fingerprint_store.built_for
+    assert (store_env, store_kind) == ("stage", "postgres")
+    assert isinstance(store_warehouse, ResolvedConnection)
+    assert (store_warehouse.host, store_warehouse.port) == ("stage-warehouse", 5434)
+    [transform] = branch_project.transforms
+    [warehouse] = transform.warehouses
+    assert isinstance(warehouse, ResolvedConnection)
+    assert (warehouse.host, warehouse.port) == ("stage-warehouse", 5434)
+    assert branch_project.reverse_syncs[0].applied == []
+    lines = result.output.splitlines()
+    assert lines[0] == "step sync_shop: deferred to stage"
+    assert lines[1] == "step transform_shop: passed"
+    assert "  Preview: would insert 1, would update 1, kept 2 (absent from dbt result)" in lines
+    assert lines[-1] == "Pipeline shop_sync passed in Environment br_feat."
+    assert "uses stage" not in result.output
+    assert fingerprint_store.saved["shop_sync"] == stage_saved
+
+
+def test_branch_with_a_changed_sync_reads_its_own_raw_schema_downstream(
+    project, branch_project, fingerprint_store
+):
+    edited = BRANCH_PIPELINE.replace("mode: full_refresh", "mode: incremental\n        cursor: x")
+    stage_ran(project, fingerprint_store, edited)
+
+    result = invoke(project, "--branch", "feat")
+
+    assert result.exit_code == 0, result.output
+    assert_no_secret(result)
+    assert branch_project.sync == [("br_feat", "postgres", SchemaLayout.for_branch("br_feat"))]
+    assert branch_project.transform == [
+        ("postgres", "br_feat__analytics", {"shop": "br_feat__raw_shop"})
+    ]
+    assert branch_project.reverse_sync == [("br_feat", "postgres", "br_feat__analytics")]
+    assert result.output.splitlines()[0] == (
+        "step sync_shop: passed — customers 20 rows, orders 2 rows"
+    )
+    assert "deferred to stage" not in result.output
+
+
+def test_branch_with_only_the_reverse_sync_changed_reads_stage_analytics(
+    project, branch_project, fingerprint_store
+):
+    edited = BRANCH_PIPELINE.replace("max_change_share: 1", "max_change_share: 0.5")
+    stage_ran(project, fingerprint_store, edited)
+
+    result = invoke(project, "--branch", "feat")
+
+    assert result.exit_code == 0, result.output
+    assert branch_project.transform == []
+    assert branch_project.reverse_sync == [("br_feat", "postgres", "analytics")]
+
+
+def test_branch_matching_stage_defers_every_step_and_exits_zero(
+    project, branch_project, fingerprint_store, orchestrator
+):
+    stage_ran(project, fingerprint_store, BRANCH_PIPELINE)
+
+    result = invoke(project, "--branch", "feature/Feat")
+
+    assert result.exit_code == 0, result.output
+    assert_no_secret(result)
+    assert result.output.splitlines() == [
+        "step sync_shop: deferred to stage",
+        "step transform_shop: deferred to stage",
+        "step push_stats: deferred to stage",
+        "Nothing changed since stage's last run; br_feature_feat uses stage.",
+        "Pipeline shop_sync passed in Environment br_feature_feat.",
+    ]
+    assert orchestrator.environ == []
+    assert branch_project.transform == [] and branch_project.reverse_sync == []
+
+
+def test_branch_before_any_stage_run_asks_for_a_stage_run(project, branch_project):
+    result = invoke(project, "--branch", "feat")
+
+    assert_clean_failure(result)
+    assert_no_secret(result)
+    assert result.output.strip() == (
+        "Pipeline shop_sync: stage has no Step Fingerprints; run the Pipeline in stage first"
+    )
+
+
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_branch_without_a_stage_environment_says_so(project):
+    result = invoke(project, "--branch", "feat")
+
+    assert_clean_failure(result)
+    assert result.output.strip() == (
+        "environments.stage: a Branch run needs a stage Environment in adops.yaml, and none is set"
+    )
+
+
+def test_branch_name_without_letters_or_digits_is_rejected(project, branch_project):
+    result = invoke(project, "--branch", "///")
+
+    assert_clean_failure(result)
+    assert "--branch: the branch name has no letters or digits" in result.output
+
+
+def test_branch_names_the_missing_stage_warehouse_secret(project, branch_project, monkeypatch):
+    monkeypatch.delenv("ADOPS_TEST_STAGE_PASSWORD")
+
+    result = invoke(project, "--branch", "feat")
+
+    assert_clean_failure(result)
+    assert "ADOPS_TEST_STAGE_PASSWORD" in result.output
+
+
+def test_branch_unexpected_error_prints_only_its_type(
+    project, branch_project, fingerprint_store, monkeypatch
+):
+    stage_ran(project, fingerprint_store, BRANCH_PIPELINE)
+    (project / "dbt" / "models" / "customer_stats.sql").write_text("select 2 as customer_id\n")
+
+    def explode(*args: object, **kwargs: object) -> FakeTransform:
+        raise RuntimeError(f"cannot reach postgres://w:{STAGE_SECRET}@stage-warehouse")
+
+    monkeypatch.setattr(run_command, "build_transform", explode)
+
+    result = invoke(project, "--branch", "feat")
+
+    assert_clean_failure(result)
+    assert_no_secret(result)
+    assert result.output.strip() == "unexpected RuntimeError while running shop_sync"
+
+
+@pytest.mark.parametrize("env", ["stage", "dev"])
+def test_branch_cannot_be_combined_with_env(project, branch_project, env):
+    result = invoke(project, "--env", env, "--branch", "feat")
+
+    assert result.exit_code == 2
+    assert "--branch" in result.output and "--env" in result.output
+    assert_no_secret(result)
+    assert branch_project.sync == []
+
+
+def test_stage_run_saves_fingerprints_in_step_order(project, branch_project, fingerprint_store):
+    result = invoke(project, "--env", "stage")
+
+    assert result.exit_code == 0, result.output
+    [(environment, kind, warehouse)] = fingerprint_store.built_for
+    assert (environment, kind) == ("stage", "postgres")
+    assert isinstance(warehouse, ResolvedConnection) and warehouse.host == "stage-warehouse"
+    assert list(fingerprint_store.saved["shop_sync"].items()) == list(
+        stage_fingerprints(project, BRANCH_PIPELINE).items()
+    )
+    assert branch_project.sync == [("stage", "postgres", SchemaLayout.default())]
+
+
+def test_dev_run_builds_a_fingerprint_store_but_saves_nothing(
+    project, branch_project, fingerprint_store
+):
+    result = invoke(project)
+
+    assert result.exit_code == 0, result.output
+    assert [(env, kind) for env, kind, _ in fingerprint_store.built_for] == [("dev", "duckdb")]
+    assert fingerprint_store.saved == {}
+
+
+@pytest.mark.usefixtures("sync", "orchestrator", "snapshot_store")
+def test_run_passes_fingerprinting_for_the_project_to_the_pipeline(
+    project, fingerprint_store, monkeypatch
+):
+    received: list[object] = []
+
+    def capture(*args: object) -> RunResult:
+        received.append(args[10])
+        return RunResult("shop_sync", "dev", ())
+
+    monkeypatch.setattr(run_command, "run_pipeline", capture)
+
+    assert invoke(project).exit_code == 0
+    [fingerprinting] = received
+    assert isinstance(fingerprinting, StepFingerprinting)
+    assert fingerprinting.store is fingerprint_store
+    assert fingerprinting.files == ProjectTree(project.resolve())
+
+
+def test_real_adapters_take_branch_schemas(tmp_path, monkeypatch):
+    monkeypatch.undo()
+    layout = SchemaLayout.for_branch("br_feat")
+    warehouse = ResolvedDuckDb("w.duckdb")
+
+    sync = run_command.build_sync(tmp_path, "shop_sync", "br_feat", "duckdb", layout=layout)
+    store = REAL_BUILD_SNAPSHOT_STORE(tmp_path, "br_feat", "duckdb", layout=layout)
+    transform = run_command.build_transform(
+        tmp_path, "duckdb", target_schema=layout.analytics, raw_schemas={"shop": "raw_shop"}
+    )
+    reverse_sync = run_command.build_reverse_sync(
+        tmp_path, "br_feat", "duckdb", analytics_schema=layout.analytics
+    )
+    fingerprints = REAL_BUILD_FINGERPRINT_STORE(tmp_path, "stage", "duckdb", warehouse)
+
+    assert vars(sync)["_pipelines_dir"] == tmp_path / ".adops" / "dlt" / "br_feat"
+    assert vars(sync)["_layout"] == layout
+    assert vars(store)["_layout"] == layout
+    assert isinstance(transform, DbtTransform)
+    assert (transform.target_schema, transform.raw_schemas) == (
+        "br_feat__analytics",
+        {"shop": "raw_shop"},
+    )
+    assert vars(reverse_sync)["_analytics_schema"] == "br_feat__analytics"
+    assert isinstance(fingerprints, WarehouseFingerprintStore)
+    assert vars(fingerprints)["_warehouse"] == warehouse
+    assert vars(fingerprints)["_pipelines_dir"] == tmp_path / ".adops" / "dlt" / "stage"
+    assert run_command.build_project_files(tmp_path) == ProjectTree(tmp_path)
+
+
+def test_step_reverse_syncs_apply_with_the_steps_own_engine():
+    engine = FakeReverseSync()
+    step = load_pipeline(BRANCH_PIPELINE).steps[2]
+    assert isinstance(step, ReverseSyncStep)
+    diff = Diff("customer_id", inserts=(), updates=(), deletes=(), kept=(), delete_missing=False)
+    target = ResolvedConnection("crm.internal", 5440, "crm", "crm_writer", "unused")
+
+    run_command.StepReverseSyncs({"push_stats": engine}).apply(step, target, diff)
+
+    assert engine.applied == [diff]

@@ -1,0 +1,390 @@
+{
+  "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.json",
+  "roadmapTask": "Branch Environments: per-branch schemas in the stage Warehouse, defer to stage, rebuild only changed Steps, drop on merge",
+  "createdAt": "2026-11-19T13:44:41Z",
+  "updatedAt": "2026-11-20T06:37:54Z",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "branch-environment-domain-rules",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-19T13:44:41Z",
+      "baseRef": "5a53f65e4219479ad44ecc61209539b9b90d24af",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.md | changed: src/adops/domain/branch_environment.py (new), tests/unit/domain/test_branch_environment.py (new); names.py untouched. Adds branch_environment_name, SchemaLayout, StepReads+read_layout (per running Step: raw schema per Source, analytics schema), canonical_step_json, step_fingerprint (length-framed sha256), first_changed_step (positional vs stage order), saves_stage_fingerprint, drop_prefix, uses_raw_schema_var.",
+      "unplannedFiles": [],
+      "completedAt": "2026-11-19T13:50:56Z",
+      "gateRun": "uv sync --locked: pass; uv run ruff check: pass; uv run pytest tests/unit --cov (Postgres DSN localhost:55432, 100% line+branch): pass; uv build --wheel + template grep: pass; uv run pytest tests/e2e -m e2e: pass (2 passed)",
+      "gradeResult": {
+        "phaseId": "branch-environment-domain-rules",
+        "overallPass": true,
+        "dimensionScores": [
+          {
+            "dimensionId": "branch-name-fits-identifier-limit",
+            "score": 9,
+            "pass": true,
+            "evidence": "All passCriteria verified; budget counts __raw_<source>_staging; hash from raw branch; rstrip before suffix. Not 10: short distinct branches can sanitize to the same name (no hash)."
+          },
+          {
+            "dimensionId": "fingerprint-determinism",
+            "score": 10,
+            "pass": true,
+            "evidence": "Length-framed parts; three boundary-forgery tests (file/file, path/content, step JSON/file) plus same-bytes rename beyond the 8-level cases."
+          },
+          {
+            "dimensionId": "first-changed-step-semantics",
+            "score": 9,
+            "pass": true,
+            "evidence": "Positional compare; all listed cases plus named trailing-removal test. Not 10: relies on stage Mapping order being Step order (documented, not enforced)."
+          },
+          {
+            "dimensionId": "domain-layer-carries-no-adapter-concepts",
+            "score": 10,
+            "pass": true,
+            "evidence": "Adapter grep prints only the excepted 63-byte comment; SchemaLayout is a single-field frozen naming value deriving branch names from drop_prefix, so default() cannot drift."
+          }
+        ]
+      }
+    },
+    {
+      "phaseId": "branch-run-use-case",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-19T13:57:39Z",
+      "baseRef": "5a53f65e4219479ad44ecc61209539b9b90d24af",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.status.last_good.json,src/adops/domain/branch_environment.py,tests/unit/domain/test_branch_environment.py || changed: src/adops/application/ports.py, src/adops/application/run_pipeline.py, tests/unit/application/fakes.py, tests/unit/application/test_run_pipeline.py, src/adops/domain/branch_environment.py (was already untracked from phase 0; added raw_schema_var so the dbt var name has one source). Change: StepFingerprintStore/ProjectFiles ports, StepStatus.DEFERRED, plan_branch_run + current_fingerprints, FingerprintSavingStep wrapper (stage only, after Checks), branch runs defer earlier Steps and short-circuit with no Orchestrator call, StageNotRunError, BranchSourcesNotParameterizedError (a PipelineValidationError), missing-stage PipelineValidationError. Store+files travel together as StepFingerprinting; run_pipeline raises ValueError if environment_name != branch.environment.",
+      "unplannedFiles": [
+        "src/adops/domain/branch_environment.py"
+      ],
+      "completedAt": "2026-11-19T14:05:01Z",
+      "gateRun": [
+        "uv sync --locked: pass",
+        "uv run ruff check: pass",
+        "uv run pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass, 828 passed, 100% coverage",
+        "wheel template check: pass",
+        "uv run pytest tests/e2e -m e2e: pass, 2 passed"
+      ],
+      "gradeResult": {
+        "phaseId": "branch-run-use-case",
+        "dimensions": [
+          {
+            "dimensionId": "fingerprint-saved-only-after-checks-in-stage",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "one 3-Step test proves Step 1 saved, Steps 2-3 not, when Step 2 Check fails; store failure redacted"
+          },
+          {
+            "dimensionId": "deferral-and-no-change-short-circuit",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "report order and mixed DEFERRED/PASSED succeeded both asserted; deferred Steps resolve no secrets"
+          },
+          {
+            "dimensionId": "branch-reverse-sync-never-writes",
+            "score": 10,
+            "minScore": 9,
+            "passed": true,
+            "evidence": "same test proves stage settings really apply, then branch run previews with br_ env and zero apply calls"
+          },
+          {
+            "dimensionId": "unparameterized-sources-fail-fast",
+            "score": 10,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "message carries exact sources.yml var() expression, asserted in test; deferred-Sync case passes"
+          },
+          {
+            "dimensionId": "application-stays-behind-ports",
+            "score": 9,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "Protocols + plain fakes, no forbidden imports; Jinja var() template still assembled in application code"
+          }
+        ],
+        "overallPass": true,
+        "summary": "All five dimensions pass; nit: dbt var() template built in application, not domain."
+      }
+    },
+    {
+      "phaseId": "warehouse-writer-schema-layout",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-19T14:46:11Z",
+      "baseRef": "5a53f65e4219479ad44ecc61209539b9b90d24af",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/ports.py,src/adops/application/run_pipeline.py,tests/unit/application/fakes.py,tests/unit/application/test_run_pipeline.py,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.status.last_good.json,src/adops/domain/branch_environment.py,tests/unit/domain/test_branch_environment.py || Changed: src/adops/infrastructure/dlt_sync.py, src/adops/infrastructure/schema_snapshot_store.py, src/adops/infrastructure/step_fingerprint_store.py (new), tests/unit/infrastructure/test_dlt_sync.py, tests/unit/infrastructure/test_schema_snapshot_store.py, tests/unit/infrastructure/test_step_fingerprint_store.py (new), tests/unit/infrastructure/conftest.py, tests/unit/interface/test_run_command.py; discoveries.md +1 line. DltSync and WarehouseSnapshotStore take layout=SchemaLayout (default unchanged; non-default disables dlt dataset-name normalization); new step_fingerprint_store.py with WarehouseFingerprintStore + read_project_tree/ProjectTree; conftest gains a fresh-database postgres_warehouse fixture; test_run_command exact-vars assertion gains _layout. Amendment 1 (see amendments): store constructor takes the warehouse, ProjectTree class implements ProjectFiles. || Compensation known: revert the layout keywords (defaults equal old constants) and DROP TABLE \"adops\".\"_adops_step_fingerprints\" in stage; not invoked. Grader aside (outside rubric): bare except in _in_warehouse also maps programming errors to WarehouseUnreachable.",
+      "unplannedFiles": [
+        "tests/unit/infrastructure/conftest.py",
+        "tests/unit/interface/test_run_command.py"
+      ],
+      "amendments": [
+        {
+          "at": "2026-11-19T14:53:20Z",
+          "by": "execute",
+          "reason": "Phase 1 shipped StepFingerprintStore.load(pipeline)/save(pipeline, step, fingerprint) with no Warehouse argument and ProjectFiles as a Protocol with a read_tree(relative_dir) method, so a bare function and a (project, kind, environment) constructor cannot satisfy the ports.",
+          "grounding": "src/adops/application/ports.py StepFingerprintStore/ProjectFiles and run_pipeline.py fingerprinting.store.load(pipeline.name) / project_files.read_tree(step.project); discovery: first_changed_step compares stage fingerprints by position",
+          "before": {
+            "changes": [
+              "Add src/adops/infrastructure/step_fingerprint_store.py with WarehouseFingerprintStore(project, warehouse_kind, environment). ...",
+              "In the same module, add `read_project_tree(project_root, relative_dir) -> Mapping[str, bytes]`. ... and satisfies the ProjectFiles port."
+            ]
+          },
+          "after": {
+            "changes": [
+              "WarehouseFingerprintStore(project, warehouse_kind, warehouse, *, environment): the resolved Warehouse is bound at construction because the port methods take none; rows carry a saved_order column and load() returns them ORDER BY saved_order so Step order is preserved; everything else as planned.",
+              "read_project_tree(project_root, relative_dir) as planned, plus a frozen ProjectTree(project_root) dataclass whose read_tree(relative_dir) delegates to it and is what satisfies the ProjectFiles port."
+            ]
+          }
+        }
+      ],
+      "completedAt": "2026-11-19T14:57:50Z",
+      "gateRun": "uv sync --locked: pass; uv run ruff check: pass; uv run pytest tests/unit --cov (fail_under=100, Postgres DSN set): pass, 875 tests, 100%; uv build --wheel + template grep: pass; uv run pytest tests/e2e -m e2e: pass (2)",
+      "gradeResult": {
+        "phaseId": "warehouse-writer-schema-layout",
+        "gradedAt": "2026-11-19T14:57:50Z",
+        "overallPass": true,
+        "dimensions": [
+          {
+            "dimensionId": "default-layout-byte-identical",
+            "score": 10,
+            "minScore": 8,
+            "pass": true,
+            "evidence": "config_params == {credentials} asserted per kind for omitted and explicit default layout; snapshot store spies every built destination"
+          },
+          {
+            "dimensionId": "branch-schemas-keep-double-underscore",
+            "score": 10,
+            "minScore": 8,
+            "pass": true,
+            "evidence": "exact set {br_x__raw_shop, br_x__raw_shop_staging} from information_schema.schemata on DuckDB and Postgres rules out collapsed names and vacuous staging"
+          },
+          {
+            "dimensionId": "upsert-roundtrip-both-warehouses",
+            "score": 10,
+            "minScore": 8,
+            "pass": true,
+            "evidence": "pipeline isolation and no-DDL fresh load proven on both kinds; ON CONFLICT upsert; values parameterized"
+          },
+          {
+            "dimensionId": "project-tree-excludes-generated",
+            "score": 10,
+            "minScore": 8,
+            "pass": true,
+            "evidence": "simulated dbt target/logs write leaves the real step_fingerprint unchanged; model edit changes it; path-component exclusion"
+          },
+          {
+            "dimensionId": "errors-carry-no-secrets",
+            "score": 10,
+            "minScore": 9,
+            "pass": true,
+            "evidence": "WarehouseUnreachable raised outside except: no __cause__/__context__; str/repr checked for password, host, driver class, path"
+          }
+        ]
+      }
+    },
+    {
+      "phaseId": "warehouse-reader-schema-layout",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-19T15:07:27+00:00",
+      "baseRef": "5a53f65e4219479ad44ecc61209539b9b90d24af",
+      "baseDirty": true,
+      "notes": "already dirty at start (earlier horizon-6 phases, uncommitted): docs/roadmaps/agentic-dataops/blockers.md, docs/roadmaps/agentic-dataops/decisions.md, docs/roadmaps/agentic-dataops/discoveries.md, docs/roadmaps/agentic-dataops/next-horizon-brief.md, docs/roadmaps/agentic-dataops/state.md, src/adops/application/ports.py, src/adops/application/run_pipeline.py, src/adops/infrastructure/dlt_sync.py, src/adops/infrastructure/schema_snapshot_store.py, tests/unit/application/fakes.py, tests/unit/application/test_run_pipeline.py, tests/unit/infrastructure/conftest.py, tests/unit/infrastructure/test_dlt_sync.py, tests/unit/infrastructure/test_schema_snapshot_store.py, tests/unit/interface/test_run_command.py, docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.json, docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.md, docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.status.json, docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.status.last_good.json, src/adops/domain/branch_environment.py, src/adops/infrastructure/step_fingerprint_store.py, tests/unit/domain/test_branch_environment.py, tests/unit/infrastructure/test_step_fingerprint_store.py || changed: src/adops/infrastructure/dbt_transform.py, src/adops/infrastructure/dlt_sync.py, src/adops/infrastructure/postgres_reverse_sync.py, src/adops/infrastructure/schema_snapshot_store.py, src/adops/templates/demo/dbt/models/sources.yml, tests/unit/infrastructure/test_dbt_transform.py, tests/unit/infrastructure/test_dlt_sync.py, tests/unit/infrastructure/test_postgres_reverse_sync.py, tests/unit/infrastructure/test_schema_snapshot_store.py. DbtTransform gains target_schema (rendered into both profiles; default analytics, Postgres profile text unchanged) and raw_schemas (JSON --vars adops_raw_schema_<source>, only when non-empty); PostgresReverseSync gains analytics_schema; demo sources.yml reads var(adops_raw_schema_shop, raw_shop). Unplanned: warehouse_destination(layout) became keyword branch_schemas: bool so the Reverse Sync reader (which has only a schema string) can turn off dataset-name normalization; DltSync and WarehouseSnapshotStore pass layout != DEFAULT_LAYOUT; their tests updated. Files dirty at start that this phase also edited: dlt_sync.py, schema_snapshot_store.py and their tests (earlier phase), so git diff vs baseRef includes earlier-phase hunks there. || graded by subagent: 9/10/10, no 10->9 demotions. Compensation known: revert the DbtTransform/PostgresReverseSync keywords, the sources.yml var line and the warehouse_destination branch_schemas flag (back to layout); not invoked.",
+      "unplannedFiles": [
+        "src/adops/infrastructure/dlt_sync.py",
+        "src/adops/infrastructure/schema_snapshot_store.py",
+        "tests/unit/infrastructure/test_dlt_sync.py",
+        "tests/unit/infrastructure/test_schema_snapshot_store.py",
+        "tests/unit/interface/test_init_command.py",
+        "tests/unit/interface/test_run_command.py"
+      ],
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-19T15:12:11+00:00",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "FAILED test_init_command.py::test_demo_dbt_project_reads_raw_shop_and_ships_no_profile; FAILED test_run_command.py::test_real_adapters_are_built_for_the_project (vars() lacks _analytics_schema)",
+          "resolvedBy": "gate-fix",
+          "resolution": "Updated two snapshot tests to the new sources.yml var text and the new _analytics_schema attribute"
+        }
+      ],
+      "gateRun": [
+        "uv sync --locked: pass",
+        "uv run ruff check: pass",
+        "uv run pytest tests/unit --cov (100% line+branch, Postgres service): pass after gate-fix (888 tests)",
+        "uv build --wheel + sources.yml in wheel: pass",
+        "uv run pytest tests/e2e -m e2e: pass (2)"
+      ],
+      "completedAt": "2026-11-19T15:17:14+00:00",
+      "gradeResult": {
+        "phaseId": "warehouse-reader-schema-layout",
+        "dimensionScores": [
+          {
+            "dimensionId": "reader-default-layout-byte-identical",
+            "score": 9,
+            "pass": true,
+            "evidence": "Full default argv asserted with no --vars, destination kwargs branch_schemas=False with credentials only; not 10: full argv only on DuckDB, Postgres default profile checked by substring"
+          },
+          {
+            "dimensionId": "dbt-reads-deferred-or-rebuilt-raw",
+            "score": 10,
+            "pass": true,
+            "evidence": "Real dbt builds on DuckDB and Postgres read the demo sources.yml from br_x__raw_shop beside a raw_shop decoy, write br_x__analytics and create no analytics; the raw_shop fallback is covered by a real run"
+          },
+          {
+            "dimensionId": "reverse-sync-reads-chosen-analytics-safely",
+            "score": 10,
+            "pass": true,
+            "evidence": "No read_only; branch reads on DuckDB and Postgres ignore a decoy in stage analytics; dbt build to br_x__analytics then read in the same process on one DuckDB file"
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "run-branch-cli-option",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-19T15:29:01Z",
+      "baseRef": "5a53f65e4219479ad44ecc61209539b9b90d24af",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/infrastructure/dbt_transform.py,src/adops/infrastructure/dlt_sync.py,src/adops/infrastructure/postgres_reverse_sync.py,src/adops/infrastructure/schema_snapshot_store.py,src/adops/templates/demo/dbt/models/sources.yml,tests/unit/application/fakes.py,tests/unit/application/test_run_pipeline.py,tests/unit/infrastructure/conftest.py,tests/unit/infrastructure/test_dbt_transform.py,tests/unit/infrastructure/test_dlt_sync.py,tests/unit/infrastructure/test_postgres_reverse_sync.py,tests/unit/infrastructure/test_schema_snapshot_store.py,tests/unit/interface/test_init_command.py,tests/unit/interface/test_run_command.py,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.status.last_good.json,src/adops/domain/branch_environment.py,src/adops/infrastructure/step_fingerprint_store.py,tests/unit/domain/test_branch_environment.py,tests/unit/infrastructure/test_step_fingerprint_store.py || changed: src/adops/interface/run_command.py, tests/unit/interface/test_run_command.py, src/adops/application/run_pipeline.py (test_run_command.py and run_pipeline.py were already dirty from earlier phases, so git diff vs baseRef includes their hunks). run gains --branch; --env defaults to None (dev), and both together is a usage error (exit 2). _run_environment always passes StepFingerprinting (store built for the chosen Environment, Warehouse resolved from its own secret only). _run_branch resolves stage settings, names br_<branch> from stage's longest Source, calls plan_branch_run, builds Sync/snapshot store with SchemaLayout.for_branch under the br_ state dir, and one Transform/Reverse Sync per running Step (StepTransforms/StepReverseSyncs dispatch by Step name) from read_layout. Deferred Steps print 'deferred to stage'; a no-change run prints that it uses stage; StageNotRunError maps to fail(). Builders gained defaulted keyword args; new build_fingerprint_store(project, environment, kind, warehouse) and build_project_files(project). Unplanned: run_pipeline._stage_environment made public as stage_environment so the CLI reuses its dedicated missing-stage message. || graded by subagent: 9/9/10/9, no 10->9 demotions. No compensation on this phase. Grader aside: none outside the rubric.",
+      "unplannedFiles": [
+        "src/adops/application/run_pipeline.py"
+      ],
+      "completedAt": "2026-11-19T15:40:41Z",
+      "gateRun": "uv sync --locked: pass; uv run ruff check: pass; uv run pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN=local adops-test-pg :55432): pass, 904 tests, 100%; uv run pytest tests/e2e -m e2e: pass (2)",
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-19T15:40:41Z",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "28 errors in Postgres-backed infrastructure tests; coverage 98.43% < 100",
+          "resolvedBy": "gate-fix",
+          "resolution": "environment only: reran with ADOPS_TEST_POSTGRES_DSN pointed at the local test Postgres container; no code change"
+        }
+      ],
+      "gradeResult": {
+        "phaseId": "run-branch-cli-option",
+        "overallPass": true,
+        "dimensions": [
+          {
+            "dimensionId": "cli-wires-branch-layouts",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "Every builder asserted for the Transform-change case; the Sync-change case does not assert the snapshot-store layout, so not a 10."
+          },
+          {
+            "dimensionId": "cli-input-validation-and-messages",
+            "score": 9,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "Exact output for no-change, stage-not-run and missing-stage; the usage error is checked by substring only."
+          },
+          {
+            "dimensionId": "stage-runs-save-fingerprints",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "Asserts store kind/env/stage host, and that saved fingerprints equal current_fingerprints in Step order, which proves run_pipeline used the store end to end."
+          },
+          {
+            "dimensionId": "cli-output-no-secrets",
+            "score": 9,
+            "minScore": 9,
+            "passed": true,
+            "evidence": "STAGE_SECRET absent on every new path, and the unexpected-error path prints only the type; checked per test rather than in one parametrized test."
+          }
+        ]
+      }
+    },
+    {
+      "phaseId": "drop-branch-command",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-19T15:42:22Z",
+      "baseRef": "5a53f65e4219479ad44ecc61209539b9b90d24af",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/infrastructure/dbt_transform.py,src/adops/infrastructure/dlt_sync.py,src/adops/infrastructure/postgres_reverse_sync.py,src/adops/infrastructure/schema_snapshot_store.py,src/adops/interface/run_command.py,src/adops/templates/demo/dbt/models/sources.yml,tests/unit/application/fakes.py,tests/unit/application/test_run_pipeline.py,tests/unit/infrastructure/conftest.py,tests/unit/infrastructure/test_dbt_transform.py,tests/unit/infrastructure/test_dlt_sync.py,tests/unit/infrastructure/test_postgres_reverse_sync.py,tests/unit/infrastructure/test_schema_snapshot_store.py,tests/unit/interface/test_init_command.py,tests/unit/interface/test_run_command.py,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.status.last_good.json,src/adops/domain/branch_environment.py,src/adops/infrastructure/step_fingerprint_store.py,tests/unit/domain/test_branch_environment.py,tests/unit/infrastructure/test_step_fingerprint_store.py || Changed: NEW src/adops/application/drop_branch.py, src/adops/infrastructure/warehouse_schemas.py, src/adops/interface/drop_branch_command.py, tests/unit/application/test_drop_branch.py, tests/unit/infrastructure/test_warehouse_schemas.py, tests/unit/interface/test_drop_branch_command.py, tests/unit/conftest.py; MODIFIED src/adops/interface/cli.py, plus (already dirty) run_pipeline.py (+stage_branch_name, shared by run --branch and drop-branch so both compute the same Branch name), run_command.py (uses stage_branch_name; +read_settings), tests/unit/infrastructure/conftest.py (duckdb lock fixture moved to tests/unit/conftest.py for interface tests). Change: adops drop-branch lists stage-Warehouse schemas, drops those with Python startswith(br_<name>__) via DROP SCHEMA IF EXISTS \"..\" CASCADE, then removes .adops/dlt/br_<name> only. || Grade: 10/10/9/9, no 10→9 demotions. Compensation known: re-run `adops run <pipeline> --branch <name>` to rebuild a dropped Branch.",
+      "unplannedFiles": [
+        "tests/unit/conftest.py",
+        "tests/unit/infrastructure/conftest.py",
+        "src/adops/application/run_pipeline.py",
+        "src/adops/interface/run_command.py"
+      ],
+      "completedAt": "2026-11-19T15:50:43Z",
+      "gateRun": [
+        "uv sync --locked: pass",
+        "uv run ruff check: pass",
+        "uv run pytest tests/unit --cov (956 passed, 100%): pass",
+        "wheel templates check: pass",
+        "uv run pytest tests/e2e -m e2e (2 passed): pass"
+      ],
+      "gradeResult": {
+        "phaseId": "drop-branch-command",
+        "overallPass": true,
+        "dimensions": [
+          {
+            "id": "exact-prefix-drop-only",
+            "score": 10,
+            "minScore": 9,
+            "passed": true,
+            "evidence": "Python startswith on branch_environment_name prefix; real DuckDB+Postgres tests incl. br_fea__, br_featx_, br_feat_%_ and quoted/percent FEAT schema; 10-vs-9: adversarial wildcard/quote neighbours on both engines"
+          },
+          {
+            "id": "local-state-deletion-scoped",
+            "score": 10,
+            "minScore": 9,
+            "passed": true,
+            "evidence": "rmtree only on local_state_dir after br_[a-z0-9_]+ fullmatch; siblings asserted; 10-vs-9: parametrized empty/traversal names rejected"
+          },
+          {
+            "id": "idempotent-and-stage-only-secret",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "twice-run exit 0 on CLI and both Warehouse kinds; only stage secret; -1 for usage message naming --branch on a positional arg"
+          },
+          {
+            "id": "layer-split-and-error-mapping",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "no SQL/path in use case; unreachable, locked, unexpected all leak-free; -1 for broad catch in adapter and settings parsed twice"
+          }
+        ]
+      }
+    },
+    {
+      "phaseId": "demo-e2e-branch-environment",
+      "status": "awaiting-verification",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-20T06:25:48Z",
+      "baseRef": "5a53f65e4219479ad44ecc61209539b9b90d24af",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/infrastructure/dbt_transform.py,src/adops/infrastructure/dlt_sync.py,src/adops/infrastructure/postgres_reverse_sync.py,src/adops/infrastructure/schema_snapshot_store.py,src/adops/interface/cli.py,src/adops/interface/run_command.py,src/adops/templates/demo/dbt/models/sources.yml,tests/unit/application/fakes.py,tests/unit/application/test_run_pipeline.py,tests/unit/infrastructure/conftest.py,tests/unit/infrastructure/test_dbt_transform.py,tests/unit/infrastructure/test_dlt_sync.py,tests/unit/infrastructure/test_postgres_reverse_sync.py,tests/unit/infrastructure/test_schema_snapshot_store.py,tests/unit/interface/test_init_command.py,tests/unit/interface/test_run_command.py,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-06-branch-environments-roadmap.status.last_good.json,src/adops/application/drop_branch.py,src/adops/domain/branch_environment.py,src/adops/infrastructure/step_fingerprint_store.py,src/adops/infrastructure/warehouse_schemas.py,src/adops/interface/drop_branch_command.py,tests/unit/application/test_drop_branch.py,tests/unit/conftest.py,tests/unit/domain/test_branch_environment.py,tests/unit/infrastructure/test_step_fingerprint_store.py,tests/unit/infrastructure/test_warehouse_schemas.py,tests/unit/interface/test_drop_branch_command.py || changed: tests/e2e/test_demo_sync.py (new test_branch_environment_defers_rebuilds_and_drops + helpers stage_schemas/branch_schemas/stage_contents; ORPHAN_CUSTOMER_ID assertion now scans only adops step/check/preview lines, one statement), docs/adr/0006-branch-environments-as-warehouse-schemas.md (body rewritten to br_<branch>__ + dated Clarification), GLOSSARY.md (Branch Environment reworded; +Branch Schema, Step Fingerprint, Changed Step, Defer, Drop), decisions.md +1 line, discoveries.md +1 line (E2E wall-clock 183s). Scenario: stage run, snapshot every stage table+view row and schema list; dbt-only edit on feat and feat2 (Sync deferred, only *__analytics); Sync edit on feat (br_feat__raw_shop rows, stage unchanged); revert, feat2 all deferred; drop feat (feat2 survives, stage equal, second drop exits 0); drop feat2.",
+      "unplannedFiles": [
+        "docs/roadmaps/agentic-dataops/discoveries.md"
+      ],
+      "gateRun": [
+        "uv sync --locked: pass",
+        "uv run ruff check: pass",
+        "uv run pytest tests/unit --cov (956 passed, 100%): pass",
+        "wheel templates check: pass",
+        "uv run pytest tests/e2e -m e2e (4 passed, 183s wall): pass"
+      ]
+    }
+  ]
+}

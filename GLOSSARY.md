@@ -89,8 +89,28 @@ A fully separate place a Pipeline runs, with its own Warehouse location and secr
 _Avoid_: stage (as a generic word), target, profile
 
 **Branch Environment**:
-A disposable Environment created for a single Git branch or pull request and deleted when it is merged or closed.
+A disposable Environment for a single Git branch or pull request, built from stage's settings by `adops run --branch` and removed with `adops drop-branch` when it is no longer needed. It lives in Branch Schemas in stage's Warehouse.
 _Avoid_: preview env, ephemeral env, sandbox
+
+**Branch Schema**:
+One of a Branch Environment's schemas in stage's Warehouse, named `br_<branch>__<schema>` (e.g. `br_add_refunds__analytics`), beside stage's own schema of the same kind.
+_Avoid_: env schema, branch database
+
+**Step Fingerprint**:
+A hash of everything that defines a Step: its definition in the Pipeline file and, for a Transform, every file of its dbt project. stage saves one per Step after the Step's Checks pass.
+_Avoid_: checksum, version, hash (alone)
+
+**Changed Step**:
+A Step whose Step Fingerprint differs from the one saved by stage's last successful run. A Branch Environment rebuilds the first Changed Step and every Step after it.
+_Avoid_: dirty Step, modified Step
+
+**Defer**:
+What a Branch Environment does with a Step that has not changed: it skips the Step and reads stage's result instead. A Branch where no Step changed defers every Step and uses stage as it is.
+_Avoid_: skip (a skipped Step is one that did not run because an earlier one failed), reuse, cache
+
+**Drop**:
+Removing a Branch Environment with `adops drop-branch <branch>`: every Branch Schema starting with exactly `br_<branch>__` and its local dlt state. stage's own schemas are never dropped.
+_Avoid_: delete, clean up, teardown
 
 **Promotion**:
 Moving a reviewed change from one Environment to the next (Branch Environment → stage → prod) through Git.

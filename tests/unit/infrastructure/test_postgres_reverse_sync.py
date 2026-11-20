@@ -5,7 +5,7 @@ from uuid import uuid4
 import duckdb
 import psycopg
 import pytest
-from conftest import PostgresTarget
+from conftest import PostgresTarget, PostgresWarehouse
 from psycopg import sql
 from test_dbt_transform import write_dbt_project
 from test_dlt_sync import SENTINEL_PASSWORD, assert_no_secret, unreachable_postgres
@@ -20,9 +20,11 @@ from adops.domain.reverse_sync import ReverseSyncStep
 from adops.domain.reverse_sync_diff import compute_diff
 from adops.domain.transform import TransformStep
 from adops.infrastructure.dbt_transform import TARGET_SCHEMA, DbtTransform
+from adops.infrastructure.dlt_sync import warehouse_destination
 from adops.infrastructure.postgres_reverse_sync import PostgresReverseSync
 
 MODEL = "customer_stats"
+BRANCH_ANALYTICS = "br_x__analytics"
 TARGET_ROWS = [(1, "a@x", 10), (2, "b@x", 20), (3, "c@x", 30)]
 RESULT_ROWS = [(1, "a@x", 10), (2, "b@x", 25), (4, "d@x", 40), (5, "e@x", 50)]
 
@@ -62,16 +64,19 @@ def table_rows(target: PostgresTarget) -> list[tuple[object, ...]]:
 
 
 def duckdb_warehouse(
-    tmp_path: Path, rows: list[tuple[object, ...]], total_type: str = "INTEGER"
+    tmp_path: Path,
+    rows: list[tuple[object, ...]],
+    total_type: str = "INTEGER",
+    schema: str = TARGET_SCHEMA,
 ) -> ResolvedDuckDb:
     path = tmp_path / "warehouse.duckdb"
     with duckdb.connect(str(path)) as connection:
-        connection.execute(f"CREATE SCHEMA {TARGET_SCHEMA}")
+        connection.execute(f"CREATE SCHEMA {schema}")
         connection.execute(
-            f"CREATE TABLE {TARGET_SCHEMA}.{MODEL} "
+            f"CREATE TABLE {schema}.{MODEL} "
             f"(customer_id INTEGER, email VARCHAR, order_total {total_type})"
         )
-        connection.executemany(f"INSERT INTO {TARGET_SCHEMA}.{MODEL} VALUES (?, ?, ?)", rows)
+        connection.executemany(f"INSERT INTO {schema}.{MODEL} VALUES (?, ?, ?)", rows)
     return ResolvedDuckDb(str(path))
 
 
@@ -306,3 +311,99 @@ def test_unreachable_target_raises_target_unreachable_without_driver_text(
     for error in (on_read.value, on_apply.value):
         assert_no_secret(error)
         assert SENTINEL_PASSWORD not in repr(error.args)
+
+
+def built_destinations(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    built: list[dict] = []
+
+    def recording(*args, **kwargs):
+        destination = warehouse_destination(*args, **kwargs)
+        built.append({"kwargs": kwargs, "config": dict(destination.config_params)})
+        return destination
+
+    monkeypatch.setattr(
+        "adops.infrastructure.postgres_reverse_sync.warehouse_destination", recording
+    )
+    return built
+
+
+def test_the_default_read_opens_analytics_with_default_destination_options(
+    tmp_path: Path,
+    adapter: PostgresReverseSync,
+    postgres_target: PostgresTarget,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    built = built_destinations(monkeypatch)
+    warehouse = duckdb_warehouse(tmp_path, RESULT_ROWS)
+
+    read = adapter.read(
+        reverse_sync_step(postgres_target.table), warehouse, postgres_target.connection
+    )
+
+    assert built == [
+        {"kwargs": {"branch_schemas": False}, "config": {"credentials": warehouse.path}}
+    ]
+    assert len(read.result_rows) == 4
+
+
+def test_a_branch_read_on_duckdb_takes_rows_from_the_branch_analytics_schema(
+    tmp_path: Path, postgres_target: PostgresTarget, monkeypatch: pytest.MonkeyPatch
+):
+    built = built_destinations(monkeypatch)
+    duckdb_warehouse(tmp_path, [(9, "stage@x", 90)])
+    warehouse = duckdb_warehouse(tmp_path, RESULT_ROWS, schema=BRANCH_ANALYTICS)
+    adapter = PostgresReverseSync(
+        tmp_path, environment="dev", warehouse_kind="duckdb", analytics_schema=BRANCH_ANALYTICS
+    )
+
+    read = adapter.read(
+        reverse_sync_step(postgres_target.table), warehouse, postgres_target.connection
+    )
+
+    assert sorted(row["customer_id"] for row in read.result_rows) == [1, 2, 4, 5]
+    assert built[0]["config"]["enable_dataset_name_normalization"] is False
+
+
+def test_a_branch_read_on_postgres_takes_rows_from_the_branch_analytics_schema(
+    tmp_path: Path, postgres_target: PostgresTarget, postgres_warehouse: PostgresWarehouse
+):
+    postgres_warehouse.execute(
+        "CREATE SCHEMA analytics",
+        f"CREATE TABLE analytics.{MODEL} AS SELECT 9 AS customer_id, 'stage@x' AS email, "
+        "90 AS order_total",
+        f"CREATE SCHEMA {BRANCH_ANALYTICS}",
+        f"CREATE TABLE {BRANCH_ANALYTICS}.{MODEL} AS SELECT 7 AS customer_id, 'g@x' AS email, "
+        "70 AS order_total",
+    )
+    adapter = PostgresReverseSync(
+        tmp_path, environment="dev", warehouse_kind="postgres", analytics_schema=BRANCH_ANALYTICS
+    )
+
+    read = adapter.read(
+        reverse_sync_step(postgres_target.table),
+        postgres_warehouse.connection,
+        postgres_target.connection,
+    )
+
+    assert read.result_rows == ({"customer_id": 7, "email": "g@x", "order_total": 70},)
+
+
+def test_a_branch_dbt_build_then_read_in_one_process_shares_the_duckdb_file(
+    tmp_path: Path, postgres_target: PostgresTarget
+):
+    root = tmp_path / "project"
+    root.mkdir()
+    model_sql = "select * from (values (3, 'c@x', 30)) as t(customer_id, email, order_total)"
+    write_dbt_project(root, {MODEL: model_sql}, schema="version: 2\n")
+    warehouse = ResolvedDuckDb(str(tmp_path / "warehouse.duckdb"))
+    step = TransformStep(type="transform", name="build", project="dbt")
+
+    built = DbtTransform(root, warehouse_kind="duckdb", target_schema=BRANCH_ANALYTICS).run(
+        step, warehouse
+    )
+    read = PostgresReverseSync(
+        root, environment="br_x", warehouse_kind="duckdb", analytics_schema=BRANCH_ANALYTICS
+    ).read(reverse_sync_step(postgres_target.table), warehouse, postgres_target.connection)
+
+    assert built.crashed is False
+    assert read.result_rows == ({"customer_id": 3, "email": "c@x", "order_total": 30},)

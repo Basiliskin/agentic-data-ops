@@ -11,3 +11,5 @@
 - 2026-11-19 | horizon 4 | completed | 6 phases | 1 amendment — DuckDB Warehouse kind, kind read from settings, dlt[duckdb] + dbt-duckdb at runtime, demo E2E passes on Postgres and DuckDB in one stack (92s)
 - 2026-11-19 | horizon 5 | planned | 7 phases (Reverse Sync + Preview, stage Environment, demo E2E on both Warehouses); gate passed after fixes (0 blockers, 3 majors fixed)
 - 2026-11-19 | horizon 5 | completed | 7 phases | 1 amendment — Reverse Sync + Preview (writes only in stage/prod), per-Environment dlt state, demo stage Environment; E2E passes on Postgres and DuckDB (110s)
+- 2026-11-19 | horizon 6 | planned | 7 phases (Branch Environments: --branch run deferring to stage by Step Fingerprint, drop-branch, demo E2E on both Warehouses); gate passed after fixes (1 blocker healed)
+- 2026-11-20 | horizon 6 | completed | 7 phases | 1 amendment — Branch Environments: run --branch defers unchanged Steps to stage by Step Fingerprint into br_<branch>__ schemas, drop-branch; E2E passes on Postgres and DuckDB (183s)

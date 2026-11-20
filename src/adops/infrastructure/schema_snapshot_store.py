@@ -8,22 +8,31 @@ import dlt
 from dlt.destinations.sql_client import SqlClientBase
 
 from adops.application.ports import ResolvedWarehouse
+from adops.domain.branch_environment import SchemaLayout
 from adops.domain.schema_snapshot import TableShape
 from adops.infrastructure.dlt_sync import (
+    DEFAULT_LAYOUT,
     local_state_dir,
     warehouse_client,
     warehouse_destination,
 )
 
-SNAPSHOT_SCHEMA = "adops"
 SNAPSHOT_TABLE = "_adops_schema_snapshots"
 
 
 class WarehouseSnapshotStore:
     """The SchemaSnapshotStore port backed by a table in the Environment's own Warehouse."""
 
-    def __init__(self, project: Path, warehouse_kind: str, *, environment: str) -> None:
+    def __init__(
+        self,
+        project: Path,
+        warehouse_kind: str,
+        *,
+        environment: str,
+        layout: SchemaLayout = DEFAULT_LAYOUT,
+    ) -> None:
         self._project = project
+        self._layout = layout
         self._pipelines_dir = local_state_dir(project, environment)
         self._warehouse_kind = warehouse_kind
 
@@ -72,8 +81,13 @@ class WarehouseSnapshotStore:
         pipeline = dlt.pipeline(
             pipeline_name="adops_schema_snapshots",
             pipelines_dir=str(self._pipelines_dir),
-            destination=warehouse_destination(self._warehouse_kind, warehouse, self._project),
-            dataset_name=SNAPSHOT_SCHEMA,
+            destination=warehouse_destination(
+                self._warehouse_kind,
+                warehouse,
+                self._project,
+                branch_schemas=self._layout != DEFAULT_LAYOUT,
+            ),
+            dataset_name=self._layout.adops,
         )
         with warehouse_client(pipeline) as client:
             if not client.has_dataset():

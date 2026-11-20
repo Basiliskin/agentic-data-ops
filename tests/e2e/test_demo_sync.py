@@ -324,7 +324,11 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
     assert f"orders: dbt test {RELATIONSHIPS} failed — 1 failing rows" in output
     assert "dbt run failed" not in output
     assert_no_secret_or_row_value(output, env)
-    assert ORPHAN_CUSTOMER_ID not in output
+    assert not [
+        line
+        for line in output.splitlines()
+        if line.startswith(("step ", "  ")) and ORPHAN_CUSTOMER_ID in line
+    ]
     assert counts(demo) == {"customers": 20, "orders": 102}
     orphans = (
         "SELECT count(*) FROM raw_shop.orders o"
@@ -429,3 +433,128 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
             " + (SELECT count(*) FROM runs WHERE run_body LIKE '%%' || %s || '%%')"
         )
         assert dagster_meta(env, leaks, env[name], env[name])[0][0] == 0
+
+
+def stage_schemas(demo):
+    sql = (
+        "SELECT schema_name FROM information_schema.schemata"
+        " WHERE catalog_name = current_database()"
+    )
+    return sorted(name for (name,) in warehouse(demo, sql, "stage"))
+
+
+def branch_schemas(demo, branch):
+    return [schema for schema in stage_schemas(demo) if schema.startswith(f"br_{branch}__")]
+
+
+def stage_contents(demo):
+    """Every row of every table and view stage owns, so any write by a Branch shows up."""
+    tables = warehouse(
+        demo,
+        "SELECT table_schema, table_name FROM information_schema.tables"
+        " WHERE table_catalog = current_database()"
+        " AND table_schema NOT IN ('pg_catalog', 'information_schema')",
+        "stage",
+    )
+    contents = {"schemas": [s for s in stage_schemas(demo) if not s.startswith("br_")]}
+    for schema, table in sorted(tables):
+        if not schema.startswith("br_"):
+            rows = warehouse(demo, f'SELECT * FROM "{schema}"."{table}"', "stage")
+            contents[f"{schema}.{table}"] = sorted(rows, key=repr)
+    return contents
+
+
+def assert_branch_run_passed(code, output, env):
+    assert code == 0, output
+    assert_no_secret_or_row_value(output, env)
+    assert "wrote:" not in output
+
+
+def test_branch_environment_defers_rebuilds_and_drops(demo):
+    project, env = demo.project, demo.env
+    model = project / "dbt" / "models" / "customer_stats.sql"
+    pipeline = project / "pipelines" / "shop_sync.yaml"
+    original_model, original_pipeline = model.read_text(), pipeline.read_text()
+
+    code, output = adops_run(project, *RUN, "--env", "stage")
+
+    assert code == 0, output
+    stage_before = stage_contents(demo)
+    target_before = customer_stats(env)
+    assert stage_before["adops._adops_step_fingerprints"]
+    assert target_before == SEED_CUSTOMER_STATS
+
+    model.write_text("-- changed on a branch\n" + original_model)
+
+    code, output = adops_run(project, *RUN, "--branch", "feat")
+
+    assert_branch_run_passed(code, output, env)
+    lines = output.splitlines()
+    assert "step sync_shop: deferred to stage" in lines
+    assert_transform_passed(output)
+    assert_reverse_sync_passed(output)
+    assert "  Preview: would insert 0, would update 0, would delete 0" in lines
+    assert branch_schemas(demo, "feat") == ["br_feat__analytics"]
+    branch_orders = "SELECT count(*) FROM br_feat__analytics.customer_orders"
+    assert warehouse(demo, branch_orders, "stage")[0][0] == analytics_rows(demo, "stage")
+
+    code, output = adops_run(project, *RUN, "--branch", "feat2")
+
+    assert_branch_run_passed(code, output, env)
+    assert "step sync_shop: deferred to stage" in output.splitlines()
+    assert_transform_passed(output)
+    assert branch_schemas(demo, "feat2") == ["br_feat2__analytics"]
+
+    sync_edit = original_pipeline.replace("min_rows, count: 1}", "min_rows, count: 2}")
+    assert sync_edit != original_pipeline
+    pipeline.write_text(sync_edit)
+
+    code, output = adops_run(project, *RUN, "--branch", "feat")
+
+    assert_branch_run_passed(code, output, env)
+    lines = output.splitlines()
+    assert "step sync_shop: passed — customers 20 rows, orders 100 rows" in lines
+    assert_all_checks_pass(output)
+    assert_transform_passed(output)
+    assert_reverse_sync_passed(output)
+    assert "  Preview: would insert 0, would update 0, would delete 0" in lines
+    for table in ("customers", "orders"):
+        rows = warehouse(demo, f"SELECT count(*) FROM br_feat__raw_shop.{table}", "stage")
+        assert rows[0][0] > 0
+    assert "br_feat__raw_shop" in branch_schemas(demo, "feat")
+    assert stage_contents(demo) == stage_before
+    assert customer_stats(env) == target_before
+
+    model.write_text(original_model)
+    pipeline.write_text(original_pipeline)
+
+    code, output = adops_run(project, *RUN, "--branch", "feat2")
+
+    assert_branch_run_passed(code, output, env)
+    lines = output.splitlines()
+    for step in ("sync_shop", "transform_shop", REVERSE_SYNC):
+        assert f"step {step}: deferred to stage" in lines
+    assert "Nothing changed since stage's last run; br_feat2 uses stage." in lines
+
+    code, output = adops_run(project, "drop-branch", "feat")
+
+    assert code == 0, output
+    assert "Dropped Branch Environment br_feat: " in output
+    assert_no_secret_or_row_value(output, env)
+    assert branch_schemas(demo, "feat") == []
+    assert branch_schemas(demo, "feat2") == ["br_feat2__analytics"]
+    assert not (project / ".adops" / "dlt" / "br_feat").exists()
+    assert stage_contents(demo) == stage_before
+    assert customer_stats(env) == target_before
+
+    code, output = adops_run(project, "drop-branch", "feat")
+
+    assert code == 0, output
+    assert "Branch Environment br_feat has no schemas left to drop." in output
+
+    code, output = adops_run(project, "drop-branch", "feat2")
+
+    assert code == 0, output
+    assert_no_secret_or_row_value(output, env)
+    assert [s for s in stage_schemas(demo) if s.startswith("br_")] == []
+    assert stage_contents(demo) == stage_before

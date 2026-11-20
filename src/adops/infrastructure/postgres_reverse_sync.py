@@ -40,10 +40,18 @@ class PostgresReverseSync:
     saw, so it must follow `read` for the same Step on the same instance.
     """
 
-    def __init__(self, project_dir: Path, *, environment: str, warehouse_kind: str) -> None:
+    def __init__(
+        self,
+        project_dir: Path,
+        *,
+        environment: str,
+        warehouse_kind: str,
+        analytics_schema: str = TARGET_SCHEMA,
+    ) -> None:
         self._project_dir = project_dir
         self._pipelines_dir = local_state_dir(project_dir, environment)
         self._warehouse_kind = warehouse_kind
+        self._analytics_schema = analytics_schema
         self._result_rows: dict[str, tuple[Row, ...]] = {}
 
     def read(
@@ -87,8 +95,13 @@ class PostgresReverseSync:
         pipeline = dlt.pipeline(
             pipeline_name=f"adops_reverse_sync_{step.name}",
             pipelines_dir=str(self._pipelines_dir),
-            destination=warehouse_destination(self._warehouse_kind, warehouse, self._project_dir),
-            dataset_name=TARGET_SCHEMA,
+            destination=warehouse_destination(
+                self._warehouse_kind,
+                warehouse,
+                self._project_dir,
+                branch_schemas=self._analytics_schema != TARGET_SCHEMA,
+            ),
+            dataset_name=self._analytics_schema,
         )
         columns = result_columns(step)
         with warehouse_client(pipeline) as client:

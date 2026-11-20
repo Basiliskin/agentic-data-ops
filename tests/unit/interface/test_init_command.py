@@ -148,7 +148,10 @@ def test_demo_dbt_project_reads_raw_shop_and_ships_no_profile(demo):
     sources = yaml.safe_load((demo / "dbt" / "models" / "sources.yml").read_text())
     [source] = sources["sources"]
 
-    assert (source["name"], source["schema"]) == ("raw_shop", "raw_shop")
+    assert (source["name"], source["schema"]) == (
+        "raw_shop",
+        "{{ var('adops_raw_schema_shop', 'raw_shop') }}",
+    )
     assert [table["name"] for table in source["tables"]] == ["customers", "orders"]
     assert not (demo / "dbt" / "profiles.yml").exists()
     ignored = (demo / ".gitignore").read_text().splitlines()

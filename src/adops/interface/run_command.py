@@ -1,6 +1,7 @@
 import os
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, NoReturn
 
@@ -10,23 +11,53 @@ from dotenv import dotenv_values
 from adops.application.ports import (
     Clock,
     Orchestrator,
+    ProjectFiles,
+    ResolvedConnection,
+    ResolvedWarehouse,
     ReverseSync,
     ReverseSyncPreview,
+    ReverseSyncRead,
     RunResult,
     SchemaSnapshotStore,
+    StepFingerprintStore,
+    StepStatus,
     Sync,
     Transform,
+    TransformResult,
 )
-from adops.application.run_pipeline import pick_environment, run_pipeline
-from adops.application.secrets import MissingSecretError
+from adops.application.run_pipeline import (
+    StageNotRunError,
+    StepFingerprinting,
+    pick_environment,
+    plan_branch_run,
+    run_pipeline,
+    stage_branch_name,
+    stage_environment,
+)
+from adops.application.secrets import (
+    MissingSecretError,
+    resolve_secret_references,
+    resolve_warehouse,
+    secret_references,
+)
+from adops.domain.branch_environment import (
+    STAGE,
+    SchemaLayout,
+    read_layout,
+)
+from adops.domain.environment import Environment
 from adops.domain.errors import PipelineValidationError
-from adops.domain.loader import load_project_settings
+from adops.domain.loader import load_pipeline, load_project_settings
+from adops.domain.reverse_sync import ReverseSyncStep
+from adops.domain.reverse_sync_diff import Diff
+from adops.domain.transform import TransformStep
 from adops.infrastructure.clock import SystemClock
 from adops.infrastructure.dagster_orchestrator import DagsterOrchestrator, JobCompileError
 from adops.infrastructure.dbt_transform import DbtTransform
 from adops.infrastructure.dlt_sync import DltSync
 from adops.infrastructure.postgres_reverse_sync import PostgresReverseSync
 from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
+from adops.infrastructure.step_fingerprint_store import ProjectTree, WarehouseFingerprintStore
 
 SETTINGS_FILE = Path("adops.yaml")
 PIPELINES_DIR = Path("pipelines")
@@ -34,16 +65,28 @@ DOTENV_FILE = ".env"
 DAGSTER_FILE = "dagster.yaml"
 
 
+DEFAULT_LAYOUT = SchemaLayout.default()
+
+
 class ProjectFileError(Exception):
     pass
 
 
-def build_sync(project: Path, pipeline: str, environment: str, kind: str) -> Sync:
-    return DltSync(project, pipeline, environment=environment, warehouse_kind=kind)
+def build_sync(
+    project: Path,
+    pipeline: str,
+    environment: str,
+    kind: str,
+    *,
+    layout: SchemaLayout = DEFAULT_LAYOUT,
+) -> Sync:
+    return DltSync(project, pipeline, environment=environment, warehouse_kind=kind, layout=layout)
 
 
-def build_snapshot_store(project: Path, environment: str, kind: str) -> SchemaSnapshotStore:
-    return WarehouseSnapshotStore(project, kind, environment=environment)
+def build_snapshot_store(
+    project: Path, environment: str, kind: str, *, layout: SchemaLayout = DEFAULT_LAYOUT
+) -> SchemaSnapshotStore:
+    return WarehouseSnapshotStore(project, kind, environment=environment, layout=layout)
 
 
 def build_clock() -> Clock:
@@ -54,12 +97,63 @@ def build_orchestrator() -> Orchestrator:
     return DagsterOrchestrator()
 
 
-def build_transform(project: Path, kind: str) -> Transform:
-    return DbtTransform(project, warehouse_kind=kind)
+def build_transform(
+    project: Path,
+    kind: str,
+    *,
+    target_schema: str = DEFAULT_LAYOUT.analytics,
+    raw_schemas: Mapping[str, str] | None = None,
+) -> Transform:
+    return DbtTransform(
+        project, warehouse_kind=kind, target_schema=target_schema, raw_schemas=raw_schemas or {}
+    )
 
 
-def build_reverse_sync(project: Path, environment: str, kind: str) -> ReverseSync:
-    return PostgresReverseSync(project, environment=environment, warehouse_kind=kind)
+def build_reverse_sync(
+    project: Path,
+    environment: str,
+    kind: str,
+    *,
+    analytics_schema: str = DEFAULT_LAYOUT.analytics,
+) -> ReverseSync:
+    return PostgresReverseSync(
+        project, environment=environment, warehouse_kind=kind, analytics_schema=analytics_schema
+    )
+
+
+def build_fingerprint_store(
+    project: Path, environment: str, kind: str, warehouse: ResolvedWarehouse
+) -> StepFingerprintStore:
+    return WarehouseFingerprintStore(project, kind, warehouse, environment=environment)
+
+
+def build_project_files(project: Path) -> ProjectFiles:
+    return ProjectTree(project)
+
+
+@dataclass(frozen=True)
+class StepTransforms:
+    """One Transform per Step, because each Step of a Branch run reads its own raw schemas."""
+
+    by_step: Mapping[str, Transform]
+
+    def run(self, step: TransformStep, warehouse: ResolvedWarehouse) -> TransformResult:
+        return self.by_step[step.name].run(step, warehouse)
+
+
+@dataclass(frozen=True)
+class StepReverseSyncs:
+    """One Reverse Sync per Step, because each Step of a Branch run reads its own analytics."""
+
+    by_step: Mapping[str, ReverseSync]
+
+    def read(
+        self, step: ReverseSyncStep, warehouse: ResolvedWarehouse, target: ResolvedConnection
+    ) -> ReverseSyncRead:
+        return self.by_step[step.name].read(step, warehouse, target)
+
+    def apply(self, step: ReverseSyncStep, target: ResolvedConnection, diff: Diff) -> None:
+        self.by_step[step.name].apply(step, target, diff)
 
 
 def warehouse_kind(settings_text: str, environment: str) -> str:
@@ -70,7 +164,16 @@ def warehouse_kind(settings_text: str, environment: str) -> str:
 
 def run(
     pipeline: Annotated[str, typer.Argument(help="Pipeline name (pipelines/<name>.yaml).")],
-    env: Annotated[str, typer.Option("--env", help="Environment from adops.yaml.")] = "dev",
+    env: Annotated[
+        str | None, typer.Option("--env", help="Environment from adops.yaml [default: dev].")
+    ] = None,
+    branch: Annotated[
+        str | None,
+        typer.Option(
+            "--branch",
+            help="Run in this Git branch's Branch Environment, built from stage's settings.",
+        ),
+    ] = None,
     project: Annotated[Path, typer.Option(help="Project folder.")] = Path("."),
 ) -> None:
     """Run a Pipeline: sync its tables into the Warehouse, run its dbt Transforms and its Checks.
@@ -78,13 +181,21 @@ def run(
     Reverse Sync Steps write their Target only in the stage and prod Environments; every other
     Environment prints a Preview of what would change.
 
+    With --branch, only the Steps that differ from stage's last successful run are rebuilt, into
+    the Branch's own schemas in stage's Warehouse; earlier Steps are deferred to stage.
+
     Variables in the Project's .env are used unless the same name is set in your shell.
     """
+    if env is not None and branch is not None:
+        raise typer.BadParameter(
+            "cannot be combined with --env: a Branch Environment always derives from stage",
+            param_hint="'--branch'",
+        )
     try:
-        result = run_project(project.resolve(), pipeline, env)
+        result = run_project(project.resolve(), pipeline, env or "dev", branch)
     except PipelineValidationError as error:
         fail(*error.problems)
-    except (ProjectFileError, MissingSecretError, JobCompileError) as error:
+    except (ProjectFileError, MissingSecretError, JobCompileError, StageNotRunError) as error:
         fail(str(error))
     except Exception as error:
         # Only the type: an unexpected error was never redacted and may hold a secret.
@@ -92,35 +203,116 @@ def run(
     _print_result(result)
     if not result.succeeded:
         fail(f"Pipeline {result.pipeline} failed in Environment {result.environment}.")
+    if branch is not None and all(s.status is StepStatus.DEFERRED for s in result.steps):
+        typer.echo(f"Nothing changed since stage's last run; {result.environment} uses stage.")
     typer.echo(f"Pipeline {result.pipeline} passed in Environment {result.environment}.")
 
 
-def run_project(project: Path, pipeline: str, environment: str) -> RunResult:
+def run_project(
+    project: Path, pipeline: str, environment: str, branch: str | None = None
+) -> RunResult:
     settings_text, pipeline_text = read_project_files(project, pipeline)
-    kind = warehouse_kind(settings_text, environment)
     env = project_env(project)
     dagster_env = {}
     if (project / DAGSTER_FILE).is_file():
         # Dagster resolves dagster.yaml's `env:` values from the process environment.
         dagster_env = {**env, "DAGSTER_HOME": str(project)}
     with _scoped_environ(dagster_env):
-        return run_pipeline(
-            pipeline_text,
-            settings_text,
-            environment,
-            env,
-            build_sync(project, pipeline, environment, kind),
-            build_snapshot_store(project, environment, kind),
-            build_clock(),
-            build_orchestrator(),
-            build_transform(project, kind),
-            build_reverse_sync(project, environment, kind),
-        )
+        if branch is None:
+            return _run_environment(
+                project, pipeline, environment, settings_text, pipeline_text, env
+            )
+        return _run_branch(project, pipeline, branch, settings_text, pipeline_text, env)
+
+
+def _run_environment(
+    project: Path,
+    pipeline: str,
+    environment: str,
+    settings_text: str,
+    pipeline_text: str,
+    env: Mapping[str, str],
+) -> RunResult:
+    chosen = pick_environment(load_project_settings(settings_text).environments, environment)
+    kind = chosen.warehouse.type
+    return run_pipeline(
+        pipeline_text,
+        settings_text,
+        environment,
+        env,
+        build_sync(project, pipeline, environment, kind),
+        build_snapshot_store(project, environment, kind),
+        build_clock(),
+        build_orchestrator(),
+        build_transform(project, kind),
+        build_reverse_sync(project, environment, kind),
+        _fingerprinting(project, environment, chosen, env),
+    )
+
+
+def _run_branch(
+    project: Path,
+    pipeline: str,
+    branch: str,
+    settings_text: str,
+    pipeline_text: str,
+    env: Mapping[str, str],
+) -> RunResult:
+    stage = stage_environment(load_project_settings(settings_text).environments)
+    kind = stage.warehouse.type
+    name = stage_branch_name(stage, branch)
+    fingerprinting = _fingerprinting(project, STAGE, stage, env)
+    plan = plan_branch_run(pipeline_text, name, fingerprinting)
+    layout = SchemaLayout.for_branch(name)
+    steps = load_pipeline(pipeline_text).steps
+    reads = {} if plan.first_changed is None else read_layout(layout, plan.first_changed, steps)
+    transforms: dict[str, Transform] = {}
+    reverse_syncs: dict[str, ReverseSync] = {}
+    for step in steps:
+        if step.name not in reads:
+            continue
+        if isinstance(step, TransformStep):
+            transforms[step.name] = build_transform(
+                project, kind, target_schema=layout.analytics, raw_schemas=reads[step.name].raw
+            )
+        elif isinstance(step, ReverseSyncStep):
+            reverse_syncs[step.name] = build_reverse_sync(
+                project, name, kind, analytics_schema=reads[step.name].analytics
+            )
+    return run_pipeline(
+        pipeline_text,
+        settings_text,
+        name,
+        env,
+        build_sync(project, pipeline, name, kind, layout=layout),
+        build_snapshot_store(project, name, kind, layout=layout),
+        build_clock(),
+        build_orchestrator(),
+        StepTransforms(transforms),
+        StepReverseSyncs(reverse_syncs),
+        fingerprinting,
+        plan,
+    )
+
+
+def _fingerprinting(
+    project: Path, environment: str, settings: Environment, env: Mapping[str, str]
+) -> StepFingerprinting:
+    secrets = resolve_secret_references(env, secret_references(settings.warehouse, ()))
+    warehouse = resolve_warehouse(settings.warehouse, secrets)
+    return StepFingerprinting(
+        build_fingerprint_store(project, environment, settings.warehouse.type, warehouse),
+        build_project_files(project),
+    )
 
 
 def read_project_files(project: Path, pipeline: str) -> tuple[str, str]:
     """adops.yaml and the Pipeline file, as text."""
-    return _read(project, SETTINGS_FILE), _read(project, PIPELINES_DIR / f"{pipeline}.yaml")
+    return read_settings(project), _read(project, PIPELINES_DIR / f"{pipeline}.yaml")
+
+
+def read_settings(project: Path) -> str:
+    return _read(project, SETTINGS_FILE)
 
 
 def project_env(project: Path) -> dict[str, str]:
@@ -150,6 +342,9 @@ def _scoped_environ(updates: Mapping[str, str]) -> Iterator[None]:
 def _print_result(result: RunResult) -> None:
     for step in result.steps:
         rows = ", ".join(f"{table} {count} rows" for table, count in step.rows_loaded.items())
+        if step.status is StepStatus.DEFERRED:
+            typer.echo(f"step {step.name}: deferred to stage")
+            continue
         typer.echo(f"step {step.name}: {step.status}" + (f" — {rows}" if rows else ""))
         for check in step.checks:
             typer.echo(f"  check {check.table} {check.check}: {check.status}")

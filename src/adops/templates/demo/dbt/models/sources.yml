@@ -2,7 +2,7 @@ version: 2
 
 sources:
   - name: raw_shop
-    schema: raw_shop
+    schema: "{{ var('adops_raw_schema_shop', 'raw_shop') }}"
     tables:
       - name: customers
       - name: orders

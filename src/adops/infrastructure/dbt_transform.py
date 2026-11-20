@@ -1,9 +1,10 @@
 import json
 import os
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import yaml
@@ -16,6 +17,7 @@ from adops.application.ports import (
     ResolvedWarehouse,
     TransformResult,
 )
+from adops.domain.branch_environment import raw_schema_var
 from adops.domain.transform import DbtTestFacts, DbtTestStatus, TransformStep
 from adops.infrastructure.dlt_sync import UnknownConnectionKindError, duckdb_file
 
@@ -23,6 +25,7 @@ PASSWORD_ENV = "ADOPS_DBT_WAREHOUSE_PASSWORD"
 PROFILE = "adops"
 TARGET = "warehouse"
 TARGET_SCHEMA = "analytics"
+NO_RAW_SCHEMAS: Mapping[str, str] = MappingProxyType({})
 CRASHED = TransformResult(tests=(), crashed=True, failed_models=())
 FAILED_NODE_STATUSES = frozenset({NodeStatus.Error, NodeStatus.Fail, NodeStatus.RuntimeErr})
 
@@ -41,11 +44,14 @@ PROFILE_TEMPLATE = """\
       threads: 1
 """
 
-ProfileRenderer = Callable[[str, Any, Path], str]
+ProfileRenderer = Callable[[str, Any, Path, str], str]
 
 
 def render_postgres_profile(
-    profile_name: str, warehouse: ResolvedConnection, _project_root: Path
+    profile_name: str,
+    warehouse: ResolvedConnection,
+    _project_root: Path,
+    schema: str = TARGET_SCHEMA,
 ) -> str:
     """profiles.yml text for the Warehouse; the password is only an env_var() reference."""
     return PROFILE_TEMPLATE.format(
@@ -56,11 +62,16 @@ def render_postgres_profile(
         database=json.dumps(warehouse.database),
         user=json.dumps(warehouse.user),
         password_env=PASSWORD_ENV,
-        schema=TARGET_SCHEMA,
+        schema=schema,
     )
 
 
-def render_duckdb_profile(profile_name: str, warehouse: ResolvedDuckDb, project_root: Path) -> str:
+def render_duckdb_profile(
+    profile_name: str,
+    warehouse: ResolvedDuckDb,
+    project_root: Path,
+    schema: str = TARGET_SCHEMA,
+) -> str:
     """profiles.yml text for the Sync's DuckDB file.
 
     dbt-duckdb resolves a relative path against dbt's cwd, so the path is made absolute here; one
@@ -69,7 +80,7 @@ def render_duckdb_profile(profile_name: str, warehouse: ResolvedDuckDb, project_
     target = {
         "type": "duckdb",
         "path": str(duckdb_file(project_root, warehouse.path).absolute()),
-        "schema": TARGET_SCHEMA,
+        "schema": schema,
         "threads": 1,
     }
     return yaml.safe_dump({profile_name: {"target": TARGET, "outputs": {TARGET: target}}})
@@ -101,23 +112,29 @@ class DbtTransform:
         warehouse_kind: str,
         render_profile: ProfileRenderer | None = None,
         runner: Callable[[], dbtRunner] = dbtRunner,
+        target_schema: str = TARGET_SCHEMA,
+        raw_schemas: Mapping[str, str] = NO_RAW_SCHEMAS,
     ) -> None:
         renderer = profile_renderer(warehouse_kind)
         self.project_root = project_root
         self.render_profile = render_profile or renderer
         self.runner = runner
+        self.target_schema = target_schema
+        self.raw_schemas = raw_schemas
 
     def run(self, step: TransformStep, warehouse: ResolvedWarehouse) -> TransformResult:
         with tempfile.TemporaryDirectory(prefix="adops-dbt-") as tmp:
             work = Path(tmp)
-            profile = self.render_profile(PROFILE, warehouse, self.project_root)
+            profile = self.render_profile(
+                PROFILE, warehouse, self.project_root, self.target_schema
+            )
             (work / "profiles.yml").write_text(profile)
             with _warehouse_environ(warehouse):
                 result = self.runner().invoke(self._build_args(step, work))
         return _measure(result)
 
     def _build_args(self, step: TransformStep, work: Path) -> list[str]:
-        options = {
+        options: dict[str, object] = {
             "--project-dir": self.project_root / step.project,
             "--profiles-dir": work,
             "--profile": PROFILE,
@@ -125,6 +142,10 @@ class DbtTransform:
             "--target-path": work / "target",
             "--log-path": work / "logs",
         }
+        if self.raw_schemas:
+            options["--vars"] = json.dumps(
+                {raw_schema_var(source): schema for source, schema in self.raw_schemas.items()}
+            )
         pairs = [part for option, value in options.items() for part in (option, str(value))]
         return ["build", *pairs, "--quiet", "--no-send-anonymous-usage-stats"]
 
