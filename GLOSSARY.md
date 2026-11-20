@@ -10,6 +10,14 @@ An open-source, self-hosted tool for moving data into a warehouse, transforming 
 A version-controlled definition of a chain of Steps that run together on a schedule or on demand.
 _Avoid_: job, DAG, flow, workflow
 
+**Schedule**:
+How often a Pipeline runs by itself, written once in the Pipeline file (in plain words such as `daily at 02:00`, or cron) and read in the Project's time zone. It is used by both stage and prod and starts the whole Pipeline. dev and Branch Environments never run on a Schedule. A run that is due while the same Pipeline is still running is skipped.
+_Avoid_: cron, trigger, timer
+
+**Server**:
+The always-on machine that runs one Environment's Schedules (one for stage, one for prod). It pulls the Project from Git and switches to a new version only when that version passes validation.
+_Avoid_: host, VM, worker, runner
+
 **Step**:
 One unit of work inside a Pipeline: a Sync, a Transform, or a Reverse Sync.
 _Avoid_: task, node, op
