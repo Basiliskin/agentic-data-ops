@@ -1,34 +1,50 @@
-# Planning Brief — horizon 7 (written by horizon 6 PLAN, 2026-11-19)
+# Planning Brief — horizon 8 (written by horizon 7 PLAN, 2026-11-20)
 
 ## Recommended scope
-Close vision criterion (5) and start (9): have `adops init` generate GitHub Actions workflows — PR opened/updated runs `adops validate` + `adops run --branch`, PR merged/closed runs `adops drop-branch`, merge to main runs stage, release/approval runs prod — as thin wrappers over the horizon-6 CLI, verified by a lint or snapshot test rather than a live GitHub run. Settle CI-to-Warehouse reachability, the fork-PR secret policy and run serialization first; they decide whether the workflows can work at all. Add a prod Environment to the templates if Promotion needs one. Keep the MCP server, skills, playbooks and Verified Source E2E for later unless the CI work turns out small.
+Make the horizon-7 Server pull its Project from Git instead of reading a bind-mounted folder: main for stage, the latest release tag for prod. It switches to a new version only after `adops validate` passes, keeps the last good version and sends a webhook alert otherwise. Once it accepts a version, it queues runs of the Pipelines whose files changed, so stage's Step Fingerprints stay current. Then make ADR-0015 real. `accept-schema` for stage/prod writes an accepted-change record into the Project instead of writing to the Warehouse. Each Environment applies the record once, on its next run, before checking for Breaking Changes, and keeps the dropped-column nullable step. The horizon-2 decision line is superseded. Settle the record format, the applied-once tracking, Git credentials and the hot-swap mechanism up front. Prove it end to end with a local Git remote in the E2E. Add a prod Environment to the templates only if needed to test the release-tag path. Leave GitHub Actions workflows, the MCP server and the skills for later.
 
 ## Unknowns
-- How does a GitHub-hosted runner reach the stage Warehouse, when the demo's stage is localhost:15433 Postgres or a local .adops DuckDB file no CI run can share?
-- Which GitHub event and secret setup lets a PR workflow run --branch without exposing stage secrets to forked PRs (open blocker since horizon 1)?
-- Does merge→stage run every Pipeline or only changed ones? Stage writes the fingerprints branches compare against, so a stale/partial stage run makes branches rebuild the wrong Steps.
-- What does prod look like? The demo has only dev and stage (a test asserts {'dev','stage'}); does the single adops.yaml model hold for a prod deploy?
-- With no locking and single-writer DuckDB, what happens when two PRs run --branch at once against the same stage Warehouse?
-- How do generated workflows install adops, at which version, while keeping ADR-0008's "no tool code copied into the Project"?
-- What does "tests" mean in "PR→Branch Environment+tests" (validate, the branch run's Checks, more)? Should a Preview be posted to the PR?
-- How is a Breaking Change in a PR branch handled, given accept-schema --branch is a recorded gap and CI cannot "drop and re-run" interactively?
+- What exactly is in an accepted-change record: the full accepted TableShape copied from where accept-schema ran, or just 'accept whatever shape the Source shows on the next run'? prod's Source can differ from dev's.
+- How does an Environment know it already applied a record? Is it tracked in the Warehouse next to _adops_schema_snapshots, and are records ever removed from the Project once every Environment has applied them?
+- What happens if a record's shape does not match the Source shape seen on the next run (it drifted again)? Halt with a new Breaking Change, or apply it anyway?
+- How does the Server get Git credentials for a private repo, and from where? A deploy key, a token as a Secret Reference, or SSH agent? And does the Server image need git, or does a Python library do the pull?
+- How does the Server find 'the latest release tag': semver ordering, GitHub Releases, or the newest annotated tag by date? What counts as a release when there are pre-release or malformed tags?
+- How does a new version reach the running Dagster code location: reload the code location in place, restart containers, or switch a symlink to a checkout? How are in-flight and queued runs on the old version handled?
+- Which Pipelines count as 'changed' when a version is accepted: a git diff of pipeline and dbt files, or Step Fingerprints compared with stage's saved ones (decided in horizon 6 with no Git)?
+- Do runs started right after a version is accepted share the single run slot and queue behind scheduled runs, and does a Pipeline with no Schedule run only at that moment?
+- In horizon 8, does the bind-mounted folder from horizon 7 stay supported (dev/demo) next to Git-pull mode, or does Git-pull replace it on stage/prod?
+- How often does the Server poll Git, and who sets that? A Dagster sensor/schedule inside the daemon, or a separate loop/container?
 
 ## Research
-- The finished horizon-6 roadmap, decisions.md, discoveries.md: final drop-branch verb, separator, raw-schema var convention, E2E wall-clock, any replans.
-- GitHub Actions: pull_request closed with merged, pull_request vs pull_request_target secrets for forks, environment protection/approvals, release triggers, concurrency groups.
-- How to verify generated workflow YAML in the tool repo's CI (actionlint, schema snapshot, act) under the 100% coverage gate.
-- Python MCP SDK: does it resolve in the current uv lock with dlt, dagster, dbt pins; stdio transport only?
-- Branch-name sources (GITHUB_HEAD_REF) that exceed the truncation cap or collide after sanitizing.
-- The open Dagster scheduling blocker: cron CI vs Dagster daemon decides what the merge→stage workflow does.
+- Dagster 1.13 code-location reload: workspace.yaml python_module vs gRPC server, the reload_workspace GraphQL mutation, and how the daemon picks up new definitions. Also whether a sensor can trigger the reload.
+- Ways to run git in containers: a git binary in python:slim vs dulwich/pygit2, shallow fetch of a tag or branch, deploy-key handling, known_hosts, and keeping secrets out of logs.
+- How release-tag-to-deploy flows pick 'latest' (semver vs creation date) in tools like Argo CD, Flux or watchtower, to borrow a simple rule.
+- How horizon 7 actually built it, by reading the finished horizon-7 roadmap and its decisions: the Server code location, how run_pipeline is wired for the Server, the alert port, the ADR-0014 clarification, and the E2E server scenario.
+- How run_pipeline's PlannedStep._raise_if_breaking loads and saves snapshots, to find where an accepted-change record would be applied before the comparison.
+- Open blockers 25-27 in blockers.md (CI reachability, merge→stage changed-only, concurrent --branch). Check which ones Git-pull plus run-changed-on-accept closes.
 
 ## Decisions needed
-- Which remaining vision item(s) horizon 7 takes on: generated GitHub Actions, the MCP server, the skills, or a combination.
-- How CI connects to the stage/prod Warehouse: self-hosted runner, network-reachable Postgres + repo secrets, or no CI support for a DuckDB stage.
-- Fork-PR policy: skip Branch Environments for forks, require a label/approval, or pull_request_target with its risks.
-- Prod Promotion trigger: release tag, manual environment approval, or both; whether a prod Environment is added to the templates.
-- Whether workflows ship in both plain and demo templates via adops init, and how DEMO_FILES and the ci.yml wheel grep change.
-- How to serialize concurrent branch and stage runs: GitHub concurrency groups only, or Warehouse-side locking.
-- Whether the accept-schema --branch gap is closed now that unattended CI branch runs make it reachable.
+- Format and location of the accepted-change record in the Project (file path, schema, one file per table vs one log), and whether `adops validate` checks it.
+- What accept-schema --env stage/prod does now: write a record, refuse a direct write, or keep the direct write as an escape hatch. Also what --env dev/--branch keep doing.
+- How a record becomes 'applied once per Environment' (an applied-record ledger in the Warehouse vs comparing shapes) and whether records are cleaned up or kept forever.
+- How the Server pulls and switches versions: git binary or library, polling interval, where checkouts live, and how the last good version is kept and switched atomically.
+- How Git credentials and the repo URL reach the Server (Secret References in .env?) and what a public repo needs.
+- Which events alert when a version is rejected or a pull fails, using the horizon-7 webhook, and how to keep validate output in an alert free of secrets and values.
+- How 'changed Pipelines' is found on accept (git diff vs Step Fingerprints) and in what order those runs are queued.
+- Whether init templates gain a prod Environment, so the release-tag path can be tested end to end.
+- How the E2E proves the Git loop inside the 20-minute CI limit: a local bare repo or file:// remote, and a fast poll interval.
 
 ## Artifacts to inspect
-src/adops/interface/run_command.py, src/adops/interface/init_command.py + tests/unit/interface/test_init_command.py, src/adops/templates/demo/{adops.yaml,docker-compose.yml}, src/adops/templates/plain/adops.yaml, .github/workflows/ci.yml, src/adops/domain/reverse_sync_diff.py, src/adops/application/secrets.py, docs/adr/0006, 0008, 0009, 0011, tests/e2e/test_demo_sync.py
+- docs/adr/0014-schedules-run-on-a-pull-based-server.md (plus the horizon-7 clarification on the bind-mounted folder)
+- docs/adr/0015-breaking-changes-accepted-through-git.md
+- src/adops/application/accept_schema.py (accept_schema saves straight to the snapshot store and makes dropped columns nullable)
+- src/adops/interface/accept_schema_command.py
+- src/adops/application/run_pipeline.py (PlannedStep._raise_if_breaking, BreakingChangeError, run_pipeline, FingerprintSavingStep)
+- src/adops/infrastructure/schema_snapshot_store.py (_adops_schema_snapshots table)
+- src/adops/application/ports.py (SchemaSnapshotStore, StepFingerprintStore, StepReport, Orchestrator)
+- src/adops/domain/schema_snapshot.py and src/adops/domain/branch_environment.py (step_fingerprint, first_changed_step, saves_stage_fingerprint)
+- src/adops/interface/validate_command.py (validate_project Report, which acceptance needs to call)
+- adops.interface.server and the Dagster Definitions builder from horizon 7 (src/adops/interface/server*, src/adops/infrastructure/dagster_*)
+- src/adops/templates/demo/ (docker-compose.yml server profile, Dockerfile, dagster.yaml, adops.yaml with dev+stage only) and src/adops/templates/plain/
+- tests/e2e/test_demo_sync.py (stack fixture, horizon-7 server scenario) and tests/unit/interface/test_init_command.py
+- docs/roadmaps/agentic-dataops/decisions.md (horizon-2 accept-schema line to supersede; horizon-6 fingerprint lines) and blockers.md

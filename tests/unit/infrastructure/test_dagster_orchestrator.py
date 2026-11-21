@@ -557,4 +557,7 @@ def test_only_the_dagster_adapter_imports_dagster():
             if any(name.split(".")[0] == "dagster" for name in names):
                 importers.add(source.relative_to(package).as_posix())
 
-    assert importers == {"infrastructure/dagster_orchestrator.py"}
+    assert importers == {
+        "infrastructure/dagster_orchestrator.py",
+        "infrastructure/dagster_server.py",
+    }

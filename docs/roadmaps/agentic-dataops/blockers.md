@@ -27,3 +27,14 @@
 - 2026-11-19 | horizon 6 | What happens when two PRs run --branch at once against the same stage Warehouse (no locking, single-writer DuckDB)?
 - 2026-11-19 | horizon 6 | How do generated workflows install adops at a pinned version while keeping ADR-0008 (no tool code copied into the Project)?
 - 2026-11-19 | horizon 6 | How is a Breaking Change in a PR branch handled unattended, given accept-schema --branch is a recorded gap?
+- 2026-11-20 | horizon 7 | What exactly is in an accepted-change record: the full accepted TableShape copied from where accept-schema ran, or just 'accept whatever shape the Source shows on the next run'? prod's — see horizon-07 roadmap.md
+- 2026-11-20 | horizon 7 | How does an Environment know it already applied a record? Is it tracked in the Warehouse next to _adops_schema_snapshots, and are records ever removed from the Project once every Environment has applied them?
+- 2026-11-20 | horizon 7 | What happens if a record's shape does not match the Source shape seen on the next run (it drifted again)? Halt with a new Breaking Change, or apply it anyway?
+- 2026-11-20 | horizon 7 | How does the Server get Git credentials for a private repo, and from where? A deploy key, a token as a Secret Reference, or SSH agent? And does the Server image need git, or does a Python library do the pull?
+- 2026-11-20 | horizon 7 | How does the Server find 'the latest release tag': semver ordering, GitHub Releases, or the newest annotated tag by date? What counts as a release when there are pre-release or malformed tags?
+- 2026-11-20 | horizon 7 | How does a new version reach the running Dagster code location: reload the code location in place, restart containers, or switch a symlink to a checkout? How are in-flight and queued — see horizon-07 roadmap.md
+- 2026-11-20 | horizon 7 | Which Pipelines count as 'changed' when a version is accepted: a git diff of pipeline and dbt files, or Step Fingerprints compared with stage's saved ones (decided in horizon 6 with no Git)?
+- 2026-11-20 | horizon 7 | Do runs started right after a version is accepted share the single run slot and queue behind scheduled runs, and does a Pipeline with no Schedule run only at that moment?
+- 2026-11-20 | horizon 7 | In horizon 8, does the bind-mounted folder from horizon 7 stay supported (dev/demo) next to Git-pull mode, or does Git-pull replace it on stage/prod?
+- 2026-11-20 | horizon 7 | How often does the Server poll Git, and who sets that? A Dagster sensor/schedule inside the daemon, or a separate loop/container?
+- 2026-11-21 | horizon 7 | If the Server dies mid-run, the run stays STARTED (server/dagster.yaml has no run_monitoring), so the skip-overlap rule skips every tick. Enable run monitoring, or clear stale runs? (not reproduced)

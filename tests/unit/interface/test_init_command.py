@@ -1,10 +1,13 @@
+import importlib.util
 import re
 
 import pytest
 import yaml
+from dagster import QueuedRunCoordinator
 from dotenv import dotenv_values
 from typer.testing import CliRunner
 
+import adops
 from adops.domain.loader import (
     ensure_sources_defined,
     ensure_targets_defined,
@@ -15,10 +18,15 @@ from adops.domain.pipeline import SyncStep
 from adops.domain.reverse_sync import ReverseSyncStep
 from adops.domain.transform import TransformStep
 from adops.interface import cli
+from adops.interface.run_command import DAGSTER_FILE
 
 runner = CliRunner()
 
-DEMO_FILES = {
+SERVER_FILES = {"Dockerfile", "server/dagster.yaml", "server/workspace.yaml"}
+SERVER_SERVICES = {"dagster_daemon", "dagster_webserver"}
+WORKSPACE = "/project/server/workspace.yaml"
+
+DEMO_FILES = SERVER_FILES | {
     ".env.example",
     ".gitignore",
     "adops.yaml",
@@ -55,6 +63,23 @@ def demo(tmp_path):
     result = runner.invoke(cli.app, ["init", str(target), "--demo"])
     assert result.exit_code == 0, result.output
     return target
+
+
+@pytest.fixture
+def plain(tmp_path):
+    target = tmp_path / "project"
+    result = runner.invoke(cli.app, ["init", str(target)])
+    assert result.exit_code == 0, result.output
+    return target
+
+
+@pytest.fixture(params=["demo", "plain"])
+def project(request):
+    return request.getfixturevalue(request.param)
+
+
+def compose_services(project):
+    return yaml.safe_load((project / "docker-compose.yml").read_text())["services"]
 
 
 def compose_variables(text):
@@ -174,16 +199,30 @@ def test_demo_dbt_tests_check_customer_ids_and_order_customers_only(demo):
     }
 
 
-def test_every_variable_the_demo_reads_is_in_env_example(demo):
-    defined = set(dotenv_values(demo / ".env.example"))
+def test_every_variable_the_demo_reads_is_in_env_example(project):
+    defined = set(dotenv_values(project / ".env.example"))
+    dagster_files = [project / "server" / "dagster.yaml", project / "dagster.yaml"]
     used = (
-        compose_variables((demo / "docker-compose.yml").read_text())
-        | settings_variables(yaml.safe_load((demo / "adops.yaml").read_text()))
-        | dagster_variables(yaml.safe_load((demo / "dagster.yaml").read_text()))
+        compose_variables((project / "docker-compose.yml").read_text())
+        | settings_variables(yaml.safe_load((project / "adops.yaml").read_text()))
+        | set().union(
+            *(
+                dagster_variables(yaml.safe_load(path.read_text()))
+                for path in dagster_files
+                if path.exists()
+            )
+        )
     )
 
     assert used - defined == set()
-    assert {"SHOP_PASSWORD", "WAREHOUSE_PASSWORD", "DAGSTER_PG_PASSWORD"} <= used
+    assert {
+        "WAREHOUSE_PASSWORD",
+        "DAGSTER_PG_PASSWORD",
+        "DAGSTER_WEBSERVER_HOST",
+        "DAGSTER_WEBSERVER_PORT",
+        "ALERT_WEBHOOK_URL",
+    } <= used
+    assert {"ADOPS_ENVIRONMENT"} <= defined
 
 
 def test_settings_ports_match_the_ports_compose_publishes(demo):
@@ -207,13 +246,119 @@ def test_demo_gitignore_keeps_secrets_and_local_state_out(demo):
     assert {".env", ".adops/"} <= set(ignored)
 
 
-def test_demo_compose_pins_postgres_and_checks_readiness(demo):
-    services = yaml.safe_load((demo / "docker-compose.yml").read_text())["services"]
+@pytest.mark.parametrize(
+    ("mode", "databases"),
+    [("demo", {"shop", "warehouse", "dagster_meta"}), ("plain", {"dagster_meta"})],
+)
+def test_compose_without_a_profile_starts_only_pinned_ready_checked_postgres(
+    request, mode, databases
+):
+    services = compose_services(request.getfixturevalue(mode))
+    default = {name: service for name, service in services.items() if "profiles" not in service}
 
-    assert set(services) == {"shop", "warehouse", "dagster_meta"}
-    for service in services.values():
+    assert set(default) == databases
+    assert set(services) == databases | SERVER_SERVICES
+    for service in default.values():
         assert service["image"] == "postgres:17-alpine"
         assert "pg_isready" in " ".join(service["healthcheck"]["test"])
+
+
+def test_server_services_run_from_the_bind_mounted_project(project):
+    services = compose_services(project)
+
+    for name in SERVER_SERVICES:
+        service = services[name]
+        assert service["profiles"] == ["server"]
+        assert service["build"] == "."
+        assert service["network_mode"] == "host"
+        assert "ports" not in service
+        assert service["env_file"] == ".env"
+        assert service["volumes"] == ["./:/project"]
+        assert service["environment"] == {
+            "DAGSTER_HOME": "/project/server",
+            "ADOPS_PROJECT": "/project",
+        }
+        assert service["depends_on"] == {"dagster_meta": {"condition": "service_healthy"}}
+    assert services["dagster_daemon"]["command"] == ["dagster-daemon", "run", "-w", WORKSPACE]
+    assert services["dagster_webserver"]["command"] == [
+        "dagster-webserver",
+        "-h",
+        "${DAGSTER_WEBSERVER_HOST:?set DAGSTER_WEBSERVER_HOST in .env}",
+        "-p",
+        "${DAGSTER_WEBSERVER_PORT:?set DAGSTER_WEBSERVER_PORT in .env}",
+        "-w",
+        WORKSPACE,
+    ]
+
+
+def test_webserver_listens_only_on_localhost_by_default(project):
+    text = (project / ".env.example").read_text()
+    env = dotenv_values(project / ".env.example")
+
+    assert env["DAGSTER_WEBSERVER_HOST"] == "127.0.0.1"
+    assert "SSH tunnel" in text
+    assert env["ADOPS_ENVIRONMENT"] == "stage"
+    assert env["ALERT_WEBHOOK_URL"] == ""
+
+
+def test_settings_name_the_alert_webhook_variable(project):
+    settings = load_project_settings((project / "adops.yaml").read_text())
+
+    assert settings.alert_webhook_env.name == "ALERT_WEBHOOK_URL"
+
+
+def test_workspace_loads_the_server_code_location_from_the_package(project):
+    workspace = yaml.safe_load((project / "server" / "workspace.yaml").read_text())
+
+    assert workspace == {
+        "load_from": [
+            {
+                "python_module": {
+                    "module_name": "adops.interface.server",
+                    "attribute": "defs",
+                    "working_directory": "/project",
+                }
+            }
+        ]
+    }
+    assert importlib.util.find_spec("adops.interface.server") is not None
+
+
+def test_dockerfile_installs_the_current_adops_version_without_copying_files(project):
+    dockerfile = (project / "Dockerfile").read_text()
+
+    assert f"ARG ADOPS_PACKAGE=adops=={adops.__version__}\n" in dockerfile
+    assert "{{ADOPS_VERSION}}" not in dockerfile
+    assert (
+        'RUN --mount=type=bind,source=.,target=/build pip install --no-cache-dir "$ADOPS_PACKAGE"'
+        in dockerfile
+    )
+    assert not re.search(r"^\s*(COPY|ADD)\b", dockerfile, re.MULTILINE | re.IGNORECASE)
+
+
+def test_server_dagster_instance_runs_one_run_at_a_time_on_postgres(project):
+    config = yaml.safe_load((project / "server" / "dagster.yaml").read_text())
+    coordinator = config["run_coordinator"]
+    module = importlib.import_module(coordinator["module"])
+
+    assert getattr(module, coordinator["class"]) is QueuedRunCoordinator
+    assert coordinator["config"] == {"max_concurrent_runs": 1}
+    assert set(config) == {"storage", "run_coordinator"}
+    connection = config["storage"]["postgres"]["postgres_db"]
+    assert all(set(value) == {"env"} for value in connection.values())
+    assert connection["password"] == {"env": "DAGSTER_PG_PASSWORD"}
+
+
+def test_demo_keeps_its_host_dagster_storage_unchanged(demo):
+    host = yaml.safe_load((demo / "dagster.yaml").read_text())
+    server = yaml.safe_load((demo / "server" / "dagster.yaml").read_text())
+
+    assert host == {"storage": server["storage"]}
+
+
+def test_plain_project_has_no_root_dagster_file_so_host_runs_stay_ephemeral(plain):
+    assert not (plain / DAGSTER_FILE).exists()
+    assert (plain / "server" / DAGSTER_FILE).is_file()
 
 
 def test_demo_seed_has_no_time_or_randomness_dependent_values(demo):
@@ -222,15 +367,16 @@ def test_demo_seed_has_no_time_or_randomness_dependent_values(demo):
     assert not re.search(r"random\(|now\(|current_timestamp", seed, re.IGNORECASE)
 
 
-def test_plain_init_writes_settings_and_an_empty_pipelines_folder(tmp_path):
-    target = tmp_path / "project"
-
-    result = runner.invoke(cli.app, ["init", str(target)])
-
-    assert result.exit_code == 0, result.output
-    assert listing(target) == {"adops.yaml", "pipelines"}
-    assert list((target / "pipelines").iterdir()) == []
-    load_project_settings((target / "adops.yaml").read_text())
+def test_plain_init_writes_settings_server_files_and_an_empty_pipelines_folder(plain):
+    assert listing(plain) == SERVER_FILES | {
+        ".env.example",
+        "adops.yaml",
+        "docker-compose.yml",
+        "pipelines",
+        "server",
+    }
+    assert list((plain / "pipelines").iterdir()) == []
+    load_project_settings((plain / "adops.yaml").read_text())
 
 
 def test_init_creates_missing_parent_folders(tmp_path):

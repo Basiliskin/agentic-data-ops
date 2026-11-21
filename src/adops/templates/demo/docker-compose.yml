@@ -42,6 +42,33 @@ services:
       - dagster_meta_data:/var/lib/postgresql/data
     healthcheck: *pg_ready
 
+  # Started only by `docker compose --profile server up`.
+  dagster_daemon: &server
+    profiles: [server]
+    build: .
+    network_mode: host
+    env_file: .env
+    environment:
+      DAGSTER_HOME: /project/server
+      ADOPS_PROJECT: /project
+    volumes:
+      - ./:/project
+    depends_on:
+      dagster_meta:
+        condition: service_healthy
+    command: ["dagster-daemon", "run", "-w", "/project/server/workspace.yaml"]
+
+  dagster_webserver:
+    <<: *server
+    command:
+      - dagster-webserver
+      - -h
+      - ${DAGSTER_WEBSERVER_HOST:?set DAGSTER_WEBSERVER_HOST in .env}
+      - -p
+      - ${DAGSTER_WEBSERVER_PORT:?set DAGSTER_WEBSERVER_PORT in .env}
+      - -w
+      - /project/server/workspace.yaml
+
 volumes:
   shop_data:
   warehouse_data:

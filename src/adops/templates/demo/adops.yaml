@@ -1,5 +1,7 @@
 # Passwords are never written here: each *_env names a variable set in .env.
 # Only an Environment named stage or prod writes to a target; dev prints a Preview instead.
+# Server failure alerts go to the URL in ALERT_WEBHOOK_URL; an empty value turns them off.
+alert_webhook_env: ALERT_WEBHOOK_URL
 environments:
   dev:
     warehouse:

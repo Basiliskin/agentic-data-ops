@@ -114,6 +114,12 @@ class WarehouseUnreachableError(StepError):
         super().__init__(f"Pipeline {pipeline}, Step {step}: Warehouse is unreachable")
 
 
+# The Server retries only an unreachable Source or Warehouse (ADR-0014). An unreachable Reverse
+# Sync Target is deliberately not retried. Matched by exact type, so a new subclass is not retried
+# until it is added here.
+RETRYABLE_ERRORS = (SourceUnreachableError, WarehouseUnreachableError)
+
+
 class ReverseSyncTargetUnreachableError(StepError):
     def __init__(self, pipeline: str, step: str, target: str) -> None:
         self.target = target
@@ -436,7 +442,12 @@ def run_step(task: StepTask, sync: Sync) -> StepReport:
             task.name, StepStatus.CHECK_FAILED, error.checks, error.rows_loaded, str(error)
         )
     except StepError as error:
-        return StepReport(task.name, StepStatus.FAILED, error=str(error))
+        return StepReport(
+            task.name,
+            StepStatus.FAILED,
+            error=str(error),
+            retryable=type(error) in RETRYABLE_ERRORS,
+        )
     return StepReport(
         task.name,
         StepStatus.PASSED,

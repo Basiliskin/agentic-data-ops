@@ -1,4 +1,5 @@
 from typing import Annotated, Any, Literal
+from zoneinfo import available_timezones
 
 from pydantic import (
     BaseModel,
@@ -7,6 +8,7 @@ from pydantic import (
     Field,
     StringConstraints,
     Tag,
+    field_validator,
     model_validator,
 )
 
@@ -15,6 +17,7 @@ from adops.domain.names import IDENTIFIER
 from adops.domain.secret_reference import SecretReference
 
 REQUIRED_ENVIRONMENTS = ("dev",)
+DEFAULT_TIMEZONE = "UTC"
 
 
 class PostgresConnection(BaseModel):
@@ -89,6 +92,19 @@ class ProjectSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     environments: dict[EnvironmentName, Environment]
+    timezone: str = DEFAULT_TIMEZONE
+    alert_webhook_env: SecretReference | None = None
+
+    @field_validator("timezone")
+    @classmethod
+    def _known_timezone(cls, name: str) -> str:
+        # An exact match: ZoneInfo itself accepts `utc` on a case-insensitive disk like macOS's,
+        # which the Linux Server would then reject.
+        if name not in available_timezones():
+            raise RuleViolation(
+                [((), "not a known time zone; use an IANA name such as Europe/Berlin or UTC")]
+            )
+        return name
 
     @model_validator(mode="after")
     def _required_environments_present(self) -> "ProjectSettings":

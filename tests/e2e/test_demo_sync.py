@@ -1,22 +1,14 @@
 import os
-import shutil
 import subprocess
-import sys
-import uuid
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from pathlib import Path
 
-import duckdb
 import psycopg
 import pytest
-import yaml
-from dotenv import dotenv_values
+from demo_project import ADOPS, connect, dagster_meta, shop, warehouse
 
 pytestmark = pytest.mark.e2e
 
-ADOPS = str(Path(sys.executable).parent / "adops")
 RUN = ("run", "shop_sync")
 SEED_EMAIL = "customer7@example.com"
 CUSTOMER_CHECKS = (
@@ -51,7 +43,6 @@ REVERSE_SYNC_CHECKS = (
     "max_change",
     "result_not_empty",
 )
-WAREHOUSE_DATABASES = {"dev": "warehouse", "stage": "warehouse_stage"}
 
 
 def stats_row(customer_id, total_amount, last_order_at):
@@ -84,108 +75,12 @@ SEED_CUSTOMER_STATS = [
 ]
 
 
-def docker_available() -> bool:
-    if shutil.which("docker") is None:
-        return False
-    return subprocess.run(["docker", "info"], capture_output=True).returncode == 0
-
-
-@dataclass(frozen=True)
-class Demo:
-    project: Path
-    env: dict
-    warehouse_kind: str
-
-
-def init_demo(project):
-    subprocess.run([ADOPS, "init", str(project), "--demo"], check=True)
-    shutil.copy(project / ".env.example", project / ".env")
-
-
-@pytest.fixture(scope="module")
-def stack(tmp_path_factory):
-    if not docker_available():
-        if os.environ.get("CI"):
-            pytest.fail("Docker is required for the e2e tests in CI")
-        pytest.skip("Docker is not available")
-    project = tmp_path_factory.mktemp("stack") / "shop"
-    init_demo(project)
-    compose = ["docker", "compose", "-p", f"adops-e2e-{uuid.uuid4().hex[:8]}"]
-    try:
-        subprocess.run([*compose, "up", "--wait"], cwd=project, check=True)
-        yield project
-    finally:
-        subprocess.run([*compose, "down", "-v"], cwd=project, check=True)
-
-
-def use_shipped_duckdb_warehouse(settings):
-    """In every Environment, uncomment the shipped DuckDB block and drop the Postgres one."""
-    lines = settings.read_text().splitlines()
-    while "    # warehouse:" in lines:
-        start = lines.index("    # warehouse:")
-        end = start + 1
-        while lines[end].startswith("    #   "):
-            end += 1
-        duckdb_block = [line.replace("# ", "", 1) for line in lines[start:end]]
-        postgres_start = max(i for i in range(start) if lines[i] == "    warehouse:")
-        lines[postgres_start:end] = duckdb_block
-    settings.write_text("\n".join(lines) + "\n")
-
-
-def reseed_shop(stack, env):
-    seed = (stack / "seed" / "01_shop.sql").read_text()
-    shop(env, f"DROP SCHEMA public CASCADE; CREATE SCHEMA public; {seed}")
-
-
-@pytest.fixture(params=["postgres", "duckdb"])
-def demo(request, stack, tmp_path):
-    project = tmp_path / "shop"
-    init_demo(project)
-    if request.param == "duckdb":
-        use_shipped_duckdb_warehouse(project / "adops.yaml")
-    env = dotenv_values(project / ".env")
-    reseed_shop(stack, env)
-    return Demo(project, env, request.param)
-
-
-def connect(env, prefix, user, database):
-    return psycopg.connect(
-        host="localhost",
-        port=int(env[f"{prefix}_PORT"]),
-        user=user,
-        dbname=database,
-        password=env[f"{prefix}_PASSWORD"],
-        autocommit=True,
-    )
-
-
-def shop(env, sql):
-    with connect(env, "SHOP", "shop", "shop") as conn:
-        conn.execute(sql)
-
-
 def customer_stats(env):
     with connect(env, "SHOP", "shop", "shop") as conn:
         return conn.execute(
             "SELECT customer_id, order_count, total_amount, last_order_at"
             " FROM public.customer_stats ORDER BY customer_id"
         ).fetchall()
-
-
-def warehouse(demo, sql, environment="dev"):
-    if demo.warehouse_kind == "duckdb":
-        settings = yaml.safe_load((demo.project / "adops.yaml").read_text())
-        path = demo.project / settings["environments"][environment]["warehouse"]["path"]
-        with duckdb.connect(str(path), read_only=True) as conn:
-            return conn.execute(sql).fetchall()
-    database = WAREHOUSE_DATABASES[environment]
-    with connect(demo.env, "WAREHOUSE", "warehouse", database) as conn:
-        return conn.execute(sql).fetchall()
-
-
-def dagster_meta(env, sql, *params):
-    with connect(env, "DAGSTER_PG", env["DAGSTER_PG_USER"], env["DAGSTER_PG_DB"]) as conn:
-        return conn.execute(sql, params).fetchall()
 
 
 def counts(demo):

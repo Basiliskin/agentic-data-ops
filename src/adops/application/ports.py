@@ -206,6 +206,7 @@ class StepReport:
     rows_loaded: Mapping[str, int] = field(default_factory=dict)
     error: str | None = None
     preview: ReverseSyncPreview | None = None
+    retryable: bool = False
 
 
 @dataclass(frozen=True)
@@ -240,6 +241,11 @@ class RunResult:
     @property
     def succeeded(self) -> bool:
         return all(step.status in SUCCEEDED for step in self.steps)
+
+    @property
+    def retryable(self) -> bool:
+        first_failure = next((s for s in self.steps if s.status not in SUCCEEDED), None)
+        return first_failure is not None and first_failure.retryable
 
 
 @runtime_checkable

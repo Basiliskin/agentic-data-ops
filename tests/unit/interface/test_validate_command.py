@@ -66,7 +66,7 @@ def test_demo_project_validates_offline_without_env_file(tmp_path, monkeypatch, 
     result = validate("--project", str(tmp_path))
 
     assert result.exit_code == 0, result.output
-    assert result.output == "ok\n"
+    assert result.output == "shop_sync: no schedule\nok\n"
 
 
 TRANSFORM_STEP = "  - name: transform_shop\n    type: transform\n    project: dbt\n"
@@ -88,7 +88,7 @@ def test_demo_with_its_dbt_project_validates_without_running_dbt(tmp_path):
     result = validate("--project", str(tmp_path))
 
     assert result.exit_code == 0, result.output
-    assert result.output == "ok\n"
+    assert result.output == "shop_sync: no schedule\nok\n"
 
 
 @pytest.mark.usefixtures("dbt_never_runs")
@@ -128,6 +128,7 @@ def test_transform_step_is_left_out_of_the_skipped_checks(project):
     assert result.exit_code == 0, result.output
     assert result.output.splitlines() == [
         "orders: row_count_matches skipped — kept for audit",
+        "shop_sync: no schedule",
         "ok",
     ]
 
@@ -139,7 +140,7 @@ def test_validate_defaults_to_the_current_folder(project, monkeypatch):
     result = validate()
 
     assert result.exit_code == 0, result.output
-    assert result.output == "ok\n"
+    assert result.output == "a: no schedule\nok\n"
 
 
 def test_skipped_checks_are_listed_in_pipeline_table_check_order(project):
@@ -167,6 +168,8 @@ def test_skipped_checks_are_listed_in_pipeline_table_check_order(project):
         "orders: primary_key_unique skipped — kept for audit",
         "orders: row_count_matches skipped — kept for audit",
         "zeta: primary_key_unique skipped — kept for audit",
+        "a_first: no schedule",
+        "b_second: no schedule",
         "ok",
     ]
     assert second.output == first.output
@@ -181,6 +184,7 @@ def test_a_skipped_source_not_empty_is_listed_with_its_reason(project):
     assert result.exit_code == 0, result.output
     assert result.output.splitlines() == [
         "returns: source_not_empty skipped — filled only at month end",
+        "shop: no schedule",
         "ok",
     ]
 
@@ -192,7 +196,7 @@ def test_one_named_pipeline_is_validated_alone(project):
     result = validate("good", "--project", str(project))
 
     assert result.exit_code == 0, result.output
-    assert result.output == "ok\n"
+    assert result.output == "good: no schedule\nok\n"
 
 
 def test_every_pipeline_is_validated_and_the_invalid_one_named(project):
@@ -425,5 +429,65 @@ def test_reverse_sync_skips_are_listed_after_table_skips_with_their_reasons(proj
         "push_a: max_change skipped — seasonal model",
         "push_a: result_not_empty skipped — seasonal model",
         "push_z: max_change skipped — monthly rebuild",
+        "p: no schedule",
         "ok",
     ]
+
+
+def scheduled_pipeline_yaml(name, schedule):
+    return pipeline_yaml(name, table_yaml("orders")) + f"schedule: {schedule}\n"
+
+
+def test_each_pipeline_schedule_is_listed_with_its_cron_and_the_project_time_zone(project):
+    (project / "adops.yaml").write_text(SETTINGS + "timezone: Europe/Berlin\n")
+    write_pipeline(project, "z_nightly", scheduled_pipeline_yaml("z_nightly", "daily at 02:00"))
+    write_pipeline(project, "m_manual", pipeline_yaml("m_manual", table_yaml("orders")))
+    write_pipeline(project, "a_cron", scheduled_pipeline_yaml("a_cron", '"*/15 9-17 * * 1-5"'))
+
+    first = validate("--project", str(project))
+    second = validate("--project", str(project))
+
+    assert first.exit_code == 0, first.output
+    assert first.output.splitlines() == [
+        "a_cron: */15 9-17 * * 1-5 (cron */15 9-17 * * 1-5, Europe/Berlin)",
+        "m_manual: no schedule",
+        "z_nightly: daily at 02:00 (cron 0 2 * * *, Europe/Berlin)",
+        "ok",
+    ]
+    assert second.output == first.output
+
+
+def test_without_a_time_zone_the_schedule_is_listed_in_utc(project):
+    write_pipeline(project, "p", scheduled_pipeline_yaml("p", "weekly on sunday at 06:30"))
+
+    result = validate("--project", str(project))
+
+    assert result.exit_code == 0, result.output
+    assert result.output == "p: weekly on sunday at 06:30 (cron 30 6 * * 0, UTC)\nok\n"
+
+
+def test_a_bad_schedule_fails_without_echoing_it_or_listing_any_schedule(project):
+    write_pipeline(project, "a_good", scheduled_pipeline_yaml("a_good", "hourly"))
+    write_pipeline(project, "p", scheduled_pipeline_yaml("p", '"SENTINEL_9f3 daily"'))
+
+    result = validate("--project", str(project))
+
+    assert result.exit_code == 1
+    assert result.output.splitlines() == [
+        "pipelines/p.yaml: schedule: not a known schedule; use hourly, daily at HH:MM, "
+        "weekly on <day> at HH:MM or a 5-field cron"
+    ]
+    assert "SENTINEL_9f3" not in result.output
+
+
+def test_a_bad_time_zone_is_reported_against_adops_yaml_without_its_value(project):
+    (project / "adops.yaml").write_text(SETTINGS + "timezone: Mars/SENTINEL_tz\n")
+    write_pipeline(project, "p", scheduled_pipeline_yaml("p", "hourly"))
+
+    result = validate("--project", str(project))
+
+    assert result.exit_code == 1
+    assert result.output.splitlines() == [
+        "adops.yaml: timezone: not a known time zone; use an IANA name such as Europe/Berlin or UTC"
+    ]
+    assert "SENTINEL_tz" not in result.output

@@ -75,6 +75,7 @@ from adops.application.run_pipeline import (
     current_fingerprints,
     plan_branch_run,
     run_pipeline,
+    run_step,
 )
 from adops.application.secrets import MissingSecretError
 from adops.domain.branch_environment import STAGE
@@ -1811,3 +1812,149 @@ def test_a_fingerprint_store_failure_fails_the_step_without_its_text():
 
     assert statuses(result)[:2] == [("customers", StepStatus.FAILED), ("build", StepStatus.SKIPPED)]
     assert result.steps[0].error == "Step customers: step fingerprint store: RuntimeError"
+
+
+def every_step_error_class() -> set[type[StepError]]:
+    found: set[type[StepError]] = set()
+    pending = [StepError]
+    while pending:
+        cls = pending.pop()
+        if cls.__module__.startswith("adops.") and cls not in found:
+            found.add(cls)
+            pending.extend(cls.__subclasses__())
+    return found
+
+
+def bare_instance(cls: type[StepError]) -> StepError:
+    error = cls.__new__(cls)
+    if isinstance(error, CheckFailedError):
+        error.checks, error.rows_loaded = (), {}
+    return error
+
+
+@dataclass
+class RaisingTask:
+    error: Exception
+    name: str = "orders"
+
+    def __call__(self, sync: Sync):
+        raise self.error
+
+
+def test_only_an_unreachable_source_or_warehouse_failure_is_retryable():
+    classes = every_step_error_class()
+    retryable = {
+        cls
+        for cls in classes
+        if run_step(RaisingTask(bare_instance(cls)), RecordingSync()).retryable
+    }
+
+    assert {ReverseSyncTargetUnreachableError, BreakingChangeError, CheckFailedError} <= classes
+    assert retryable == {SourceUnreachableError, WarehouseUnreachableError}
+
+
+def test_a_subclass_of_a_retryable_error_is_not_retryable_until_named():
+    class SourceTimedOutError(SourceUnreachableError):
+        pass
+
+    report = run_step(RaisingTask(SourceTimedOutError("shop", "orders", "orders")), RecordingSync())
+
+    assert report.status is StepStatus.FAILED
+    assert report.retryable is False
+
+
+def test_an_unreachable_source_fails_its_step_as_retryable():
+    sync = RecordingSync(fail_preflight_of={"customers": SourceUnreachable("customers")})
+
+    result = run(sync)
+
+    assert [step.retryable for step in result.steps] == [True, False, False]
+    assert result.retryable is True
+
+
+def test_an_unreachable_warehouse_fails_its_step_as_retryable():
+    sync = RecordingSync(fail_sync_of={"customers": WarehouseUnreachable()})
+
+    result = run(sync)
+
+    assert result.steps[0].status is StepStatus.FAILED
+    assert result.steps[0].retryable is True
+    assert result.retryable is True
+
+
+@pytest.mark.parametrize(
+    "engine",
+    [
+        FakeReverseSync(fail_read=TargetUnreachable()),
+        FakeReverseSync(fail_apply=TargetUnreachable()),
+    ],
+    ids=["on read", "on apply"],
+)
+def test_an_unreachable_reverse_sync_target_is_not_retryable(engine):
+    result = run_reverse(engine, "stage")
+
+    assert result.steps[0].error == "Pipeline crm_push, Step push_stats: Target crm is unreachable"
+    assert result.steps[0].retryable is False
+    assert result.retryable is False
+
+
+def test_a_failed_check_is_not_retryable():
+    result = run(RecordingSync(load_facts={"customers": healthy_load(duplicate_keys=1)}))
+
+    assert result.steps[0].status is StepStatus.CHECK_FAILED
+    assert result.steps[0].retryable is False
+    assert result.retryable is False
+
+
+def test_a_breaking_change_halt_is_not_retryable():
+    sync = RecordingSync(source_facts={"customers": facts_with_types({"id": "integer"})})
+
+    result = run(sync, snapshot_store=baseline_store())
+
+    assert result.steps[0].error == "Step customers: Breaking Change in customers: email dropped"
+    assert result.steps[0].retryable is False
+    assert result.retryable is False
+
+
+def test_a_transform_failure_is_not_retryable():
+    transform = FakeTransform(transform_result(crashed=True))
+
+    result = run(RecordingSync(), pipeline=SYNC_TRANSFORM_SYNC, transform=transform)
+
+    assert result.steps[1].status is StepStatus.FAILED
+    assert result.steps[1].retryable is False
+    assert result.retryable is False
+
+
+def test_a_passed_run_is_not_retryable():
+    result = run(RecordingSync())
+
+    assert result.succeeded
+    assert result.retryable is False
+
+
+def report(status: StepStatus, retryable: bool = False) -> StepReport:
+    return StepReport("step", status, retryable=retryable)
+
+
+@pytest.mark.parametrize(
+    ("steps", "expected"),
+    [
+        ((report(StepStatus.PASSED), report(StepStatus.DEFERRED)), False),
+        ((report(StepStatus.PASSED, retryable=True),), False),
+        ((report(StepStatus.FAILED, retryable=True), report(StepStatus.SKIPPED)), True),
+        ((report(StepStatus.DEFERRED), report(StepStatus.FAILED, retryable=True)), True),
+        ((report(StepStatus.CHECK_FAILED), report(StepStatus.SKIPPED)), False),
+        ((report(StepStatus.FAILED), report(StepStatus.FAILED, retryable=True)), False),
+    ],
+    ids=[
+        "passed",
+        "passed with a stray flag",
+        "retryable first failure",
+        "retryable after a deferred step",
+        "failed check then skipped",
+        "non-retryable before retryable",
+    ],
+)
+def test_a_run_is_retryable_only_when_its_first_failure_is(steps, expected):
+    assert RunResult(PIPELINE, "stage", steps).retryable is expected

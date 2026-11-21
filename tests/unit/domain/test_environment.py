@@ -197,3 +197,59 @@ def test_lowercase_environment_names_load():
     text = settings() + settings(environment="stage_2").removeprefix("\nenvironments:\n")
 
     assert set(load_project_settings(text).environments) == {"dev", "stage_2"}
+
+
+def test_the_project_time_zone_defaults_to_utc():
+    assert load_project_settings(settings()).timezone == "UTC"
+
+
+@pytest.mark.parametrize("name", ["Europe/Berlin", "America/New_York", "UTC", "Etc/GMT+2"])
+def test_a_known_time_zone_is_kept(name):
+    assert load_project_settings(settings() + f"timezone: {name}\n").timezone == name
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Mars/SENTINEL_tz",
+        "SENTINEL_tz",
+        "utc",
+        "europe/berlin",
+        "Europe",
+        "Europe/",
+        "../SENTINEL_tz",
+        "/etc/SENTINEL_tz",
+        '""',
+        "SENTINEL_tz" * 40,
+    ],
+)
+def test_an_unknown_time_zone_is_one_value_free_problem_at_timezone(name):
+    assert problems_of(settings() + f"timezone: {name}\n") == (
+        "timezone: not a known time zone; use an IANA name such as Europe/Berlin or UTC",
+    )
+
+
+def test_a_time_zone_that_is_not_text_is_rejected_without_its_value():
+    (problem,) = problems_of(settings() + "timezone: [SENTINEL_tz]\n")
+
+    assert problem.startswith("timezone: ")
+    assert "SENTINEL_tz" not in problem
+
+
+def test_alerts_are_off_unless_a_webhook_secret_reference_is_set():
+    assert load_project_settings(settings()).alert_webhook_env is None
+
+    loaded = load_project_settings(settings() + "alert_webhook_env: ALERT_WEBHOOK_URL\n")
+
+    assert loaded.alert_webhook_env == SecretReference(name="ALERT_WEBHOOK_URL")
+
+
+@pytest.mark.parametrize(
+    "value", ["https://hooks.example/SENTINEL_hook", "sentinel_lower", "{name: SENTINEL_lower}"]
+)
+def test_a_webhook_url_pasted_in_place_of_its_variable_name_is_refused(value):
+    problems = problems_of(settings() + f"alert_webhook_env: '{value}'\n")
+
+    assert problems
+    assert all(problem.startswith("alert_webhook_env") for problem in problems)
+    assert not any("SENTINEL" in problem or "sentinel" in problem for problem in problems)

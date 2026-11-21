@@ -47,7 +47,10 @@ jobs:
                       dbt/models/customer_stats.sql warehouse_init/01_stage.sql; do
             grep -qF "adops/templates/demo/$file" <<< "$listing" || { echo "missing $file"; exit 1; }
           done
-          grep -qF "adops/templates/plain/adops.yaml" <<< "$listing" || { echo "missing plain/adops.yaml"; exit 1; }
+          for file in plain/adops.yaml plain/docker-compose.yml plain/.env.example \
+                      server/Dockerfile server/workspace.yaml server/dagster.yaml; do
+            grep -qF "adops/templates/$file" <<< "$listing" || { echo "missing $file"; exit 1; }
+          done
 
   e2e:
     runs-on: ubuntu-latest

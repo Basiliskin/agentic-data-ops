@@ -1,0 +1,464 @@
+{
+  "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.json",
+  "roadmapTask": "Horizon 7 — Scheduling (Server slice): implement the Schedule/Server part of ADR-0014 — a schedule: line in Pipeline files (plain words or cron, Project time zone in adops.yaml, validated by adops validate), Schedules compiled to Dagster schedules, run rules (skip overlap, one run at a time per Server, catch up once, retry only Source/Warehouse-unreachable errors 3x5min), Dagster daemon + webserver under a docker-compose \"server\" profile, and sanitized webhook alerts via a Secret Reference. The Git pull-and-validate loop and Git-based acceptance of Breaking Changes (ADR-0015) are deferred to horizon 8; GitHub Actions workflows are out of scope.",
+  "createdAt": "2026-11-20T18:50:23Z",
+  "updatedAt": "2026-11-21T07:20:58Z",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "schedule-and-time-zone-rules",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-20T18:50:23Z",
+      "baseRef": "48f3d42023b82b695837d7dbcb61528cd8be5042",
+      "baseDirty": true,
+      "notes": "Already dirty at start: docs/roadmaps/agentic-dataops/{blockers,decisions,discoveries,next-horizon-brief,state}.md, tests/unit/conftest.py, horizon-07 roadmap .json/.md (untracked). Changed: src/adops/domain/{schedule.py (new),pipeline.py,environment.py}, src/adops/interface/validate_command.py, tests/unit/domain/{test_schedule.py (new),test_pipeline.py,test_environment.py}, tests/unit/interface/test_validate_command.py. Adds Schedule (plain words or 5-field cron, value-free errors), runs_on_schedule, ProjectSettings.timezone (exact match in available_timezones, not ZoneInfo(): it accepts utc on macOS), and per-Pipeline Schedule lines printed by adops validate only on success. Schedule parsing lives in Schedule's own before-validator (SecretReference pattern) so errors land at `schedule:`; existing success-output tests gained `<name>: no schedule` lines.",
+      "unplannedFiles": [],
+      "gateRun": "uv run ruff check: pass; uv run pytest tests/unit --cov --cov-report=term-missing: pass (1071, 100% line+branch); g3 wheel template listing: pass; g4 uv run pytest tests/e2e -m e2e: pass (4)",
+      "completedAt": "2026-11-20T19:00:19Z",
+      "gradeResult": {
+        "phaseId": "schedule-and-time-zone-rules",
+        "overallPass": true,
+        "dimensionScores": [
+          {
+            "dimensionId": "plain-words-compile-exactly",
+            "score": 9,
+            "pass": true,
+            "evidence": "All three forms compile correctly incl. sunday=0..saturday=6; bad times/days rejected; frozen. Not 10: day names case-sensitive."
+          },
+          {
+            "dimensionId": "cron-field-validation",
+            "score": 9,
+            "pass": true,
+            "evidence": "Per-field bounds; rejects field-count, range, */0, 5-1, 1,,2, names, Feb 30/31 forms; accepts listed valid crons."
+          },
+          {
+            "dimensionId": "value-free-field-pointed-errors",
+            "score": 10,
+            "pass": true,
+            "evidence": "Sentinel tested in every parser position and in pydantic errors() payload; exact one-line CLI output pinned for schedule and timezone."
+          },
+          {
+            "dimensionId": "scheduled-environment-rule",
+            "score": 9,
+            "pass": true,
+            "evidence": "Exact frozenset membership; all negative cases tested; defined once in schedule.py."
+          },
+          {
+            "dimensionId": "validate-schedule-listing",
+            "score": 9,
+            "pass": true,
+            "evidence": "One ordered line per Pipeline with cron and tz (UTC default); not printed on failure; stable across runs."
+          },
+          {
+            "dimensionId": "domain-vs-interface-placement",
+            "score": 9,
+            "pass": true,
+            "evidence": "No formatting in schedule.py; no ZoneInfo/re.compile in validate_command.py; domain imports pure."
+          }
+        ]
+      }
+    },
+    {
+      "phaseId": "retryable-step-errors",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-20T19:02:16+00:00",
+      "baseRef": "48f3d42023b82b695837d7dbcb61528cd8be5042",
+      "baseDirty": true,
+      "notes": "Base was dirty with phase schedule-and-time-zone-rules' uncommitted work (domain/environment.py, domain/pipeline.py, schedule.py, interface/validate_command.py, their tests, conftest, memory docs, horizon-07 roadmap files). | Changed: src/adops/application/ports.py, src/adops/application/run_pipeline.py, tests/unit/application/test_run_pipeline.py. StepReport gains retryable=False; run_step sets it by exact type match against RETRYABLE_ERRORS=(SourceUnreachableError, WarehouseUnreachableError); RunResult.retryable follows the first non-succeeded Step. No unplanned files.",
+      "unplannedFiles": [],
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-20T19:07:06+00:00",
+          "gate": "uv run ruff check",
+          "detail": "E501 Line too long (102 > 100) --> tests/unit/application/test_run_pipeline.py:1847:101",
+          "resolvedBy": "gate-fix",
+          "resolution": "Wrapped two new test lines (set comprehension and parametrize list) under 100 chars."
+        }
+      ],
+      "completedAt": "2026-11-20T19:10:38+00:00",
+      "gradeResult": {
+        "phaseId": "retryable-step-errors",
+        "dimensionScores": [
+          {
+            "dimensionId": "retryable-set-is-exact",
+            "score": 10,
+            "pass": true,
+            "evidence": "Closed tuple RETRYABLE_ERRORS with exact type match in run_step; recursive __subclasses__ walk asserts set == {Source, Warehouse}; above a 9: a dedicated test that a later SourceUnreachableError subclass is not retryable, and the walk asserts it reaches the excluded classes so it cannot pass vacuously."
+          },
+          {
+            "dimensionId": "run-result-first-failure",
+            "score": 9,
+            "pass": true,
+            "evidence": "ports.py RunResult.retryable takes first non-SUCCEEDED step via next(); parametrized test covers passed, stray flag, retryable first failure, failed check, non-retryable before retryable, deferred before retryable."
+          },
+          {
+            "dimensionId": "existing-behaviour-unchanged",
+            "score": 9,
+            "pass": true,
+            "evidence": "retryable is the last defaulted field of frozen StepReport; grep retryable src/adops/interface empty; test_run_pipeline.py diff is additions only; suite green."
+          },
+          {
+            "dimensionId": "classification-lives-in-application",
+            "score": 9,
+            "pass": true,
+            "evidence": "grep retryable in infrastructure/domain empty; only stdlib/adops imports; comment at run_pipeline.py:117-119 names the rule and the Reverse Sync Target exclusion."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": "ruff check: pass (after one E501 fix); pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN to local adops-test-pg): pass, 1087 passed, 100% coverage; wheel template grep (g3): pass; pytest tests/e2e -m e2e (g4): pass"
+    },
+    {
+      "phaseId": "dagster-server-definitions",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-20T19:11:52Z",
+      "baseRef": "48f3d42023b82b695837d7dbcb61528cd8be5042",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/domain/environment.py,src/adops/domain/pipeline.py,src/adops/interface/validate_command.py,tests/unit/application/test_run_pipeline.py,tests/unit/conftest.py,tests/unit/domain/test_environment.py,tests/unit/domain/test_pipeline.py,tests/unit/interface/test_validate_command.py,docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.status.last_good.json,src/adops/domain/schedule.py,tests/unit/domain/test_schedule.py || changed: src/adops/infrastructure/dagster_server.py (new), tests/unit/infrastructure/test_dagster_server.py (new), tests/unit/infrastructure/test_dagster_orchestrator.py (unplanned: import-isolation test now lists dagster_server.py as the second allowed Dagster importer). build_server_definitions builds one in-process single-op job per Pipeline plus a RUNNING schedule per Schedule that skips while the job is QUEUED/NOT_STARTED/STARTING/STARTED; the op raises RetryRequested for retryable failures up to 3 retries, then calls on_failure once and raises Failure with the first failing Step error.",
+      "unplannedFiles": [
+        "tests/unit/infrastructure/test_dagster_orchestrator.py"
+      ],
+      "failures": [
+        {
+          "at": "2026-11-20T19:20:12Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "34 Postgres-backed tests errored: ADOPS_TEST_POSTGRES_DSN unset in the local shell, so coverage fell to 98.6% (postgres_reverse_sync.py)",
+          "resolvedBy": "gate-fix",
+          "resolution": "re-ran with ADOPS_TEST_POSTGRES_DSN set as CI does; no code change; 1135 passed, 100% coverage"
+        }
+      ],
+      "gateRun": [
+        "ruff: pass (uv run ruff check)",
+        "unit+coverage: pass (ADOPS_TEST_POSTGRES_DSN=...localhost:55432 uv run pytest tests/unit --cov; 1135 passed, 100%)",
+        "g3 wheel templates: not run, no src/adops/templates change",
+        "g4 docker e2e: not run, no tests/e2e or demo template change"
+      ],
+      "completedAt": "2026-11-20T19:20:55Z",
+      "gradeResult": {
+        "phaseId": "dagster-server-definitions",
+        "dimensionScores": [
+          {
+            "dimensionId": "definitions-shape",
+            "score": 9,
+            "pass": true,
+            "evidence": "Two Pipelines give jobs [customers, orders] and one schedule with cron 0 2 * * *, Europe/Berlin, RUNNING; in_process_executor, single op, no partitions; schedule partitions checked only indirectly via schedule.job"
+          },
+          {
+            "dimensionId": "overlap-skip",
+            "score": 9,
+            "pass": true,
+            "evidence": "RunsFilter by job name with all 4 in-progress statuses; skip test parametrized over all 4 with exact message; SUCCESS/FAILURE/no run give a RunRequest with empty run_config and only dagster/ tags; per-job filter proven"
+          },
+          {
+            "dimensionId": "retry-policy",
+            "score": 9,
+            "pass": true,
+            "evidence": "4 runs + 1 alert for always-unreachable; 2 runs + 0 alerts for retry-then-pass; 1 run + 1 alert for failed Check; no dagster/max_retries; default 300 asserted; retry spacing itself not observed"
+          },
+          {
+            "dimensionId": "no-secret-in-dagster-storage",
+            "score": 8,
+            "pass": true,
+            "evidence": "Secret only by closure; DAGSTER_HOME scan over passed/check_failed/unreachable; Failure description equals StepReport error; metadata keys/values asserted; sentinel never enters the RunResult, so the scan cannot catch an error-path leak"
+          },
+          {
+            "dimensionId": "cron-parity-with-dagster",
+            "score": 9,
+            "pass": true,
+            "evidence": "Every plain-words form plus 13 domain crons accepted by is_valid_cron_string; both reject */0, 1,,2, Feb 30/31; no domain-only rejection asserted"
+          },
+          {
+            "dimensionId": "infrastructure-isolation",
+            "score": 9,
+            "pass": true,
+            "evidence": "grep for adops.interface/os.environ/open(/Path( is empty; nothing in domain/application imports dagster_server; docstring states the trade-off; the unplanned import-test change keeps the guard strict"
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "server-code-location",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-20T19:21:58Z",
+      "baseRef": "48f3d42023b82b695837d7dbcb61528cd8be5042",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/domain/environment.py,src/adops/domain/pipeline.py,src/adops/interface/validate_command.py,tests/unit/application/test_run_pipeline.py,tests/unit/conftest.py,tests/unit/domain/test_environment.py,tests/unit/domain/test_pipeline.py,tests/unit/infrastructure/test_dagster_orchestrator.py,tests/unit/interface/test_validate_command.py,docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.status.last_good.json,src/adops/domain/schedule.py,src/adops/infrastructure/dagster_server.py,tests/unit/domain/test_schedule.py,tests/unit/infrastructure/test_dagster_server.py || changed: src/adops/interface/run_command.py, src/adops/interface/server.py (new), tests/unit/interface/test_run_command.py, tests/unit/interface/test_server.py (new), docs/adr/0014-schedules-run-on-a-pull-based-server.md, GLOSSARY.md. run_command gains public run_in_environment + RUN_ERRORS/error_lines shared with the Server; server.py is the lazy Dagster code location gating ADOPS_ENVIRONMENT to stage/prod; ADR-0014 + GLOSSARY get an additive clarification.",
+      "unplannedFiles": [],
+      "failures": [
+        {
+          "at": "2026-11-20T19:27:04Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "FAILED tests/unit/infrastructure/test_dagster_orchestrator.py::test_only_the_dagster_adapter_imports_dagster — src/adops/interface/server.py imports dagster.Definitions",
+          "resolvedBy": "gate-fix",
+          "resolution": "server.py takes Definitions via adops.infrastructure.dagster_server instead of importing dagster, keeping Dagster inside infrastructure"
+        }
+      ],
+      "gateRun": "ruff check: pass; pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set, 1153 passed, 100%): pass; uv build --wheel + template grep: pass; pytest tests/e2e -m e2e (4 passed): pass",
+      "completedAt": "2026-11-20T19:33:17Z",
+      "gradeResult": {
+        "phaseId": "server-code-location",
+        "dimensionScores": [
+          {
+            "dimensionId": "environment-gate",
+            "score": 9,
+            "pass": true,
+            "evidence": "Parametrized refusal test over dev, feature-x, Stage, unset; message value-free; prod-missing test; uses runs_on_schedule; no \"stage\" literal."
+          },
+          {
+            "dimensionId": "shared-run-path",
+            "score": 9,
+            "pass": true,
+            "evidence": "run_project and server.py both call run_in_environment (build_orchestrator vs InOrderOrchestrator), both asserted; no adapters in server.py; existing tests unchanged."
+          },
+          {
+            "dimensionId": "lazy-load-and-sanitized-load-failure",
+            "score": 9,
+            "pass": true,
+            "evidence": "Import from empty dir exits 0; defs via module __getattr__ tested; broken pipeline with sentinel yields only pipelines/broken.yaml: lines."
+          },
+          {
+            "dimensionId": "pre-step-errors-become-failed-results",
+            "score": 8,
+            "pass": true,
+            "evidence": "Missing secret equals adops run output; RuntimeError keeps only type name with succeeded/retryable False and one sync_shop step; on_failure spy via execute_in_process. Minor: multi-line validation errors joined with ; differ from CLI per-line output, untested."
+          },
+          {
+            "dimensionId": "documented-server-limits",
+            "score": 9,
+            "pass": true,
+            "evidence": "Dated ADR-0014 Clarification (bind-mounted folder, 127.0.0.1), additions only; matching GLOSSARY Server note."
+          },
+          {
+            "dimensionId": "composition-root-only",
+            "score": 9,
+            "pass": true,
+            "evidence": "No ScheduleDefinition/RetryRequested/SkipReason/RunRequest in server.py; nothing below interface imports it."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "server-webhook-alerts",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-20T19:34:54Z",
+      "baseRef": "48f3d42023b82b695837d7dbcb61528cd8be5042",
+      "baseDirty": true,
+      "notes": "already dirty at start: GLOSSARY.md,docs/adr/0014-schedules-run-on-a-pull-based-server.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/domain/environment.py,src/adops/domain/pipeline.py,src/adops/interface/run_command.py,src/adops/interface/validate_command.py,tests/unit/application/test_run_pipeline.py,tests/unit/conftest.py,tests/unit/domain/test_environment.py,tests/unit/domain/test_pipeline.py,tests/unit/infrastructure/test_dagster_orchestrator.py,tests/unit/interface/test_run_command.py,tests/unit/interface/test_validate_command.py,docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.status.last_good.json,src/adops/domain/schedule.py,src/adops/infrastructure/dagster_server.py,src/adops/interface/server.py,tests/unit/domain/test_schedule.py,tests/unit/infrastructure/test_dagster_server.py,tests/unit/interface/test_server.py | changed: src/adops/domain/environment.py (ProjectSettings.alert_webhook_env), src/adops/application/alerts.py (new: FailureAlert, AlertSender, failure_alert, notify_failure), src/adops/infrastructure/webhook_alerts.py (new: WebhookAlertSender, payload, http/https only, 10s timeout), src/adops/interface/server.py (_on_failure wiring, ALERTS_OFF, print_failure reuses failure_alert), tests: test_environment.py (2 tests at end), test_alerts.py (new), test_webhook_alerts.py (new), test_server.py (alert tests from WEBHOOK_VARIABLE to end), conftest.py (webhook fixture at end). Failed Server runs POST one sanitized JSON alert to the URL in the alert_webhook_env variable, read at failure time; unset/empty prints alerts are off. Paths dirty at start mean git diff <baseRef> includes earlier phases.",
+      "unplannedFiles": [
+        "tests/unit/conftest.py"
+      ],
+      "failures": [
+        {
+          "kind": "gate",
+          "gate": "uv run ruff check",
+          "detail": "E501 Line too long (102 > 100) src/adops/application/alerts.py:32",
+          "at": "2026-11-20T19:39:55Z",
+          "resolvedBy": "gate-fix",
+          "resolution": "shortened the notify_failure docstring",
+          "attempt": 1,
+          "by": "execute"
+        },
+        {
+          "kind": "gate",
+          "gate": "uv run pytest tests/unit --cov",
+          "detail": "34 errors in Postgres-backed tests (ADOPS_TEST_POSTGRES_DSN unset locally); coverage 99% in postgres_reverse_sync.py",
+          "at": "2026-11-20T19:39:55Z",
+          "resolvedBy": "gate-fix",
+          "resolution": "re-ran with ADOPS_TEST_POSTGRES_DSN set as CI does: 1175 passed, 100% coverage; environment only, no code change",
+          "attempt": 1,
+          "by": "execute"
+        }
+      ],
+      "completedAt": "2026-11-20T19:42:36Z",
+      "gradeResult": {
+        "phaseId": "server-webhook-alerts",
+        "dimensionScores": [
+          {
+            "dimensionId": "alert-payload-sanitized",
+            "score": 9,
+            "pass": true,
+            "evidence": "test_alerts.py sentinels in a non-first StepReport error and rows_loaded keys; exact 5-key body in test_webhook_alerts.py and test_server.py"
+          },
+          {
+            "dimensionId": "delivery-isolation",
+            "score": 9,
+            "pass": true,
+            "evidence": "urlopen timeout=10.0; 500/timeout/closed-port give type-only lines; server outcome equals alerts-off with no token in stderr"
+          },
+          {
+            "dimensionId": "alerts-off-path",
+            "score": 9,
+            "pass": true,
+            "evidence": "absent/unset/empty each print alerts are off once; variable set after load still POSTs; URL not in run_config/tags/metadata"
+          },
+          {
+            "dimensionId": "alert-setting-validation",
+            "score": 9,
+            "pass": true,
+            "evidence": "environment.py SecretReference | None field; pasted URL refused at alert_webhook_env without echo"
+          },
+          {
+            "dimensionId": "alert-layer-split",
+            "score": 9,
+            "pass": true,
+            "evidence": "no urllib/http/json in application/alerts.py; WebhookAlertSender in infrastructure, constructed only in interface/server.py"
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": "g1 ruff check: pass; g2 pytest tests/unit --cov (with ADOPS_TEST_POSTGRES_DSN): 1175 passed, 100%; g3 wheel template check: pass; g4 pytest tests/e2e -m e2e: 4 passed"
+    },
+    {
+      "phaseId": "init-server-profile",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-21T06:36:57Z",
+      "baseRef": "48f3d42023b82b695837d7dbcb61528cd8be5042",
+      "baseDirty": true,
+      "notes": "already dirty at start: GLOSSARY.md,docs/adr/0014-schedules-run-on-a-pull-based-server.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/domain/environment.py,src/adops/domain/pipeline.py,src/adops/interface/run_command.py,src/adops/interface/validate_command.py,tests/unit/application/test_run_pipeline.py,tests/unit/conftest.py,tests/unit/domain/test_environment.py,tests/unit/domain/test_pipeline.py,tests/unit/infrastructure/test_dagster_orchestrator.py,tests/unit/interface/test_run_command.py,tests/unit/interface/test_validate_command.py,docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.status.last_good.json,src/adops/application/alerts.py,src/adops/domain/schedule.py,src/adops/infrastructure/dagster_server.py,src/adops/infrastructure/webhook_alerts.py,src/adops/interface/server.py,tests/unit/application/test_alerts.py,tests/unit/domain/test_schedule.py,tests/unit/infrastructure/test_dagster_server.py,tests/unit/infrastructure/test_webhook_alerts.py,tests/unit/interface/test_server.py || changed: pyproject.toml, uv.lock (dagster-webserver>=1.13.30,<1.14 + dagster-graphql), src/adops/templates/server/{Dockerfile,workspace.yaml,dagster.yaml} (new), src/adops/templates/plain/{docker-compose.yml,.env.example} (new), demo/{docker-compose.yml,.env.example,adops.yaml}, plain/adops.yaml, src/adops/interface/init_command.py, tests/unit/interface/test_init_command.py, .github/workflows/ci.yml. Both init modes now write a root Dockerfile (ARG ADOPS_PACKAGE=adops==__version__, bind-mount install, no COPY) and server/{workspace.yaml,dagster.yaml} (QueuedRunCoordinator max_concurrent_runs 1); compose gains dagster_daemon/dagster_webserver behind profile server with host networking and ./:/project; plain gets dagster_meta compose + .env.example; adops.yaml templates name alert_webhook_env. | unplanned: tests/unit/interface/test_server.py (adjusts 2 alert tests to the demo template now naming alert_webhook_env; that file was already dirty at start, so git diff <baseRef> includes phase server-webhook-alerts work). | compensation known: drop dagster-webserver + relock, delete templates/server and plain compose/.env.example, restore compose/init tests/CI list; not needed.",
+      "unplannedFiles": [
+        "tests/unit/interface/test_server.py"
+      ],
+      "failures": [
+        {
+          "at": "2026-11-21T06:44:22Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "1191 passed but coverage 99.93% < 100: src/adops/interface/server.py line 92 (branch) not covered",
+          "resolvedBy": "gate-fix",
+          "resolution": "demo adops.yaml now names alert_webhook_env: the no-webhook test strips that line and the alerting fixture no longer appends a duplicate key"
+        }
+      ],
+      "gateRun": "g1 ruff check: pass; uv lock --check: pass; g2 pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): 1191 passed, 100% after one gate-fix; g3 uv build --wheel + template grep incl. 6 new plain/server files: pass; g4 pytest tests/e2e -m e2e: 4 passed; manual: docker compose config --services for demo/plain with and without --profile server, dagster_instance_config accepts server/dagster.yaml",
+      "completedAt": "2026-11-21T06:52:28Z",
+      "gradeResult": {
+        "phaseId": "init-server-profile",
+        "dimensionScores": [
+          {
+            "dimensionId": "profile-isolation",
+            "score": 9,
+            "pass": true,
+            "evidence": "p-demo: config --services = shop,warehouse,dagster_meta; +profile adds dagster_daemon,dagster_webserver. p-plain: dagster_meta, then +2. test_init_command.py asserts default (no profiles) sets for both modes."
+          },
+          {
+            "dimensionId": "server-container-wiring",
+            "score": 9,
+            "pass": true,
+            "evidence": "profile config (both): network_mode host, bind source=project dir target /project, DAGSTER_HOME=/project/server, ADOPS_PROJECT=/project, -h 127.0.0.1, -w workspace; daemon cmd exact; workspace.yaml python_module; .env.example L12-16"
+          },
+          {
+            "dimensionId": "dockerfile-installs-pinned-package",
+            "score": 9,
+            "pass": true,
+            "evidence": "Dockerfile:5 ARG ADOPS_PACKAGE=adops==0.1.0 (= __version__) in both modes; no ^COPY/ADD; marker count 0; :6 RUN --mount=type=bind,source=.,target=/build pip install \"$ADOPS_PACKAGE\"; replace in shared _write_server_files"
+          },
+          {
+            "dimensionId": "run-coordinator-and-storage",
+            "score": 9,
+            "pass": true,
+            "evidence": "yaml load: {module dagster._core.run_coordinator, class QueuedRunCoordinator, config max_concurrent_runs 1}; password: {env: DAGSTER_PG_PASSWORD} only; plain has no root dagster.yaml; demo/dagster.yaml git diff empty"
+          },
+          {
+            "dimensionId": "single-source-templates-and-lock",
+            "score": 9,
+            "pass": true,
+            "evidence": "find: Dockerfile/workspace.yaml only in templates/server; dagster.yaml only server/ + unchanged demo/; uv lock --check ok; pyproject:13 dagster-webserver>=1.13.30,<1.14, uv.lock 1.13.30; init_command only copy+replace"
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "server-demo-e2e",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-21T06:57:16Z",
+      "baseRef": "48f3d42023b82b695837d7dbcb61528cd8be5042",
+      "baseDirty": true,
+      "notes": "already dirty at start: .github/workflows/ci.yml,GLOSSARY.md,docs/adr/0014-schedules-run-on-a-pull-based-server.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,pyproject.toml,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/domain/environment.py,src/adops/domain/pipeline.py,src/adops/interface/init_command.py,src/adops/interface/run_command.py,src/adops/interface/validate_command.py,src/adops/templates/demo/.env.example,src/adops/templates/demo/adops.yaml,src/adops/templates/demo/docker-compose.yml,src/adops/templates/plain/adops.yaml,tests/unit/application/test_run_pipeline.py,tests/unit/conftest.py,tests/unit/domain/test_environment.py,tests/unit/domain/test_pipeline.py,tests/unit/infrastructure/test_dagster_orchestrator.py,tests/unit/interface/test_init_command.py,tests/unit/interface/test_run_command.py,tests/unit/interface/test_validate_command.py,uv.lock,docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-07-scheduling-server-roadmap.status.last_good.json,src/adops/application/alerts.py,src/adops/domain/schedule.py,src/adops/infrastructure/dagster_server.py,src/adops/infrastructure/webhook_alerts.py,src/adops/interface/server.py,src/adops/templates/plain/.env.example,src/adops/templates/plain/docker-compose.yml,src/adops/templates/server/,tests/unit/application/test_alerts.py,tests/unit/domain/test_schedule.py,tests/unit/infrastructure/test_dagster_server.py,tests/unit/infrastructure/test_webhook_alerts.py,tests/unit/interface/test_server.py || changed: tests/e2e/test_server.py (new), tests/e2e/test_demo_sync.py (helpers/fixtures moved out, scenarios unchanged), tests/e2e/demo_project.py (new, unplanned: shared helpers incl. the single dagster_meta), tests/e2e/conftest.py (new, unplanned: stack + demo fixtures). No src/ change. Session fixture runs uv build --wheel, builds dagster_daemon once with ADOPS_PACKAGE=/build/<wheel> into a uuid image tag via a test-written compose override, checks adops.__version__ and direct_url.json in the image. Per test: every-minute schedule on shop_sync, ADOPS_ENVIRONMENT=stage, own Dagster DB in the stack dagster_meta, free webserver port, up --no-build --no-deps daemon+webserver; polls runs JOIN run_tags for dagster/schedule_name=shop_sync_schedule SUCCESS (240s deadline, fails fast on FAILURE/CANCELED, dumps runs + daemon log tail); stops Server before reading stage Warehouse (DuckDB writer safe); down -v in finally. Measured locally (OrbStack, image cached): test_server 2 passed 3m15s cold build; full e2e 6 passed 5m25s.",
+      "unplannedFiles": [
+        "tests/e2e/demo_project.py",
+        "tests/e2e/conftest.py"
+      ],
+      "gateRun": "uv run ruff check: pass; uv run pytest tests/unit --cov --cov-report=term-missing (ADOPS_TEST_POSTGRES_DSN set): pass (1191, 100% line+branch); g3 wheel listing: n/a (no template change, wheel built by the e2e fixture); g4 uv run pytest tests/e2e -m e2e --durations=0: pass (6, 5m25s local)",
+      "failures": [
+        {
+          "at": "2026-11-21T07:20:10Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "34 errors in Postgres-backed unit tests: ADOPS_TEST_POSTGRES_DSN unset on this machine (pytest.fail LOCAL_POSTGRES_HINT); 1157 others passed",
+          "resolvedBy": "gate-fix",
+          "resolution": "Environment only: re-ran with ADOPS_TEST_POSTGRES_DSN pointing at the local adops-test-pg container on 55432; no code changed"
+        }
+      ],
+      "completedAt": "2026-11-21T07:20:58Z",
+      "gradeResult": {
+        "phaseId": "server-demo-e2e",
+        "dimensionScores": [
+          {
+            "dimensionId": "schedule-launched-success",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "runs JOIN run_tags on dagster/schedule_name=shop_sync_schedule (matches dagster_server.py naming), job shop_sync, SUCCESS; per-test Dagster DB rules out leftovers; exact stage counts customers=20, orders=100; no launchRun/adops run. Not 10: schedule name is a hard-coded literal."
+          },
+          {
+            "dimensionId": "image-from-local-wheel",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "Session fixture builds once from uv build --wheel with ADOPS_PACKAGE=/build/<wheel>, up --no-build per case, one Built line for two cases. 10: also asserts direct_url.json names /build/<wheel>, which a version-only check cannot distinguish from a PyPI release."
+          },
+          {
+            "dimensionId": "both-warehouses-safely",
+            "score": 9,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "Parametrized postgres/duckdb both pass; Server stopped (down -v) before any Warehouse read, DuckDB also opened read_only; every-minute schedule and ADOPS_ENVIRONMENT=stage set; free webserver port and unique compose project."
+          },
+          {
+            "dimensionId": "bounded-and-clean",
+            "score": 8,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "240s monotonic deadline, fails fast on FAILURE/CANCELED, message has run rows + daemon log tail; down -v in finally, no containers left after forced failure; full e2e 5m25s. Gaps: run rows omit tags; fixed 60-line tail can be mostly the telemetry banner."
+          },
+          {
+            "dimensionId": "test-only-change",
+            "score": 9,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "No src/ change; single dagster_meta (demo_project.py:79); test_demo_sync.py diff is moves + one import, its 4 cases still pass. demo_project.py and conftest.py are outside planned filesAffected but are the move-don't-copy sharing required."
+          }
+        ],
+        "overallPass": true,
+        "summary": "Server E2E requires a schedule-tagged SUCCESS in a per-test Dagster DB, checks exact stage counts after stopping the Server for both Warehouses, builds the image once from the local wheel with provenance proof. Minor gaps: failure output omits run tags; two helper files outside the planned list."
+      }
+    }
+  ]
+}

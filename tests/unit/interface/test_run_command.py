@@ -420,6 +420,21 @@ def test_dagster_home_unset_without_dagster_yaml(project, orchestrator):
 
 
 @pytest.mark.usefixtures("sync", "orchestrator")
+def test_adops_run_goes_through_run_in_environment_with_the_built_orchestrator(
+    project, orchestrator, monkeypatch
+):
+    calls: list[tuple[object, ...]] = []
+
+    def capture(*args: object) -> RunResult:
+        calls.append(args)
+        return RunResult("shop_sync", "dev", ())
+
+    monkeypatch.setattr(run_command, "run_in_environment", capture)
+
+    assert invoke(project).exit_code == 0
+    assert calls == [(project.resolve(), "shop_sync", "dev", orchestrator)]
+
+
 def test_run_passes_the_project_snapshot_store_to_the_pipeline(project, monkeypatch):
     sentinel = InMemorySnapshotStore()
     built_for: list[Path] = []

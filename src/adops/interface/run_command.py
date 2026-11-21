@@ -72,6 +72,22 @@ class ProjectFileError(Exception):
     pass
 
 
+RUN_ERRORS = (
+    PipelineValidationError,
+    ProjectFileError,
+    MissingSecretError,
+    JobCompileError,
+    StageNotRunError,
+)
+
+
+def error_lines(error: Exception) -> tuple[str, ...]:
+    """What `adops run` prints for one of RUN_ERRORS: already redacted, never a traceback."""
+    if isinstance(error, PipelineValidationError):
+        return tuple(error.problems)
+    return (str(error),)
+
+
 def build_sync(
     project: Path,
     pipeline: str,
@@ -193,10 +209,8 @@ def run(
         )
     try:
         result = run_project(project.resolve(), pipeline, env or "dev", branch)
-    except PipelineValidationError as error:
-        fail(*error.problems)
-    except (ProjectFileError, MissingSecretError, JobCompileError, StageNotRunError) as error:
-        fail(str(error))
+    except RUN_ERRORS as error:
+        fail(*error_lines(error))
     except Exception as error:
         # Only the type: an unexpected error was never redacted and may hold a secret.
         fail(f"unexpected {type(error).__name__} while running {pipeline}")
@@ -211,28 +225,28 @@ def run(
 def run_project(
     project: Path, pipeline: str, environment: str, branch: str | None = None
 ) -> RunResult:
+    with _scoped_environ(_dagster_environ(project)):
+        if branch is None:
+            return run_in_environment(project, pipeline, environment, build_orchestrator())
+        settings_text, pipeline_text = read_project_files(project, pipeline)
+        return _run_branch(
+            project, pipeline, branch, settings_text, pipeline_text, project_env(project)
+        )
+
+
+def _dagster_environ(project: Path) -> dict[str, str]:
+    if not (project / DAGSTER_FILE).is_file():
+        return {}
+    # Dagster resolves dagster.yaml's `env:` values from the process environment.
+    return {**project_env(project), "DAGSTER_HOME": str(project)}
+
+
+def run_in_environment(
+    project: Path, pipeline: str, environment: str, orchestrator: Orchestrator
+) -> RunResult:
+    """Run a Pipeline in a named Environment, reading the Project files and .env at call time."""
     settings_text, pipeline_text = read_project_files(project, pipeline)
     env = project_env(project)
-    dagster_env = {}
-    if (project / DAGSTER_FILE).is_file():
-        # Dagster resolves dagster.yaml's `env:` values from the process environment.
-        dagster_env = {**env, "DAGSTER_HOME": str(project)}
-    with _scoped_environ(dagster_env):
-        if branch is None:
-            return _run_environment(
-                project, pipeline, environment, settings_text, pipeline_text, env
-            )
-        return _run_branch(project, pipeline, branch, settings_text, pipeline_text, env)
-
-
-def _run_environment(
-    project: Path,
-    pipeline: str,
-    environment: str,
-    settings_text: str,
-    pipeline_text: str,
-    env: Mapping[str, str],
-) -> RunResult:
     chosen = pick_environment(load_project_settings(settings_text).environments, environment)
     kind = chosen.warehouse.type
     return run_pipeline(
@@ -243,7 +257,7 @@ def _run_environment(
         build_sync(project, pipeline, environment, kind),
         build_snapshot_store(project, environment, kind),
         build_clock(),
-        build_orchestrator(),
+        orchestrator,
         build_transform(project, kind),
         build_reverse_sync(project, environment, kind),
         _fingerprinting(project, environment, chosen, env),

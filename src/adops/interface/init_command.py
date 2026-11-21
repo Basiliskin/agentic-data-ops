@@ -5,8 +5,12 @@ from typing import Annotated
 
 import typer
 
+from adops import __version__
+
 TEMPLATES = files("adops.templates")
 RENAMED = {"gitignore": ".gitignore"}
+VERSION_MARKER = "{{ADOPS_VERSION}}"
+SERVER_CONFIG_FILES = ("workspace.yaml", "dagster.yaml")
 
 
 def init(
@@ -24,13 +28,23 @@ def init(
 
     if demo:
         _copy_tree(TEMPLATES / "demo", path)
+        _write_server_files(path)
         typer.echo(f"Created the demo Project in {path}.")
         typer.echo("Next: copy .env.example to .env, then run `docker compose up --wait` there.")
     else:
-        path.mkdir(parents=True, exist_ok=True)
-        (path / "adops.yaml").write_text((TEMPLATES / "plain" / "adops.yaml").read_text())
+        _copy_tree(TEMPLATES / "plain", path)
         (path / "pipelines").mkdir()
+        _write_server_files(path)
         typer.echo(f"Created a Project in {path}.")
+
+
+def _write_server_files(project: Path) -> None:
+    server = TEMPLATES / "server"
+    dockerfile = (server / "Dockerfile").read_text().replace(VERSION_MARKER, __version__)
+    (project / "Dockerfile").write_text(dockerfile)
+    (project / "server").mkdir()
+    for name in SERVER_CONFIG_FILES:
+        (project / "server" / name).write_bytes((server / name).read_bytes())
 
 
 def _copy_tree(source: Traversable, target: Path) -> None:

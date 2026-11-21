@@ -16,6 +16,7 @@ _Avoid_: cron, trigger, timer
 
 **Server**:
 The always-on machine that runs one Environment's Schedules (one for stage, one for prod). It pulls the Project from Git and switches to a new version only when that version passes validation.
+Until horizon 8 a Server runs the Project version in its bind-mounted folder rather than pulling from Git, and its Dagster page is bound to 127.0.0.1 because Dagster's open-source page cannot be limited to "Run now" and "Pause" (ADR-0014 clarification).
 _Avoid_: host, VM, worker, runner
 
 **Step**:

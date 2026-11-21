@@ -40,3 +40,12 @@
 - 2026-11-19 | horizon 6 | dbt sources read the raw schema via var('adops_raw_schema_<source>', 'raw_<source>'); a branch rebuilding a Sync fails fast if sources lack it
 - 2026-11-19 | horizon 6 | dlt dataset-name normalization is disabled only for non-default schemas, because it collapses '__' (verified on DuckDB); dev/stage stay byte-identical
 - 2026-11-20 | horizon 6 | ADR-0006 rewritten in place with a dated Clarification: br_<branch>__<schema> per kind, manual drop-branch, dlt __ normalization off, adops_raw_schema_<source> dbt var, accept-schema --branch gap
+- 2026-11-20 | horizon 7 | Horizon 7 builds the Server from a bind-mounted Project; the Git pull loop and Git-based Breaking Change acceptance (ADR-0015) go to horizon 8 — user choice
+- 2026-11-20 | horizon 7 | adops init generates a Dockerfile installing the pinned adops version (ARG ADOPS_PACKAGE); E2E builds it from the local wheel — user choice, keeps ADR-0008
+- 2026-11-20 | horizon 7 | Server containers use network_mode: host so the same localhost adops.yaml works on host and Server; Docker Desktop on Mac needs host networking — user choice
+- 2026-11-20 | horizon 7 | Only SourceUnreachableError and WarehouseUnreachableError are retried (3x, 300s); Reverse Sync target unreachable is not — user choice, ADR-0014 read literally
+- 2026-11-20 | horizon 7 | A Server retry re-runs the whole Pipeline and holds the single run slot while waiting — accepted for horizon 7 by the user
+- 2026-11-20 | horizon 7 | The Dagster webserver binds to DAGSTER_WEBSERVER_HOST (default 127.0.0.1); Dagster OSS has no per-action permissions — user choice
+- 2026-11-20 | horizon 7 | A Server serves exactly one Environment from ADOPS_ENVIRONMENT and refuses anything but stage or prod — because dev and Branch Environments never run on a Schedule (ADR-0014)
+- 2026-11-20 | horizon 7 | Server dagster.yaml and workspace.yaml live in <project>/server/, not the root — because a root dagster.yaml switches host adops run to Postgres Dagster storage
+- 2026-11-20 | horizon 7 | Schedule plain words are hourly, daily at HH:MM, weekly on <day> at HH:MM; else a 5-field cron checked in pure domain code, no stricter-than-Dagster loosening

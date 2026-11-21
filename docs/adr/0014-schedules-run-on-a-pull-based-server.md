@@ -10,3 +10,7 @@ stage and prod each get a Server: an always-on machine running Dagster's schedul
 - Only Source/Warehouse-unreachable failures are retried (3 times, 5 minutes apart); a failed Check or a Breaking Change is never retried, because it gives the same result for the same data.
 - Failures are shown on the Dagster page and sent to Slack/email through a webhook Secret Reference, sanitized like every other error.
 - The web page allows only "Run now" and "Pause"; the Schedule itself changes only through Git, and the Assistant has no access to a Server (ADR-0009).
+
+**Clarification (2026-11-20):**
+- Until horizon 8, a Server runs the Project version in its bind-mounted folder instead of pulling it from Git. The Git pull, the switch after `adops validate` passes, and Git-based acceptance of Breaking Changes (ADR-0015) come with horizon 8.
+- Dagster's open-source web page has no per-action permissions, so it cannot be limited to "Run now" and "Pause". Instead it is bound to 127.0.0.1 (`DAGSTER_WEBSERVER_HOST`), so only someone on the Server machine can open it.

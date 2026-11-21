@@ -26,6 +26,7 @@ DBT_PROJECT_FILE = "dbt_project.yml"
 class Report:
     problems: list[str]
     skipped: list[str]
+    schedules: list[str]
 
 
 def validate(
@@ -38,7 +39,8 @@ def validate(
     """Check adops.yaml and Pipelines without connecting to anything.
 
     Skipped Checks are listed as `table: check skipped — reason`, or `step: check skipped — reason`
-    for a Reverse Sync Step.
+    for a Reverse Sync Step. When everything is valid, each Pipeline's Schedule is listed as
+    `pipeline: schedule (cron <cron>, <time zone>)` or `pipeline: no schedule`.
     """
     report = validate_project(project, pipeline)
     for line in report.skipped:
@@ -47,11 +49,13 @@ def validate(
         for line in report.problems:
             typer.echo(line, err=True)
         raise typer.Exit(1)
+    for line in report.schedules:
+        typer.echo(line)
     typer.echo("ok")
 
 
 def validate_project(project: Path, pipeline: str | None) -> Report:
-    report = Report(problems=[], skipped=[])
+    report = Report(problems=[], skipped=[], schedules=[])
     settings = _load(project, Path(SETTINGS_FILE), load_project_settings, report)
     for relative in _pipeline_files(project, pipeline):
         loaded = _load(project, relative, load_pipeline, report)
@@ -59,6 +63,7 @@ def validate_project(project: Path, pipeline: str | None) -> Report:
             continue
         if settings is not None:
             _check_connections(relative, loaded, settings, report)
+            report.schedules.append(_schedule_line(loaded, settings.timezone))
         _check_dbt_projects(project, relative, loaded, report)
         report.skipped.extend(_skipped_checks(loaded))
     return report
@@ -108,6 +113,12 @@ def _check_dbt_projects(project: Path, relative: Path, pipeline: Pipeline, repor
             report.problems.append(
                 f"{relative}: Step {step.name}: {dbt_project_file.as_posix()} not found"
             )
+
+
+def _schedule_line(pipeline: Pipeline, timezone: str) -> str:
+    if pipeline.schedule is None:
+        return f"{pipeline.name}: no schedule"
+    return f"{pipeline.name}: {pipeline.schedule.text} (cron {pipeline.schedule.cron}, {timezone})"
 
 
 def _skipped_checks(pipeline: Pipeline) -> list[str]:

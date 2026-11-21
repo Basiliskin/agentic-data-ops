@@ -458,3 +458,31 @@ def test_skipping_a_check_declared_only_on_another_table_is_rejected():
     (problem,) = problems_of(text)
 
     assert problem.startswith("steps[0].tables[1].skip_checks.checks[0]: must be a Check")
+
+
+def test_a_pipeline_without_a_schedule_has_none():
+    assert load_pipeline(VALID).schedule is None
+
+
+def test_a_pipeline_schedule_is_parsed_into_text_and_cron():
+    schedule = load_pipeline(VALID + "schedule: daily at 02:00\n").schedule
+
+    assert schedule is not None
+    assert (schedule.text, schedule.cron) == ("daily at 02:00", "0 2 * * *")
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'schedule: "SENTINEL_9f3 daily"',
+        "schedule: daily at SENTINEL_9f3",
+        "schedule: 0 0 31 2 SENTINEL_9f3",
+        "schedule: 5",
+        "schedule: [SENTINEL_9f3]",
+    ],
+)
+def test_a_bad_schedule_is_one_value_free_problem_at_the_schedule_field(line):
+    (problem,) = problems_of(VALID + line + "\n")
+
+    assert problem.startswith("schedule: ")
+    assert "SENTINEL_9f3" not in problem

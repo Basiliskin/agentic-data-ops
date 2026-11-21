@@ -15,6 +15,7 @@ from adops.domain.checks import CHECKS_BY_MODE, CheckName, SkipChecks, SyncMode
 from adops.domain.errors import RuleViolation
 from adops.domain.names import IDENTIFIER
 from adops.domain.reverse_sync import ReverseSyncStep
+from adops.domain.schedule import Schedule
 from adops.domain.transform import TransformStep
 
 
@@ -202,6 +203,7 @@ class Pipeline(BaseModel):
 
     name: str = Field(pattern=IDENTIFIER)
     steps: list[Step] = Field(min_length=1)
+    schedule: Schedule | None = None
 
     @model_validator(mode="after")
     def _unique_step_names(self) -> "Pipeline":

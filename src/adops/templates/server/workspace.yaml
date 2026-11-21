@@ -1,0 +1,5 @@
+load_from:
+  - python_module:
+      module_name: adops.interface.server
+      attribute: defs
+      working_directory: /project
