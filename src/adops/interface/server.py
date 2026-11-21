@@ -19,9 +19,9 @@ from adops.domain.secret_reference import SecretReference
 from adops.infrastructure.dagster_server import Definitions, build_server_definitions
 from adops.infrastructure.webhook_alerts import WebhookAlertSender
 from adops.interface.run_command import (
-    PIPELINES_DIR,
     RUN_ERRORS,
     error_lines,
+    pipeline_files,
     project_env,
     read_settings,
     run_in_environment,
@@ -64,14 +64,18 @@ def load_definitions(environ: Mapping[str, str]) -> Definitions:
 
 
 def _pipelines(project: Path) -> dict[str, Pipeline]:
-    files = sorted((project / PIPELINES_DIR).glob("*.yaml"))
-    return {path.stem: load_pipeline(path.read_text(encoding="utf-8")) for path in files}
+    return {
+        path.stem: load_pipeline(path.read_text(encoding="utf-8"))
+        for path in pipeline_files(project)
+    }
 
 
 def _runner(
     project: Path, environment: str, first_steps: Mapping[str, str]
 ) -> Callable[[str], RunResult]:
     def run(pipeline: str) -> RunResult:
+        # A run waiting for the Warehouse lock holds the single run slot
+        # (max_concurrent_runs: 1), so later scheduled runs queue behind it. This is accepted.
         try:
             return run_in_environment(project, pipeline, environment, InOrderOrchestrator())
         except RUN_ERRORS as error:

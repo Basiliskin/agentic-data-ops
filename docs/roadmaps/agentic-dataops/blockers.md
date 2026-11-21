@@ -6,7 +6,7 @@
 - 2026-11-17 | horizon 1 | How does 'halt this Step and downstream' work once Steps form a graph rather than a linear chain? — resolved by decision 2026-11-18
 - 2026-11-17 | horizon 1 | How do Pipelines run on a schedule when Dagster runs in-process only (daemon/code location vs cron/CI)? — resolved by ADR-0014 2026-11-20
 - 2026-11-17 | horizon 1 | How do Branch Environment schemas line up with dlt datasets and dbt --defer --state, and where does stage dbt state live? — resolved by decision 2026-11-19
-- 2026-11-17 | horizon 1 | How can PR workflows reach the stage Warehouse without exposing secrets to forked PRs?
+- 2026-11-17 | horizon 1 | How can PR workflows reach the stage Warehouse without exposing secrets to forked PRs? — resolved by decision 2026-11-21
 - 2026-11-17 | horizon 1 | Which engine performs Reverse Sync into Postgres, how is the Preview diff computed without writing, and what are delete semantics? — resolved by decision 2026-11-19
 - 2026-11-17 | horizon 1 | Does the single adops.yaml Environment model hold up for stage/prod deployments and generated Branch Environments?
 - 2026-11-17 | horizon 1 | How long and how stable is the Docker E2E job on GitHub Actions as Steps are added?
@@ -22,19 +22,28 @@
 - 2026-11-18 | horizon 2 | Which horizon redacts dlt load-failure output (row values, tracebacks) so a failed load never prints Source data? — resolved by decision 2026-11-18
 - 2026-11-18 | horizon 2 | When a Source column drops NOT NULL, the Warehouse column keeps it and the next load fails with a raw constraint error (row values on Postgres) — relax it automatically, or report it as a Breaking Change?
 - 2026-11-18 | horizon 3 | DbtTransform reports a dbt source test under the source name, not its table; fix _tested_model (e.g. from test_metadata model kwarg) before users write source tests
-- 2026-11-19 | horizon 6 | How does a GitHub-hosted runner reach the stage Warehouse when stage is localhost Postgres or a local DuckDB file?
-- 2026-11-19 | horizon 6 | Does merge→stage run every Pipeline or only changed ones, given stage writes the fingerprints branches compare against?
-- 2026-11-19 | horizon 6 | What happens when two PRs run --branch at once against the same stage Warehouse (no locking, single-writer DuckDB)?
-- 2026-11-19 | horizon 6 | How do generated workflows install adops at a pinned version while keeping ADR-0008 (no tool code copied into the Project)?
+- 2026-11-19 | horizon 6 | How does a GitHub-hosted runner reach the stage Warehouse when stage is localhost Postgres or a local DuckDB file? — resolved by decision 2026-11-21; see ADR-0016, ADR-0014 clar.
+- 2026-11-19 | horizon 6 | Does merge→stage run every Pipeline or only changed ones, given stage writes the fingerprints branches compare against? — resolved by decision 2026-11-21
+- 2026-11-19 | horizon 6 | What happens when two PRs run --branch at once against the same stage Warehouse (no locking, single-writer DuckDB)? — resolved by decision 2026-11-21
+- 2026-11-19 | horizon 6 | How do generated workflows install adops at a pinned version while keeping ADR-0008 (no tool code copied into the Project)? — resolved by decision 2026-11-21
 - 2026-11-19 | horizon 6 | How is a Breaking Change in a PR branch handled unattended, given accept-schema --branch is a recorded gap?
 - 2026-11-20 | horizon 7 | What exactly is in an accepted-change record: the full accepted TableShape copied from where accept-schema ran, or just 'accept whatever shape the Source shows on the next run'? prod's — see horizon-07 roadmap.md
 - 2026-11-20 | horizon 7 | How does an Environment know it already applied a record? Is it tracked in the Warehouse next to _adops_schema_snapshots, and are records ever removed from the Project once every Environment has applied them?
 - 2026-11-20 | horizon 7 | What happens if a record's shape does not match the Source shape seen on the next run (it drifted again)? Halt with a new Breaking Change, or apply it anyway?
-- 2026-11-20 | horizon 7 | How does the Server get Git credentials for a private repo, and from where? A deploy key, a token as a Secret Reference, or SSH agent? And does the Server image need git, or does a Python library do the pull?
-- 2026-11-20 | horizon 7 | How does the Server find 'the latest release tag': semver ordering, GitHub Releases, or the newest annotated tag by date? What counts as a release when there are pre-release or malformed tags?
-- 2026-11-20 | horizon 7 | How does a new version reach the running Dagster code location: reload the code location in place, restart containers, or switch a symlink to a checkout? How are in-flight and queued — see horizon-07 roadmap.md
-- 2026-11-20 | horizon 7 | Which Pipelines count as 'changed' when a version is accepted: a git diff of pipeline and dbt files, or Step Fingerprints compared with stage's saved ones (decided in horizon 6 with no Git)?
+- 2026-11-20 | horizon 7 | How does the Server get Git credentials for a private repo, and from where? A deploy key, a token as a Secret Reference, or SSH agent? And does the — resolved by decision 2026-11-21; see ADR-0016, ADR-0014 clar.
+- 2026-11-20 | horizon 7 | How does the Server find 'the latest release tag': semver ordering, GitHub Releases, or the newest annotated tag by date? What counts as a release — resolved by decision 2026-11-21; see ADR-0016, ADR-0014 clar.
+- 2026-11-20 | horizon 7 | How does a new version reach the running Dagster code location: reload the code location in place, restart containers, or switch a symlink to a — resolved by decision 2026-11-21; see ADR-0016, ADR-0014 clar.
+- 2026-11-20 | horizon 7 | Which Pipelines count as 'changed' when a version is accepted: a git diff of pipeline and dbt files, or Step Fingerprints compared with stage's saved ones (decided in horizon 6 — resolved by decision 2026-11-21
 - 2026-11-20 | horizon 7 | Do runs started right after a version is accepted share the single run slot and queue behind scheduled runs, and does a Pipeline with no Schedule run only at that moment?
-- 2026-11-20 | horizon 7 | In horizon 8, does the bind-mounted folder from horizon 7 stay supported (dev/demo) next to Git-pull mode, or does Git-pull replace it on stage/prod?
-- 2026-11-20 | horizon 7 | How often does the Server poll Git, and who sets that? A Dagster sensor/schedule inside the daemon, or a separate loop/container?
+- 2026-11-20 | horizon 7 | In horizon 8, does the bind-mounted folder from horizon 7 stay supported (dev/demo) next to Git-pull mode, or does Git-pull replace it on stage/prod? — resolved by decision 2026-11-21; see ADR-0016, ADR-0014 clar.
+- 2026-11-20 | horizon 7 | How often does the Server poll Git, and who sets that? A Dagster sensor/schedule inside the daemon, or a separate loop/container? — resolved by decision 2026-11-21; see ADR-0016, ADR-0014 clar.
 - 2026-11-21 | horizon 7 | If the Server dies mid-run, the run stays STARTED (server/dagster.yaml has no run_monitoring), so the skip-overlap rule skips every tick. Enable run monitoring, or clear stale runs? (not reproduced)
+- 2026-11-21 | horizon 8 | Do the generated stage/prod workflows actually work on a real self-hosted runner: does docker compose run with the PR checkout mounted over the Server folder's .adops/ and .env build — see horizon-08 roadmap.md
+- 2026-11-21 | horizon 8 | Does the Dagster code-location reload the workflow sends really pick up added or removed Pipelines and Schedule changes while an in-progress run finishes on the old version?
+- 2026-11-21 | horizon 8 | Do files the root Server container creates in .adops/ (DuckDB file, .lock, dlt state) break git checkout or later runs started as the runner user?
+- 2026-11-21 | horizon 8 | What is in an ADR-0015 accepted-change record: the full accepted TableShape from where accept-schema ran, or 'accept whatever the Source shows next run', given prod's Source can differ from dev's?
+- 2026-11-21 | horizon 8 | How does an Environment know it already applied an accepted-change record, and what happens if the Source has drifted again by the time the record is applied?
+- 2026-11-21 | horizon 8 | After a Server crash, how should runs left STARTED be cleared so the skip-overlap rule does not skip every later tick: Dagster run monitoring, a startup sweep, or both?
+- 2026-11-21 | horizon 8 | What does the Assistant need from the MCP server beyond edit/validate/test-connection/run/Preview/read-logs, and how does server code tell a dev/Branch request from stage/prod reliably?
+- 2026-11-21 | horizon 8 | What did the first user feedback on Promotion say (runner setup, fork policy, 30-minute lock), and does any of it change horizon-8 choices?
+- 2026-11-21 | horizon 8 | Without GitHub Enterprise a private repo's prod has no required reviewers: is "only writers can publish releases" an acceptable prod gate, or should adops-prod.yml add its own approval step?

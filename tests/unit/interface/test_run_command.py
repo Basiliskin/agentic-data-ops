@@ -19,10 +19,14 @@ from adops.application.ports import (
     RunPlan,
     RunResult,
     SchemaSnapshotStore,
+    StepReport,
+    StepStatus,
     Sync,
     SyncResult,
     Transform,
     TransformResult,
+    WarehouseLocked,
+    WarehouseUnreachable,
 )
 from adops.application.run_pipeline import (
     InOrderOrchestrator,
@@ -49,11 +53,13 @@ from adops.infrastructure.postgres_reverse_sync import PostgresReverseSync
 from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
 from adops.infrastructure.step_fingerprint_store import ProjectTree, WarehouseFingerprintStore
 from adops.interface import cli, run_command
+from adops.interface.run_command import ProjectFileError
 
 runner = CliRunner()
 
 REAL_BUILD_SNAPSHOT_STORE = run_command.build_snapshot_store
 REAL_BUILD_FINGERPRINT_STORE = run_command.build_fingerprint_store
+REAL_BUILD_WAREHOUSE_LOCK = run_command.build_warehouse_lock
 DEFAULT_LAYOUT = SchemaLayout.default()
 
 SENTINEL = "s3cr3t-run-command-sentinel"
@@ -200,6 +206,11 @@ def fingerprint_store(monkeypatch):
 
     monkeypatch.setattr(run_command, "build_fingerprint_store", build)
     return store
+
+
+@pytest.fixture(autouse=True)
+def lock(locks):
+    return locks
 
 
 @pytest.fixture
@@ -1255,3 +1266,325 @@ def test_step_reverse_syncs_apply_with_the_steps_own_engine():
     run_command.StepReverseSyncs({"push_stats": engine}).apply(step, target, diff)
 
     assert engine.applied == [diff]
+
+
+ALL_PIPELINES = ("c_pipe", "a_pipe", "b_pipe")
+
+
+@pytest.fixture
+def run_project_calls(project, monkeypatch):
+    for name in ALL_PIPELINES:
+        (project / "pipelines" / f"{name}.yaml").write_text(PIPELINE)
+    (project / "pipelines" / "shop_sync.yaml").unlink()
+    (project / "pipelines" / "README.md").write_text("not a Pipeline")
+    (project / "pipelines" / "old.yml").write_text(PIPELINE)
+    calls: list[tuple[Path, str, str, str | None]] = []
+    failing: set[str] = set()
+
+    def fake_run_project(
+        project_dir: Path, pipeline: str, environment: str, branch: str | None = None
+    ) -> RunResult:
+        calls.append((project_dir, pipeline, environment, branch))
+        status = StepStatus.FAILED if pipeline in failing else StepStatus.PASSED
+        return RunResult(pipeline, branch or environment, (StepReport("sync_shop", status),))
+
+    monkeypatch.setattr(run_command, "run_project", fake_run_project)
+    return calls, failing
+
+
+WIDE = {"COLUMNS": "200"}
+
+
+def invoke_all(project, *args):
+    return runner.invoke(cli.app, ["run", "--all", "--project", str(project), *args], env=WIDE)
+
+
+def test_run_all_runs_every_pipeline_in_name_order(project, run_project_calls):
+    calls, _ = run_project_calls
+
+    result = invoke_all(project)
+
+    assert result.exit_code == 0, result.output
+    assert [pipeline for _, pipeline, _, _ in calls] == ["a_pipe", "b_pipe", "c_pipe"]
+    for name in ("a_pipe", "b_pipe", "c_pipe"):
+        assert f"Pipeline {name} passed in Environment dev." in result.output
+
+
+def test_run_all_stops_at_the_first_failed_pipeline(project, run_project_calls):
+    calls, failing = run_project_calls
+    failing.add("b_pipe")
+
+    result = invoke_all(project)
+
+    assert result.exit_code == 1
+    assert [pipeline for _, pipeline, _, _ in calls] == ["a_pipe", "b_pipe"]
+    passed = result.output.index("Pipeline a_pipe passed in Environment dev.")
+    assert passed < result.output.index("Pipeline b_pipe failed in Environment dev.")
+    assert "c_pipe" not in result.output
+
+
+def test_run_all_stops_at_a_pipeline_that_raises(project, run_project_calls, monkeypatch):
+    calls, _ = run_project_calls
+    fake = run_command.run_project
+
+    def raise_on_b(project_dir: Path, pipeline: str, environment: str, branch=None) -> RunResult:
+        if pipeline == "b_pipe":
+            calls.append((project_dir, pipeline, environment, branch))
+            raise ProjectFileError("pipelines/b_pipe.yaml: file not found")
+        return fake(project_dir, pipeline, environment, branch)
+
+    monkeypatch.setattr(run_command, "run_project", raise_on_b)
+
+    result = invoke_all(project)
+
+    assert_clean_failure(result)
+    assert "pipelines/b_pipe.yaml: file not found" in result.output
+    assert [pipeline for _, pipeline, _, _ in calls] == ["a_pipe", "b_pipe"]
+
+
+def test_run_all_passes_env_to_every_pipeline(project, run_project_calls):
+    calls, _ = run_project_calls
+
+    result = invoke_all(project, "--env", "stage")
+
+    assert result.exit_code == 0, result.output
+    assert [(env, branch) for _, _, env, branch in calls] == [("stage", None)] * 3
+
+
+def test_run_all_passes_branch_to_every_pipeline(project, run_project_calls):
+    calls, _ = run_project_calls
+
+    result = invoke_all(project, "--branch", "feat-x")
+
+    assert result.exit_code == 0, result.output
+    assert [(env, branch) for _, _, env, branch in calls] == [("dev", "feat-x")] * 3
+    assert {project_dir for project_dir, _, _, _ in calls} == {project.resolve()}
+
+
+def test_run_all_uses_the_single_pipeline_default_environment(project, run_project_calls):
+    calls, _ = run_project_calls
+
+    assert invoke_all(project).exit_code == 0
+    assert runner.invoke(cli.app, ["run", "a_pipe", "--project", str(project)]).exit_code == 0
+
+    defaults = {(env, branch) for _, _, env, branch in calls}
+    assert defaults == {("dev", None)}
+    assert len(calls) == 4
+
+
+def test_run_all_with_a_pipeline_name_is_rejected(project, run_project_calls):
+    calls, _ = run_project_calls
+
+    result = runner.invoke(
+        cli.app, ["run", "a_pipe", "--all", "--project", str(project)], env=WIDE
+    )
+
+    assert result.exit_code != 0
+    assert "--all" in result.output
+    assert "cannot be combined with a Pipeline name" in result.output
+    assert calls == []
+
+
+def test_run_without_a_pipeline_or_all_is_rejected(project, run_project_calls):
+    calls, _ = run_project_calls
+
+    result = runner.invoke(cli.app, ["run", "--project", str(project)], env=WIDE)
+
+    assert result.exit_code != 0
+    assert "give a Pipeline name, or --all to run every Pipeline" in result.output
+    assert "Traceback" not in result.output
+    assert calls == []
+
+
+def test_run_all_with_env_and_branch_keeps_the_conflict_error(project, run_project_calls):
+    calls, _ = run_project_calls
+
+    result = invoke_all(project, "--env", "stage", "--branch", "x")
+
+    assert result.exit_code != 0
+    assert "cannot be combined with --env" in result.output
+    assert calls == []
+
+
+@pytest.mark.parametrize("folder", ["empty", "missing"])
+def test_run_all_without_pipelines_fails_plainly(project, run_project_calls, folder):
+    calls, _ = run_project_calls
+    for path in (project / "pipelines").iterdir():
+        path.unlink()
+    if folder == "missing":
+        (project / "pipelines").rmdir()
+
+    result = invoke_all(project)
+
+    assert_clean_failure(result)
+    assert "No Pipelines in pipelines/" in result.output
+    assert calls == []
+
+
+def test_pipeline_files_are_the_yaml_files_in_name_order(tmp_path):
+    (tmp_path / "pipelines").mkdir()
+    for name in ("b.yaml", "a_b.yaml", "a.yaml", "c.yml", "notes.md"):
+        (tmp_path / "pipelines" / name).write_text("")
+
+    files = run_command.pipeline_files(tmp_path)
+
+    assert [path.name for path in files] == ["a.yaml", "a_b.yaml", "b.yaml"]
+
+
+STAGE_WAREHOUSE = ResolvedConnection(
+    host="stage-warehouse", port=5434, database="w", user="w", password=STAGE_SECRET
+)
+
+
+@dataclass
+class MarkingOrchestrator:
+    """Marks where the Warehouse work happens relative to the fake lock's entry and exit."""
+
+    locks: object
+    error: Exception | None = None
+
+    def execute(self, plan: RunPlan, sync: Sync) -> RunResult:
+        self.locks.mark("work")
+        if self.error is not None:
+            raise self.error
+        return InOrderOrchestrator().execute(plan, sync)
+
+
+@pytest.fixture
+def marking(lock, monkeypatch):
+    fake = MarkingOrchestrator(lock)
+    monkeypatch.setattr(run_command, "build_orchestrator", lambda: fake)
+    return fake
+
+
+@pytest.fixture
+def stage_project(project, monkeypatch):
+    (project / "adops.yaml").write_text(BRANCH_SETTINGS)
+    monkeypatch.setenv("ADOPS_TEST_STAGE_PASSWORD", STAGE_SECRET)
+    return project
+
+
+@pytest.mark.usefixtures("sync")
+def test_a_run_holds_the_lock_on_its_environments_warehouse_around_the_work(
+    stage_project, lock, marking
+):
+    result = invoke(stage_project, "--env", "stage")
+
+    assert result.exit_code == 0, result.output
+    assert lock.events == [("enter", "stage"), ("work",), ("exit", "stage")]
+    assert lock.warehouses == [STAGE_WAREHOUSE]
+
+
+@pytest.mark.usefixtures("sync")
+def test_a_failing_run_still_releases_the_lock(stage_project, lock, marking):
+    marking.error = RuntimeError(STAGE_SECRET)
+
+    result = invoke(stage_project, "--env", "stage")
+
+    assert_clean_failure(result)
+    assert lock.events == [("enter", "stage"), ("work",), ("exit", "stage")]
+
+
+def test_a_branch_run_locks_stages_warehouse(project, branch_project, fingerprint_store, lock):
+    stage_ran(project, fingerprint_store, BRANCH_PIPELINE)
+    (project / "dbt" / "models" / "customer_stats.sql").write_text("select 2 as customer_id\n")
+
+    result = invoke(project, "--branch", "feat")
+
+    assert result.exit_code == 0, result.output
+    assert lock.events == [("enter", "stage"), ("exit", "stage")]
+    assert lock.warehouses == [STAGE_WAREHOUSE]
+
+
+def test_a_failing_branch_run_still_releases_the_lock(
+    project, branch_project, fingerprint_store, lock, monkeypatch
+):
+    stage_ran(project, fingerprint_store, BRANCH_PIPELINE)
+    (project / "dbt" / "models" / "customer_stats.sql").write_text("select 2 as customer_id\n")
+
+    def explode(*args: object, **kwargs: object) -> FakeTransform:
+        lock.mark("work")
+        raise RuntimeError(STAGE_SECRET)
+
+    monkeypatch.setattr(run_command, "build_transform", explode)
+
+    assert_clean_failure(invoke(project, "--branch", "feat"))
+    assert lock.events == [("enter", "stage"), ("work",), ("exit", "stage")]
+
+
+def test_a_branch_run_reads_stages_fingerprints_inside_the_lock(
+    project, branch_project, fingerprint_store, lock, monkeypatch
+):
+    def load(pipeline: str) -> Mapping[str, str]:
+        lock.mark("load fingerprints")
+        return {}
+
+    monkeypatch.setattr(fingerprint_store, "load", load)
+
+    assert_clean_failure(invoke(project, "--branch", "feat"))
+    assert lock.events == [("enter", "stage"), ("load fingerprints",), ("exit", "stage")]
+
+
+LOCKED_MESSAGE = "Another run is using the stage Warehouse; gave up after 30 minutes."
+
+
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_a_lock_timeout_is_one_plain_line_and_exit_one(stage_project, lock):
+    lock.error = WarehouseLocked("stage", 30 * 60)
+
+    result = invoke(stage_project, "--env", "stage")
+
+    assert_clean_failure(result)
+    assert result.output == LOCKED_MESSAGE + "\n"
+    for leaked in (STAGE_SECRET, "stage-warehouse", str(stage_project)):
+        assert leaked not in result.output
+
+
+def test_a_branch_lock_timeout_names_stage(project, branch_project, fingerprint_store, lock):
+    stage_ran(project, fingerprint_store, BRANCH_PIPELINE)
+    lock.error = WarehouseLocked("stage", 30 * 60)
+
+    result = invoke(project, "--branch", "feat")
+
+    assert_clean_failure(result)
+    assert result.output == LOCKED_MESSAGE + "\n"
+
+
+def test_warehouse_locked_is_a_run_error():
+    assert WarehouseLocked in run_command.RUN_ERRORS
+
+
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_an_unreachable_warehouse_at_lock_time_fails_the_first_step_retryably(
+    stage_project, lock, monkeypatch
+):
+    lock.error = WarehouseUnreachable()
+    (stage_project / "pipelines" / "shop_sync.yaml").write_text(PIPELINE + TRANSFORM_STEP)
+
+    result = run_command.run_project(stage_project, "shop_sync", "stage")
+
+    assert [(step.name, step.status) for step in result.steps] == [
+        ("sync_shop", StepStatus.FAILED),
+        ("transform_shop", StepStatus.SKIPPED),
+    ]
+    assert result.steps[0].error == "Pipeline shop_sync, Step sync_shop: Warehouse is unreachable"
+    assert result.retryable
+
+
+def test_an_unreachable_stage_warehouse_fails_a_branch_run_retryably(
+    project, branch_project, lock
+):
+    lock.error = WarehouseUnreachable()
+
+    result = run_command.run_project(project, "shop_sync", "dev", "feat")
+
+    assert result.environment == "br_feat"
+    assert result.steps[0].status is StepStatus.FAILED
+    assert result.retryable
+
+
+def test_the_real_warehouse_lock_is_built(tmp_path):
+    held = REAL_BUILD_WAREHOUSE_LOCK(ResolvedDuckDb("stage.duckdb"), tmp_path, "stage")
+
+    with held:
+        assert (tmp_path / "stage.duckdb.lock").is_file()

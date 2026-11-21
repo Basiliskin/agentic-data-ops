@@ -15,3 +15,5 @@
 - 2026-11-20 | horizon 6 | completed | 7 phases | 1 amendment — Branch Environments: run --branch defers unchanged Steps to stage by Step Fingerprint into br_<branch>__ schemas, drop-branch; E2E passes on Postgres and DuckDB (183s)
 - 2026-11-20 | horizon 7 | planned | 7 phases (Server runs Schedules: schedule line, Dagster schedules + run rules, server profile, webhook alerts, E2E); gate passed after fixes (0 blockers, 3 majors fixed)
 - 2026-11-21 | horizon 7 | completed | 7 phases — Schedules, run rules, Server profile, webhook alerts, Server E2E on both Warehouses
+- 2026-11-21 | horizon 8 | planned | 6 phases (GitHub Actions Promotion: run --all, Warehouse lock, PR/stage/prod workflows, setup guide + ADR-0016); gate passed after heal (0 blockers, 2 majors fixed)
+- 2026-11-21 | horizon 8 | completed | 6 phases — run --all, Warehouse lock, PR/stage/prod workflows, Promotion setup guide + ADR-0016; 2 amendments, 0 overrides

@@ -29,12 +29,14 @@ def init(
     if demo:
         _copy_tree(TEMPLATES / "demo", path)
         _write_server_files(path)
+        _write_workflow_files(path)
         typer.echo(f"Created the demo Project in {path}.")
         typer.echo("Next: copy .env.example to .env, then run `docker compose up --wait` there.")
     else:
         _copy_tree(TEMPLATES / "plain", path)
         (path / "pipelines").mkdir()
         _write_server_files(path)
+        _write_workflow_files(path)
         typer.echo(f"Created a Project in {path}.")
 
 
@@ -45,6 +47,14 @@ def _write_server_files(project: Path) -> None:
     (project / "server").mkdir()
     for name in SERVER_CONFIG_FILES:
         (project / "server" / name).write_bytes((server / name).read_bytes())
+
+
+def _write_workflow_files(project: Path) -> None:
+    workflows = project / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    for template in (TEMPLATES / "github" / "workflows").iterdir():
+        text = template.read_text().replace(VERSION_MARKER, __version__)
+        (workflows / template.name).write_text(text)
 
 
 def _copy_tree(source: Traversable, target: Path) -> None:

@@ -1,0 +1,61 @@
+# Every merge to main deploys to the stage Server through a self-hosted runner labelled adops-stage.
+# Set the repository variable ADOPS_SERVER_DIR to the Server's Project folder on that machine; it
+# must be a git clone of this repository. A failing validate leaves that folder untouched.
+name: adops stage
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, adops-stage]
+    concurrency:
+      group: adops-stage
+      cancel-in-progress: false
+    env:
+      ADOPS_SERVER_DIR: ${{ vars.ADOPS_SERVER_DIR }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate the new version
+        run: >-
+          docker compose --project-directory "$ADOPS_SERVER_DIR" --profile server run --rm --no-deps -T
+          -v "$GITHUB_WORKSPACE:/project" -v "$ADOPS_SERVER_DIR/.adops:/project/.adops"
+          dagster_daemon adops validate
+      - name: Move the Server Project folder to the new version
+        run: |
+          git -C "$ADOPS_SERVER_DIR" fetch "$GITHUB_WORKSPACE" "$GITHUB_SHA"
+          git -C "$ADOPS_SERVER_DIR" checkout --detach FETCH_HEAD
+      - name: Reload the Server's Pipelines and Schedules
+        run: |
+          port=$(grep -E '^DAGSTER_WEBSERVER_PORT=' "$ADOPS_SERVER_DIR/.env" | cut -d= -f2- | tr -d "\"' \r")
+          if [ -z "$port" ]; then
+            echo "DAGSTER_WEBSERVER_PORT is not set in the Server's .env." >&2
+            exit 1
+          fi
+          response=$(curl --fail --silent --show-error -X POST "http://127.0.0.1:$port/graphql" \
+            -H 'Content-Type: application/json' \
+            --data '{"query": "mutation { reloadRepositoryLocation(repositoryLocationName: \"adops.interface.server\") { __typename ... on WorkspaceLocationEntry { loadStatus locationOrLoadError { __typename } } } }"}')
+          for expected in '"__typename": *"WorkspaceLocationEntry"' '"loadStatus": *"LOADED"' \
+                          '"locationOrLoadError": *\{ *"__typename": *"RepositoryLocation"'; do
+            if ! printf '%s' "$response" | grep -Eq "$expected"; then
+              echo "The Server did not load the new version: $response" >&2
+              exit 1
+            fi
+          done
+      - name: Run every Pipeline in stage
+        run: >-
+          docker compose --project-directory "$ADOPS_SERVER_DIR" --profile server run --rm --no-deps -T
+          dagster_daemon adops run --all --env stage
+      - name: Give the checkout back to the runner user
+        if: always()
+        run: >-
+          docker compose --project-directory "$ADOPS_SERVER_DIR" --profile server run --rm --no-deps -T
+          -v "$GITHUB_WORKSPACE:/project"
+          dagster_daemon chown -R "$(id -u):$(id -g)" /project

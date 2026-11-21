@@ -49,3 +49,12 @@
 - 2026-11-20 | horizon 7 | A Server serves exactly one Environment from ADOPS_ENVIRONMENT and refuses anything but stage or prod — because dev and Branch Environments never run on a Schedule (ADR-0014)
 - 2026-11-20 | horizon 7 | Server dagster.yaml and workspace.yaml live in <project>/server/, not the root — because a root dagster.yaml switches host adops run to Postgres Dagster storage
 - 2026-11-20 | horizon 7 | Schedule plain words are hourly, daily at HH:MM, weekly on <day> at HH:MM; else a 5-field cron checked in pure domain code, no stricter-than-Dagster loosening
+- 2026-11-21 | horizon 8 | Warehouse-touching CI jobs run on a self-hosted runner on each Server machine (labels adops-stage/adops-prod); secrets stay in its .env, never GitHub secrets — user choice, narrows ADR-0014
+- 2026-11-21 | horizon 8 | Fork PRs get only adops validate on a GitHub-hosted runner with no secrets; GitHub's fork-approval setting, not the job condition, is the security boundary — user choice
+- 2026-11-21 | horizon 8 | Merge/release workflows validate a fresh checkout, then update the Server Project folder by local git fetch, reload Dagster's code location, then run --all; replaces ADR-0014 Git polling — user choice
+- 2026-11-21 | horizon 8 | Every Warehouse-touching run takes a Warehouse lock per Pipeline run (Postgres advisory lock, flock on <duckdb file>.lock), waits a fixed 30 min, then fails without retry — user choice
+- 2026-11-21 | horizon 8 | adops run --all runs every Pipeline in name order and stops at the first failure; merge→stage runs every Pipeline, not only changed ones — user choice
+- 2026-11-21 | horizon 8 | Release→prod runs on adops-prod behind GitHub environment prod with required reviewers; templates ship a commented prod block; workflows are verified by parsing generated YAML — user choice
+- 2026-11-21 | horizon 8 | Workflow jobs on a Server run adops inside the Server image via docker compose run --rm; only the fork validate job installs adops, from ADOPS_PACKAGE (default adops==<version>) — user choice
+- 2026-11-21 | horizon 8 | A Server must be a Linux host, because flock is not reliably shared through a Docker Desktop for macOS bind mount — needed for the DuckDB Warehouse lock
+- 2026-11-21 | horizon 8 | adops run --all takes the Warehouse lock once per Pipeline, not around the whole loop, so another run may take it between two Pipelines of a deploy — user choice

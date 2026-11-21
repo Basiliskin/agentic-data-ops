@@ -1,0 +1,88 @@
+# Branch runs execute on the stage Server through a self-hosted runner labelled adops-stage.
+# Set the repository variable ADOPS_SERVER_DIR to the Server's Project folder on that machine,
+# and require approval for workflows from forks: that setting is what keeps fork code off it.
+name: adops pull request
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+permissions:
+  contents: read
+
+jobs:
+  fork-validate:
+    if: github.event.pull_request.head.repo.full_name != github.repository && github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    env:
+      ADOPS_PACKAGE: ${{ vars.ADOPS_PACKAGE || 'adops=={{ADOPS_VERSION}}' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install adops
+        run: |
+          python3 -m venv "$RUNNER_TEMP/adops"
+          "$RUNNER_TEMP/adops/bin/pip" install "$ADOPS_PACKAGE"
+          echo "$RUNNER_TEMP/adops/bin" >> "$GITHUB_PATH"
+      - name: Validate
+        run: adops validate
+      - name: Skip the Branch run
+        run: >-
+          echo 'Fork PR: Branch run skipped; a maintainer must run it from a branch in this repository.'
+
+  branch-run:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action != 'closed'
+    runs-on: [self-hosted, adops-stage]
+    concurrency:
+      group: adops-branch-${{ github.event.pull_request.head.ref }}
+      cancel-in-progress: false
+    env:
+      BRANCH: ${{ github.event.pull_request.head.ref }}
+      ADOPS_SERVER_DIR: ${{ vars.ADOPS_SERVER_DIR }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate
+        run: >-
+          docker compose --project-directory "$ADOPS_SERVER_DIR" --profile server run --rm --no-deps -T
+          -v "$GITHUB_WORKSPACE:/project" -v "$ADOPS_SERVER_DIR/.adops:/project/.adops"
+          dagster_daemon adops validate
+      - name: Run every Pipeline in the Branch Environment
+        run: >-
+          docker compose --project-directory "$ADOPS_SERVER_DIR" --profile server run --rm --no-deps -T
+          -v "$GITHUB_WORKSPACE:/project" -v "$ADOPS_SERVER_DIR/.adops:/project/.adops"
+          dagster_daemon adops run --all --branch "$BRANCH"
+      - name: Give the checkout back to the runner user
+        if: always()
+        run: >-
+          docker compose --project-directory "$ADOPS_SERVER_DIR" --profile server run --rm --no-deps -T
+          -v "$GITHUB_WORKSPACE:/project"
+          dagster_daemon chown -R "$(id -u):$(id -g)" /project
+
+  drop-branch:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.action == 'closed'
+    runs-on: [self-hosted, adops-stage]
+    concurrency:
+      group: adops-branch-${{ github.event.pull_request.head.ref }}
+      cancel-in-progress: false
+    env:
+      BRANCH: ${{ github.event.pull_request.head.ref }}
+      ADOPS_SERVER_DIR: ${{ vars.ADOPS_SERVER_DIR }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Drop the Branch Environment
+        run: >-
+          docker compose --project-directory "$ADOPS_SERVER_DIR" --profile server run --rm --no-deps -T
+          -v "$GITHUB_WORKSPACE:/project" -v "$ADOPS_SERVER_DIR/.adops:/project/.adops"
+          dagster_daemon adops drop-branch "$BRANCH"
+      - name: Give the checkout back to the runner user
+        if: always()
+        run: >-
+          docker compose --project-directory "$ADOPS_SERVER_DIR" --profile server run --rm --no-deps -T
+          -v "$GITHUB_WORKSPACE:/project"
+          dagster_daemon chown -R "$(id -u):$(id -g)" /project

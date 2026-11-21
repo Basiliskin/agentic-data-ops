@@ -1,0 +1,421 @@
+{
+  "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-08-github-actions-promotion-roadmap.json",
+  "roadmapTask": "Have adops init generate GitHub Actions workflows: on PR open or update, run adops validate and adops run --branch; on PR merge or close, run adops drop-branch; on merge to main, run stage; on release, run prod. Settle first how CI reaches the stage Warehouse, the policy for PRs from forks, and how to stop branch and stage runs from overlapping.",
+  "createdAt": "2026-11-21T08:08:42Z",
+  "updatedAt": "2026-11-21T09:32:26Z",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "add-run-all",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-21T08:08:42Z",
+      "baseRef": "648b0b530b28df17942bcad7c579dc503fd09be7",
+      "baseDirty": true,
+      "notes": "Already dirty at start: project-memory files (blockers/decisions/discoveries/next-horizon-brief/state.md) and the horizon-08 roadmap json/md from planning. Changed: src/adops/interface/run_command.py, src/adops/interface/server.py (unplanned), tests/unit/interface/test_run_command.py, tests/unit/interface/test_cli.py. run() takes optional pipeline + --all; --all loops pipeline_files() (new shared helper, sorted pipelines/*.yaml) through _run_one, which fails on the first failed result; server._pipelines now uses pipeline_files so the order cannot drift.",
+      "unplannedFiles": [
+        "src/adops/interface/server.py"
+      ],
+      "gateRun": "uv run ruff check: pass; ADOPS_TEST_POSTGRES_DSN=postgresql://postgres:adops@localhost:55432/postgres uv run pytest tests/unit --cov --cov-report=term-missing: pass (1204 passed, 100% coverage). g3/g4 not run: no template or e2e path touched.",
+      "failures": [
+        {
+          "at": "2026-11-21T08:13:41Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "34 errors in tests/unit/infrastructure: ADOPS_TEST_POSTGRES_DSN is not set; coverage 98.68% < 100%",
+          "resolvedBy": "gate-fix",
+          "resolution": "Set ADOPS_TEST_POSTGRES_DSN to the already-running adops-test-pg container (port 55432), as CI does; no code change."
+        }
+      ],
+      "completedAt": "2026-11-21T08:14:49Z",
+      "gradeResult": {
+        "phaseId": "add-run-all",
+        "dimensionScores": [
+          {
+            "dimensionId": "run-all-order-and-first-failure-stop",
+            "score": 9,
+            "pass": true,
+            "evidence": "All 5 passCriteria met; shared pipeline_files helper used by server. Not 10: order tests would not surely fail if sorted() were removed on a name-ordered filesystem."
+          },
+          {
+            "dimensionId": "run-all-argument-validation",
+            "score": 9,
+            "pass": true,
+            "evidence": "All passCriteria met incl. missing and empty pipelines/. Not 10: rejection tests check exit != 0 and message substrings, not exact exit code 2."
+          },
+          {
+            "dimensionId": "run-all-flag-passthrough",
+            "score": 9,
+            "pass": true,
+            "evidence": "env, branch and default passed to every call; single-Pipeline tests unchanged. Not 10: run_project is faked, so per-Pipeline _run_branch routing is not tested end to end."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "add-warehouse-lock-adapters",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-21T08:15:39Z",
+      "baseRef": "648b0b530b28df17942bcad7c579dc503fd09be7",
+      "baseDirty": true,
+      "notes": "Already dirty at start: memory files, horizon-08 roadmap files, and phase add-run-all changes (run_command.py, server.py, test_cli.py, test_run_command.py), all uncommitted. Changed: src/adops/application/ports.py (WarehouseLocked), src/adops/infrastructure/warehouse_lock.py (new), tests/unit/infrastructure/test_warehouse_lock.py (new). warehouse_lock() holds a Postgres session advisory lock on its own autocommit connection (fixed key, application_name adops-warehouse-lock) or an fcntl.flock on <duckdb file>.lock, polls with injected sleep/monotonic up to 30 min, raises WarehouseLocked (env + minutes only); driver/OS errors map to WarehouseUnreachable with no __context__. Compensation: delete warehouse_lock.py and WarehouseLocked from ports.py; nothing calls them yet.",
+      "completedAt": "2026-11-21T08:20:42Z",
+      "gateRun": "uv run ruff check: pass; ADOPS_TEST_POSTGRES_DSN=postgresql://postgres:adops@localhost:55432/postgres uv run pytest tests/unit --cov --cov-report=term-missing: pass (1221 passed, 100% coverage). g3/g4 not run: no template or e2e path touched.",
+      "gradeResult": {
+        "phaseId": "add-warehouse-lock-adapters",
+        "dimensionScores": [
+          {
+            "dimensionId": "lock-mutual-exclusion-both-kinds",
+            "score": 10,
+            "pass": true,
+            "evidence": "Real two-holder tests for both kinds, do-not-block tests for two DuckDB files and two Postgres databases, and pg_locks checked on the server (1 granted inside, 0 after)."
+          },
+          {
+            "dimensionId": "lock-timeout-and-release-safety",
+            "score": 10,
+            "pass": true,
+            "evidence": "Every path driven by the injected clock, including edge paths: connection lost while waiting and inside the block, exact 1800-poll count, zero timeout never sleeps; Postgres connection closed after timeout and exception."
+          },
+          {
+            "dimensionId": "lock-errors-are-sanitized-and-layered",
+            "score": 9,
+            "pass": true,
+            "evidence": "All raises outside except blocks (no __cause__/__context__); str+repr checked for path/DSN parts; no psycopg/fcntl in application. Not 10: DuckDB raise sites never assert __cause__, Postgres timeout message not checked for env+minutes."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "take-lock-on-every-run",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-21T08:23:28Z",
+      "baseRef": "648b0b530b28df17942bcad7c579dc503fd09be7",
+      "baseDirty": true,
+      "notes": "Already dirty at start: memory files, horizon-08 roadmap files, and uncommitted changes of add-run-all (run_command.py, server.py, test_cli.py, test_run_command.py) and add-warehouse-lock-adapters (ports.py, warehouse_lock.py, test_warehouse_lock.py). Changed: src/adops/interface/run_command.py (build_warehouse_lock factory, resolve_environment_warehouse, _holding_lock around run_in_environment and _run_branch with stage lock for branches; lock-connect WarehouseUnreachable becomes a retryable first-Step failure; WarehouseLocked in RUN_ERRORS), src/adops/interface/drop_branch_command.py (lock on stage around drop, WarehouseLocked handled), src/adops/interface/server.py (single-run-slot comment), src/adops/application/ports.py (WarehouseLocked message now exactly the CLI line), tests: test_run_command.py, test_drop_branch_command.py, test_server.py, new tests/unit/interface/conftest.py (FakeLocks), test_warehouse_lock.py (message), tests/e2e/test_demo_sync.py (two-process overlap case via a lock-probe driver, both kinds). Memory: decisions.md (--all per-Pipeline lock line; Linux Server line already present), discoveries.md (3 lines). Gates while implementing: ruff clean; unit 1239 passed, 100% coverage; e2e full suite 8 passed in 357s locally; overlap case fails when the lock is removed (checked). Amendment 1: E2E runtime recorded in discoveries.md + these notes, not state.md, because state.md is horizon-level only. Graded 9/9/9 (min 8/7/7), no 10s to demote. Compensation known: remove warehouse_lock wrapping from run_in_environment/_run_branch/drop_project_branch and WarehouseLocked from RUN_ERRORS; not needed.",
+      "unplannedFiles": [
+        "src/adops/application/ports.py",
+        "tests/unit/infrastructure/test_warehouse_lock.py",
+        "tests/unit/interface/conftest.py",
+        "docs/roadmaps/agentic-dataops/discoveries.md"
+      ],
+      "amendments": [
+        {
+          "at": "2026-11-21T08:37:48Z",
+          "by": "execute",
+          "reason": "The contract says to record the E2E runtime in state.md, but project-memory rules allow state.md only horizon-level lines (planned/completed/replanned), never per-phase ones. The runtime is recorded as a discoveries.md line and in the ledger notes instead.",
+          "grounding": "schemas/execution.md Project memory files rule 2: state.md is horizon-level only; EXECUTE may not append a per-phase line",
+          "before": {
+            "changes": [
+              "In run_command.run_in_environment (:244) resolve the Environment's Warehouse with the existing secret-resolving path (as _fingerprinting does at :312-320) and run the Pipeline inside warehouse_lock(...). In _run_branch (:267) take the lock on stage's Warehouse. Add a `build_warehouse_lock` factory next to the other build_* helpers so tests can swap in a fake.",
+              "In drop_branch_command.drop_project_branch (:46) take the lock on stage's Warehouse around the drop.",
+              "Add WarehouseLocked to RUN_ERRORS (:75) and to drop_branch_command's except list (:29-37). Print 'Another run is using the <env> Warehouse; gave up after <n> minutes.' with no path or DSN.",
+              "In server._runner (:71-83) a WarehouseLocked becomes a FAILED StepReport that is not retryable and alerts like any other failure. Add a code comment that a Server run waiting for the lock holds the single run slot (max_concurrent_runs: 1). This is accepted behaviour.",
+              "Unit-test that each of the three call sites takes and releases the lock (also when the run fails), and that a lock timeout gives the sanitized message and exit 1 for run, drop-branch and a Server run (not retryable).",
+              "Add one E2E case to tests/e2e/test_demo_sync.py, parametrized over [postgres, duckdb] with the existing demo fixture. Start two `adops run --env stage` processes with Popen and assert from their start and end timestamps that they did not overlap and that both succeeded. Record the new E2E runtime against the 20-minute limit in state.md (a step inside this phase).",
+              "Record in decisions.md that a Server is a Linux host, because flock is not reliably shared across a Docker Desktop for macOS bind mount, so macOS is not a supported Server for the DuckDB lock.",
+              "The lock is taken per Pipeline run, not around the whole `adops run --all` loop: another run may take the lock between two Pipelines of a deploy. Record this as a decisions.md line (user choice, 2026-11-21)."
+            ]
+          },
+          "after": {
+            "changes": [
+              "In run_command.run_in_environment (:244) resolve the Environment's Warehouse with the existing secret-resolving path (as _fingerprinting does at :312-320) and run the Pipeline inside warehouse_lock(...). In _run_branch (:267) take the lock on stage's Warehouse. Add a `build_warehouse_lock` factory next to the other build_* helpers so tests can swap in a fake.",
+              "In drop_branch_command.drop_project_branch (:46) take the lock on stage's Warehouse around the drop.",
+              "Add WarehouseLocked to RUN_ERRORS (:75) and to drop_branch_command's except list (:29-37). Print 'Another run is using the <env> Warehouse; gave up after <n> minutes.' with no path or DSN.",
+              "In server._runner (:71-83) a WarehouseLocked becomes a FAILED StepReport that is not retryable and alerts like any other failure. Add a code comment that a Server run waiting for the lock holds the single run slot (max_concurrent_runs: 1). This is accepted behaviour.",
+              "Unit-test that each of the three call sites takes and releases the lock (also when the run fails), and that a lock timeout gives the sanitized message and exit 1 for run, drop-branch and a Server run (not retryable).",
+              "Add one E2E case to tests/e2e/test_demo_sync.py, parametrized over [postgres, duckdb] with the existing demo fixture. Start two `adops run --env stage` processes with Popen and assert from their start and end timestamps that they did not overlap and that both succeeded. Record the new E2E runtime against the 20-minute limit as a discoveries.md line and in the ledger notes.",
+              "Record in decisions.md that a Server is a Linux host, because flock is not reliably shared across a Docker Desktop for macOS bind mount, so macOS is not a supported Server for the DuckDB lock.",
+              "The lock is taken per Pipeline run, not around the whole `adops run --all` loop: another run may take the lock between two Pipelines of a deploy. Record this as a decisions.md line (user choice, 2026-11-21)."
+            ]
+          }
+        }
+      ],
+      "failures": [
+        {
+          "at": "2026-11-21T08:39:50Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run ruff check",
+          "detail": "E501 Line too long (103 > 100) at tests/e2e/test_demo_sync.py:508",
+          "resolvedBy": "gate-fix",
+          "resolution": "Split the long assert message into a variable; tidied held_interval"
+        }
+      ],
+      "gateRun": "g1 uv run ruff check: pass; g2 uv run pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass, 1239 passed, 100%; g3 uv build --wheel + template grep: pass; g4 uv run pytest tests/e2e -m e2e: pass, 8 passed in 357s (overlap case re-run after the lint fix: 2 passed in 31s)",
+      "completedAt": "2026-11-21T08:42:12Z",
+      "gradeResult": {
+        "phaseId": "take-lock-on-every-run",
+        "dimensionScores": [
+          {
+            "dimensionId": "every-warehouse-path-takes-lock",
+            "score": 9,
+            "pass": true,
+            "evidence": "Lock in run_in_environment (Server covered), branch on stage, drop around whole call incl. nothing-to-drop; release-on-failure tested for all three. Not 10: Server test checks env name only, no Server release-on-failure test."
+          },
+          {
+            "dimensionId": "lock-timeout-surfaces-cleanly",
+            "score": 9,
+            "pass": true,
+            "evidence": "WarehouseLocked not retryable, in RUN_ERRORS and drop except list; exact message + exit 1 + no leaks tested for run, branch, drop, Server. Not 10: Server test patches print_failure, not the webhook sender."
+          },
+          {
+            "dimensionId": "e2e-two-process-overlap",
+            "score": 9,
+            "pass": true,
+            "evidence": "Two Popen before waiting, both kinds, probe timestamps bracket the held lock, 357s suite. Not 10: no in-repo proof the runs contended (manual negative control only)."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "generate-pull-request-workflow",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-21T08:50:25Z",
+      "baseRef": "648b0b530b28df17942bcad7c579dc503fd09be7",
+      "baseDirty": true,
+      "notes": "Already dirty at start: memory files, horizon-08 roadmap files, and uncommitted changes of add-run-all, add-warehouse-lock-adapters and take-lock-on-every-run (ports.py, drop_branch_command.py, run_command.py, server.py, warehouse_lock.py, tests/e2e/test_demo_sync.py, tests/unit/interface/{conftest,test_cli,test_drop_branch_command,test_run_command,test_server}.py, tests/unit/infrastructure/test_warehouse_lock.py). Changed: src/adops/templates/github/workflows/adops-pull-request.yml (new), src/adops/interface/init_command.py (_write_workflow_files, called from demo and plain init), tests/unit/interface/test_init_command.py (file sets + 13 workflow tests incl. an if-evaluator over fork/same-repo/deleted-fork x open/closed), .github/workflows/ci.yml (wheel grep), docs/roadmaps/agentic-dataops/discoveries.md (compose mount line). A closed Fork PR selects no job (the rubric phrase exactly one job applies to the three other cases). drop-branch checks out head.sha so a merged/deleted branch still checks out. Checkouts use persist-credentials: false. docker compose run -v override of /project verified with a toy compose file; generated workflow passes actionlint 1.7.7 (with shellcheck). Graded 10/10/10/9 (min 8/9/7/7); three 10s kept, each names an above-the-bar item. Compensation known: remove templates/github, _write_workflow_files and its tests, and the ci.yml grep entry; not needed.",
+      "unplannedFiles": [
+        "docs/roadmaps/agentic-dataops/discoveries.md"
+      ],
+      "failures": [
+        {
+          "at": "2026-11-21T08:56:07Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "34 failed in test_init_command.py: yaml ScannerError parsing the generated adops-pull-request.yml",
+          "resolvedBy": "gate-fix",
+          "resolution": "The fork skip echo was a plain YAML scalar containing \": \"; moved it into a >- block scalar"
+        },
+        {
+          "at": "2026-11-21T08:56:07Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run ruff check",
+          "detail": "E501 Line too long (102 > 100) at tests/unit/interface/test_init_command.py:454",
+          "resolvedBy": "gate-fix",
+          "resolution": "Split the nested event dict in pull_request_context"
+        }
+      ],
+      "gateRun": "g1 uv run ruff check: pass; g2 uv run pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass, 1279 passed, 100%; g3 uv build --wheel + grep github/workflows/adops-pull-request.yml: pass; g4 not run: no tests/e2e or templates/demo path touched; extra: actionlint 1.7.7 on a generated demo project: clean",
+      "completedAt": "2026-11-21T08:57:13Z",
+      "gradeResult": {
+        "phaseId": "generate-pull-request-workflow",
+        "dimensionScores": [
+          {
+            "dimensionId": "pr-workflow-job-routing",
+            "score": 10,
+            "pass": true,
+            "evidence": "Evaluator over fork/same-repo x opened/synchronize/reopened/closed plus deleted fork (head repo None) asserts exact job sets; closed fork selects none; no failureExample present. 10: covers the deleted-fork edge beyond the four combinations."
+          },
+          {
+            "dimensionId": "pr-workflow-injection-and-secret-safety",
+            "score": 10,
+            "pass": true,
+            "evidence": "Across every generated workflow: no ${{ in run, no secrets., permissions {contents: read}, pins subset of ci.yml SHA # vX, marker replaced, unquoted-variable regex. 10: also persist-credentials false. Quoting regex coarse."
+          },
+          {
+            "dimensionId": "pr-workflow-runs-against-stage-state",
+            "score": 10,
+            "pass": true,
+            "evidence": "Full compose prefix with --no-deps, both mounts, always() chown $(id -u):$(id -g) asserted. 10: chown step asserted to exclude .adops, and dagster_daemon plus env_file .env cross-checked against the generated compose file."
+          },
+          {
+            "dimensionId": "init-file-sets-and-wheel",
+            "score": 9,
+            "pass": true,
+            "evidence": "Exact plain set and DEMO_FILES include the workflow; _write_workflow_files called in both branches with marker replaced; templates/github/workflows; ci.yml grep. Not 10: no plain-vs-demo set-difference test."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "generate-stage-and-prod-workflows",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-21T08:59:59Z",
+      "baseRef": "648b0b530b28df17942bcad7c579dc503fd09be7",
+      "baseDirty": true,
+      "notes": "Already dirty at start (earlier horizon-8 phases, uncommitted): .github/workflows/ci.yml,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/ports.py,src/adops/interface/drop_branch_command.py,src/adops/interface/init_command.py,src/adops/interface/run_command.py,src/adops/interface/server.py,tests/e2e/test_demo_sync.py,tests/unit/interface/test_cli.py,tests/unit/interface/test_drop_branch_command.py,tests/unit/interface/test_init_command.py,tests/unit/interface/test_run_command.py,tests/unit/interface/test_server.py,docs/roadmaps/agentic-dataops/horizons/horizon-08-github-actions-promotion-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-08-github-actions-promotion-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-08-github-actions-promotion-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-08-github-actions-promotion-roadmap.status.last_good.json,src/adops/infrastructure/warehouse_lock.py,src/adops/templates/github/,tests/unit/infrastructure/test_warehouse_lock.py,tests/unit/interface/conftest.py | Changed: src/adops/templates/github/workflows/adops-stage.yml (new), src/adops/templates/github/workflows/adops-prod.yml (new), src/adops/templates/demo/adops.yaml, src/adops/templates/plain/adops.yaml, tests/unit/interface/test_init_command.py, .github/workflows/ci.yml. init_command.py unchanged: _write_workflow_files already copies every template in github/workflows/. Adds stage (push main) and prod (release published, environment prod) deploy workflows: validate checkout in Server image -> local git fetch + checkout --detach into ADOPS_SERVER_DIR -> Dagster reloadRepositoryLocation with response-shape check -> adops run --all --env; commented prod block in both adops.yaml. | Compensation known: delete the two workflow templates, their tests and ci.yml grep entries, and the commented prod blocks.",
+      "unplannedFiles": [],
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-21T09:04:59Z",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "ADOPS_TEST_POSTGRES_DSN is not set (41 Postgres-backed infrastructure test errors; coverage 97.99%)",
+          "resolvedBy": "gate-fix",
+          "resolution": "Environment only: set ADOPS_TEST_POSTGRES_DSN to the already-running test Postgres on :55432; 1332 passed, coverage 100%"
+        }
+      ],
+      "gateRun": [
+        "ruff check: pass",
+        "pytest tests/unit --cov (100% gate, ADOPS_TEST_POSTGRES_DSN set): pass, 1332 passed",
+        "uv build --wheel + template grep (incl. adops-stage.yml, adops-prod.yml): pass",
+        "pytest tests/e2e -m e2e: pass, 8 passed in 386s"
+      ],
+      "completedAt": "2026-11-21T09:14:48Z",
+      "gradeResult": {
+        "phaseId": "generate-stage-and-prod-workflows",
+        "dimensionScores": [
+          {
+            "dimensionId": "deploy-step-order-protects-server-folder",
+            "score": 10,
+            "pass": true,
+            "evidence": "Order asserted by index for both files; real fetch/checkout script run against real git repos incl. annotated tag, .env and .adops survive."
+          },
+          {
+            "dimensionId": "dagster-reload-is-checked",
+            "score": 10,
+            "pass": true,
+            "evidence": "Real reload script run against fake curl with 9 responses per workflow; only LOADED shapes pass; .env password never echoed."
+          },
+          {
+            "dimensionId": "prod-approval-and-trigger-wiring",
+            "score": 10,
+            "pass": true,
+            "evidence": "Every generated workflow scanned: environment prod only on adops-prod.yml deploy job, none at workflow level."
+          },
+          {
+            "dimensionId": "prod-block-and-packaging",
+            "score": 10,
+            "pass": true,
+            "evidence": "Prod block uncommented and loaded via load_project_settings for both templates; keys match reference env; every *_env is in .env.example."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "document-promotion-setup",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-21T09:18:02Z",
+      "baseRef": "648b0b530b28df17942bcad7c579dc503fd09be7",
+      "baseDirty": true,
+      "notes": "Already dirty at start (earlier horizon-8 phases, uncommitted): .github/workflows/ci.yml,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/ports.py,src/adops/interface/drop_branch_command.py,src/adops/interface/init_command.py,src/adops/interface/run_command.py,src/adops/interface/server.py,src/adops/templates/demo/adops.yaml,src/adops/templates/plain/adops.yaml,tests/e2e/test_demo_sync.py,tests/unit/interface/test_cli.py,tests/unit/interface/test_drop_branch_command.py,tests/unit/interface/test_init_command.py,tests/unit/interface/test_run_command.py,tests/unit/interface/test_server.py,docs/roadmaps/agentic-dataops/horizons/horizon-08-github-actions-promotion-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-08-github-actions-promotion-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-08-github-actions-promotion-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-08-github-actions-promotion-roadmap.status.last_good.json,src/adops/infrastructure/warehouse_lock.py,src/adops/templates/github/,tests/unit/infrastructure/test_warehouse_lock.py,tests/unit/interface/conftest.py | Changed: docs/playbooks/promotion.md (new), docs/adr/0016-promotion-runs-on-a-self-hosted-runner-per-server.md (new), docs/adr/0006-branch-environments-as-warehouse-schemas.md and docs/adr/0014-schedules-run-on-a-pull-based-server.md (dated 2026-11-21 clarifications), GLOSSARY.md (Server reworded; Self-hosted runner, Run all, Fork PR, Warehouse lock), docs/roadmaps/agentic-dataops/blockers.md (6 resolved h6/h7 Git-pull/poll/reload lines now point to ADR-0016/ADR-0014; 1 new h8 question), discoveries.md (2 lines). blockers.md and discoveries.md were already dirty at start, so the git list cannot separate this phase from earlier ones there. Amendment 1 (changes): fork approval label is now \"Require approval for all external contributors\" (old \"outside collaborators\" named once), plus the private-repo setting \"Require approval for fork pull request workflows\"; grade passCriteria quoting the old label against the amended changes. | Graded 8/8/9/9 (min 8/8/7/7), no 10s. After grading, fixed the grader-found defects (docs only, not re-graded): guide step 1 now sets ADOPS_ENVIRONMENT=prod on the prod machine and puts the plain-Project stage note before starting the Server; guide, ADR-0016, discoveries and blockers now say required reviewers on a private repo need GitHub Enterprise. Compensation known: delete promotion.md and ADR-0016, revert ADR-0006/0014 clarifications, GLOSSARY and blockers edits; not needed.",
+      "amendments": [
+        {
+          "at": "2026-11-21T09:19:32Z",
+          "by": "execute",
+          "reason": "GitHub renamed the strictest public-repo fork approval option: the current label is \"Require approval for all external contributors\", not \"Require approval for all outside collaborators\". requiredMaterials says to copy the current name exactly, so the guide and ADR-0016 use the current label and name the old one once so it can still be found. Private repositories have a different setting, \"Require approval for fork pull request workflows\", which the guide also names, since GitHub recommends self-hosted runners only on private repositories.",
+          "grounding": "docs.github.com managing-github-actions-settings-for-a-repository, read 2026-11-21 (requiredMaterials entry)",
+          "before": {
+            "changes": [
+              "Create docs/playbooks/promotion.md, following the plain-language style of the ADRs (ADR-0011: no Git or Docker knowledge assumed beyond copy-paste commands).",
+              "Explain what each generated workflow does and when it runs (PR open or update, PR close, merge to main, release published), and that a Fork PR only gets `adops validate`.",
+              "Give the runner setup steps: register the runner as a service on the Linux Server machine with label adops-stage or adops-prod, check the user can run docker compose, and clone the Project into the Server folder. State that a Linux host is required (flock and Docker Desktop for macOS) and that Warehouse secrets stay in that machine's .env.",
+              "Give the GitHub settings: repository variable ADOPS_SERVER_DIR, prod environment with required reviewers and its own ADOPS_SERVER_DIR, optional ADOPS_PACKAGE override for a wheel or Git URL, and 'Require approval for all outside collaborators' fork PR workflows. Say plainly that GitHub advises against self-hosted runners on public repositories and why.",
+              "Describe the Warehouse lock: overlapping runs wait up to 30 minutes, a waiting Server run holds the single run slot, and a timeout fails and alerts. Describe how to recover a branch that sanitizes to the same Branch Environment name as another.",
+              "Say in the guide that after a deploy the webserver reload is immediate and the Dagster daemon picks up Schedule changes within about 60 seconds (it refreshes its own workspace every 60 s), so no restart is needed.",
+              "Write ADR-0016 covering: Warehouse-touching jobs run on a self-hosted runner on each Server machine (adops-stage, adops-prod) with that machine's .env, never GitHub secrets; adops runs inside the Server image through docker compose run; the Fork PR policy (validate only, no secrets), and that the job condition is not a security boundary, so GitHub's GitHub's fork PR workflow approval setting (its exact current name and location from the GitHub requiredMaterials entry) must stay on, citing (with a link, per the GitHub requiredMaterials entry) GitHub's warning about self-hosted runners on public repos; one Warehouse lock for overlap. Add a dated 2026-11-21 clarification to ADR-0006: drop-branch runs when the PR closes, and short branch names that sanitize to the same name can still collide (recorded, not fixed).",
+              "Add a dated 2026-11-21 clarification to ADR-0014: the Server no longer polls Git; the merge and release workflows push the version to the Server Project folder after validate and then reload the code location (a restart was rejected because it kills in-progress runs); merge→stage runs every Pipeline.",
+              "GLOSSARY.md: add Self-hosted runner, Fork PR, Warehouse lock and Run all. In the Server entry's _Avoid_ list, keep 'runner' only as a word for the Server itself. Reword the Server entry so it no longer says it pulls from Git.",
+              "Mark the horizon-6 and horizon-7 Git-pull, polling and reload blockers resolved in docs/roadmaps/agentic-dataops/blockers.md, pointing to ADR-0016 and the ADR-0014 clarification."
+            ]
+          },
+          "after": {
+            "changes": [
+              "Create docs/playbooks/promotion.md, following the plain-language style of the ADRs (ADR-0011: no Git or Docker knowledge assumed beyond copy-paste commands).",
+              "Explain what each generated workflow does and when it runs (PR open or update, PR close, merge to main, release published), and that a Fork PR only gets `adops validate`.",
+              "Give the runner setup steps: register the runner as a service on the Linux Server machine with label adops-stage or adops-prod, check the user can run docker compose, and clone the Project into the Server folder. State that a Linux host is required (flock and Docker Desktop for macOS) and that Warehouse secrets stay in that machine's .env.",
+              "Give the GitHub settings: repository variable ADOPS_SERVER_DIR, prod environment with required reviewers and its own ADOPS_SERVER_DIR, optional ADOPS_PACKAGE override for a wheel or Git URL, and the fork PR approval setting under its current GitHub name: on a public repository \"Require approval for all external contributors\" (formerly \"Require approval for all outside collaborators\") under \"Approval for running fork pull request workflows from contributors\"; on a private repository \"Require approval for fork pull request workflows\" under \"Fork pull request workflows\". Say plainly that GitHub advises against self-hosted runners on public repositories and why.",
+              "Describe the Warehouse lock: overlapping runs wait up to 30 minutes, a waiting Server run holds the single run slot, and a timeout fails and alerts. Describe how to recover a branch that sanitizes to the same Branch Environment name as another.",
+              "Say in the guide that after a deploy the webserver reload is immediate and the Dagster daemon picks up Schedule changes within about 60 seconds (it refreshes its own workspace every 60 s), so no restart is needed.",
+              "Write ADR-0016 covering: Warehouse-touching jobs run on a self-hosted runner on each Server machine (adops-stage, adops-prod) with that machine's .env, never GitHub secrets; adops runs inside the Server image through docker compose run; the Fork PR policy (validate only, no secrets), and that the job condition is not a security boundary, so GitHub's GitHub's fork PR workflow approval setting (its exact current name and location from the GitHub requiredMaterials entry) must stay on, citing (with a link, per the GitHub requiredMaterials entry) GitHub's warning about self-hosted runners on public repos; one Warehouse lock for overlap. Add a dated 2026-11-21 clarification to ADR-0006: drop-branch runs when the PR closes, and short branch names that sanitize to the same name can still collide (recorded, not fixed).",
+              "Add a dated 2026-11-21 clarification to ADR-0014: the Server no longer polls Git; the merge and release workflows push the version to the Server Project folder after validate and then reload the code location (a restart was rejected because it kills in-progress runs); merge→stage runs every Pipeline.",
+              "GLOSSARY.md: add Self-hosted runner, Fork PR, Warehouse lock and Run all. In the Server entry's _Avoid_ list, keep 'runner' only as a word for the Server itself. Reword the Server entry so it no longer says it pulls from Git.",
+              "Mark the horizon-6 and horizon-7 Git-pull, polling and reload blockers resolved in docs/roadmaps/agentic-dataops/blockers.md, pointing to ADR-0016 and the ADR-0014 clarification."
+            ]
+          }
+        }
+      ],
+      "unplannedFiles": [
+        "docs/roadmaps/agentic-dataops/discoveries.md"
+      ],
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-21T09:23:11Z",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "41 setup errors: ADOPS_TEST_POSTGRES_DSN is not set (test Postgres not running locally)",
+          "resolvedBy": "gate-fix",
+          "resolution": "Set ADOPS_TEST_POSTGRES_DSN to the already-running test Postgres; no code change"
+        }
+      ],
+      "completedAt": "2026-11-21T09:32:26Z",
+      "gradeResult": {
+        "phaseId": "document-promotion-setup",
+        "dimensions": [
+          {
+            "dimensionId": "guide-matches-generated-workflows",
+            "score": 8,
+            "minScore": 8,
+            "pass": true,
+            "evidence": "Every runner label, variable, environment, file name and trigger in the guide matches the three workflows; ADOPS_SERVER_DIR set as repo var and prod env var; prod block step present.",
+            "issues": [
+              "Guide did not tell the user to set ADOPS_ENVIRONMENT=prod on the prod machine (fixed after grading)",
+              "Plain-Project stage note came after 'Start the Server once' (fixed after grading)"
+            ]
+          },
+          {
+            "dimensionId": "guide-states-security-boundary",
+            "score": 8,
+            "minScore": 8,
+            "pass": true,
+            "evidence": "Current fork approval label with location and former name, private-repo setting, fork check not a boundary, GitHub public-repo warning with link, required reviewers and wait, secrets only in .env.",
+            "issues": [
+              "Said required reviewers on private repos need Pro/Team; GitHub limits that to Enterprise (fixed after grading)"
+            ]
+          },
+          {
+            "dimensionId": "guide-covers-server-host-and-lock-operations",
+            "score": 9,
+            "minScore": 7,
+            "pass": true,
+            "evidence": "svc.sh install/start/status, docker compose version/docker ps as runner user with group fix, git clone, Linux reason, lock 30-min wait/run slot/alert with exact message, collision recovery, 60 s daemon pickup with no restart.",
+            "issues": [
+              "No command checks the Linux host or shows a lock being held"
+            ]
+          },
+          {
+            "dimensionId": "promotion-decisions-recorded",
+            "score": 9,
+            "minScore": 7,
+            "pass": true,
+            "evidence": "ADR-0016 complete with link and identical setting name; ADR-0006/0014 dated clarifications; GLOSSARY entries and Server reword; blockers point to ADR-0016/ADR-0014.",
+            "issues": [
+              "ADR-0016 repeated the imprecise paid-plan claim (fixed after grading)"
+            ]
+          }
+        ],
+        "overallPass": true,
+        "summary": "All four dimensions pass; two factual defects found by the grader were fixed after grading and not re-graded."
+      },
+      "gateRun": [
+        "ruff check: pass",
+        "pytest tests/unit --cov (100%): pass, 1332 passed (after setting ADOPS_TEST_POSTGRES_DSN)",
+        "uv build --wheel + workflow templates in wheel: pass",
+        "pytest tests/e2e -m e2e: pass"
+      ]
+    }
+  ]
+}

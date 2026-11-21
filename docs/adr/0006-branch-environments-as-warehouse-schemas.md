@@ -21,3 +21,8 @@ The original text named a single `env_<branch>` schema created by CI and dropped
 
   where `shop` is the Source name. A Branch run that rebuilds a Sync fails fast when the dbt sources do not use the variable.
 - **Known gap:** `adops accept-schema` has no `--branch` option. A Branch's schema snapshots start fresh, so a Breaking Change inside a Branch is rare.
+
+## Clarification (2026-11-21)
+
+- **Dropping now runs from CI.** The generated `adops-pull-request.yml` runs `adops drop-branch <branch>` on the stage Server when a pull request is closed or merged (ADR-0016). `adops drop-branch` by hand still works.
+- **Branch names that sanitize to the same name collide.** Two branches such as `feature/new-orders` and `feature-new/orders` both become `feature_new_orders` and share one Branch Environment: each run overwrites the other's tables, and closing either pull request drops both. This is recorded, not fixed; `docs/playbooks/promotion.md` gives the recovery steps.

@@ -1,50 +1,47 @@
-# Planning Brief — horizon 8 (written by horizon 7 PLAN, 2026-11-20)
+# Planning Brief — horizon 9 (written by horizon 8 PLAN, 2026-11-21)
 
 ## Recommended scope
-Make the horizon-7 Server pull its Project from Git instead of reading a bind-mounted folder: main for stage, the latest release tag for prod. It switches to a new version only after `adops validate` passes, keeps the last good version and sends a webhook alert otherwise. Once it accepts a version, it queues runs of the Pipelines whose files changed, so stage's Step Fingerprints stay current. Then make ADR-0015 real. `accept-schema` for stage/prod writes an accepted-change record into the Project instead of writing to the Warehouse. Each Environment applies the record once, on its next run, before checking for Breaking Changes, and keeps the dropped-column nullable step. The horizon-2 decision line is superseded. Settle the record format, the applied-once tracking, Git credentials and the hot-swap mechanism up front. Prove it end to end with a local Git remote in the E2E. Add a prod Environment to the templates only if needed to test the release-tag path. Leave GitHub Actions workflows, the MCP server and the skills for later.
+The next horizon should first make the horizon-8 Promotion path sturdy, then add one new capability. It should close the horizon-7 STARTED-run blocker on the Server and choose whether to prove the workflow commands with a live E2E (PR checkout mount plus Dagster reload) inside the 20-minute budget, using any first user feedback. Then it should take on ADR-0015 accepted-change records (accept-schema writes a record that stage/prod apply once), but only after the record format and applied-once decisions above are settled. Leave the MCP server, the six skills, the Verified Source E2E suite and the single-VM playbook for later horizons, since the skills depend on the MCP server and Promotion. Keep lock-timeout config and branch-name collision fixes out unless feedback asks for them.
 
 ## Unknowns
-- What exactly is in an accepted-change record: the full accepted TableShape copied from where accept-schema ran, or just 'accept whatever shape the Source shows on the next run'? prod's Source can differ from dev's.
-- How does an Environment know it already applied a record? Is it tracked in the Warehouse next to _adops_schema_snapshots, and are records ever removed from the Project once every Environment has applied them?
-- What happens if a record's shape does not match the Source shape seen on the next run (it drifted again)? Halt with a new Breaking Change, or apply it anyway?
-- How does the Server get Git credentials for a private repo, and from where? A deploy key, a token as a Secret Reference, or SSH agent? And does the Server image need git, or does a Python library do the pull?
-- How does the Server find 'the latest release tag': semver ordering, GitHub Releases, or the newest annotated tag by date? What counts as a release when there are pre-release or malformed tags?
-- How does a new version reach the running Dagster code location: reload the code location in place, restart containers, or switch a symlink to a checkout? How are in-flight and queued runs on the old version handled?
-- Which Pipelines count as 'changed' when a version is accepted: a git diff of pipeline and dbt files, or Step Fingerprints compared with stage's saved ones (decided in horizon 6 with no Git)?
-- Do runs started right after a version is accepted share the single run slot and queue behind scheduled runs, and does a Pipeline with no Schedule run only at that moment?
-- In horizon 8, does the bind-mounted folder from horizon 7 stay supported (dev/demo) next to Git-pull mode, or does Git-pull replace it on stage/prod?
-- How often does the Server poll Git, and who sets that? A Dagster sensor/schedule inside the daemon, or a separate loop/container?
+- Do the generated stage/prod workflows actually work on a real self-hosted runner: does docker compose run with the PR checkout mounted over the Server folder's .adops/ and .env build Branch schemas in the real stage Warehouse?
+- Does the Dagster code-location reload the workflow sends really pick up added or removed Pipelines and Schedule changes while an in-progress run finishes on the old version?
+- Do files the root Server container creates in .adops/ (DuckDB file, .lock, dlt state) break git checkout or later runs started as the runner user?
+- What is in an ADR-0015 accepted-change record: the full accepted TableShape from where accept-schema ran, or 'accept whatever the Source shows next run', given prod's Source can differ from dev's?
+- How does an Environment know it already applied an accepted-change record, and what happens if the Source has drifted again by the time the record is applied?
+- After a Server crash, how should runs left STARTED be cleared so the skip-overlap rule does not skip every later tick: Dagster run monitoring, a startup sweep, or both?
+- What does the Assistant need from the MCP server beyond edit/validate/test-connection/run/Preview/read-logs, and how does server code tell a dev/Branch request from stage/prod reliably?
+- What did the first user feedback on Promotion say (runner setup, fork policy, 30-minute lock), and does any of it change horizon-8 choices?
 
 ## Research
-- Dagster 1.13 code-location reload: workspace.yaml python_module vs gRPC server, the reload_workspace GraphQL mutation, and how the daemon picks up new definitions. Also whether a sensor can trigger the reload.
-- Ways to run git in containers: a git binary in python:slim vs dulwich/pygit2, shallow fetch of a tag or branch, deploy-key handling, known_hosts, and keeping secrets out of logs.
-- How release-tag-to-deploy flows pick 'latest' (semver vs creation date) in tools like Argo CD, Flux or watchtower, to borrow a simple rule.
-- How horizon 7 actually built it, by reading the finished horizon-7 roadmap and its decisions: the Server code location, how run_pipeline is wired for the Server, the alert port, the ADR-0014 clarification, and the E2E server scenario.
-- How run_pipeline's PlannedStep._raise_if_breaking loads and saves snapshots, to find where an accepted-change record would be applied before the comparison.
-- Open blockers 25-27 in blockers.md (CI reachability, merge→stage changed-only, concurrent --branch). Check which ones Git-pull plus run-changed-on-accept closes.
+- Read the finished horizon-8 roadmap and the new ADR-0016 to see what the workflows, the lock and the reload step actually became, versus what was planned.
+- Try the generated adops-pull-request.yml and adops-stage.yml commands by hand on a Linux host with the demo stack: docker compose run with the mounts, then the Dagster reload, then run --all --env stage.
+- Dagster 1.13 docs on run_monitoring in dagster.yaml (start/cancel timeouts, max_resume_run_attempts) and how it acts with QueuedRunCoordinator max_concurrent_runs: 1.
+- Read PlannedStep._raise_if_breaking and accept_schema.py to find where an accepted-change record would be applied before the snapshot comparison.
+- Read ADR-0002 and ADR-0009, then check MCP Python SDK options (stdio server, tool schemas) and how to test refusal of stage/prod at 100% coverage.
+- Time the current Docker E2E (Postgres and DuckDB, plus the Server and lock-overlap cases) against the 20-minute limit before adding live workflow or MCP E2E cases.
+- Re-read blockers.md items from horizons 6-7 (fork reach, changed-only, concurrent --branch, pinned install) and mark which ones horizon 8 closed.
 
 ## Decisions needed
-- Format and location of the accepted-change record in the Project (file path, schema, one file per table vs one log), and whether `adops validate` checks it.
-- What accept-schema --env stage/prod does now: write a record, refuse a direct write, or keep the direct write as an escape hatch. Also what --env dev/--branch keep doing.
-- How a record becomes 'applied once per Environment' (an applied-record ledger in the Warehouse vs comparing shapes) and whether records are cleaned up or kept forever.
-- How the Server pulls and switches versions: git binary or library, polling interval, where checkouts live, and how the last good version is kept and switched atomically.
-- How Git credentials and the repo URL reach the Server (Secret References in .env?) and what a public repo needs.
-- Which events alert when a version is rejected or a pull fails, using the horizon-7 webhook, and how to keep validate output in an alert free of secrets and values.
-- How 'changed Pipelines' is found on accept (git diff vs Step Fingerprints) and in what order those runs are queued.
-- Whether init templates gain a prod Environment, so the release-tag path can be tested end to end.
-- How the E2E proves the Git loop inside the 20-minute CI limit: a local bare repo or file:// remote, and a fast poll interval.
+- Whether the next horizon adds a live E2E of the workflow commands (docker compose run with the PR checkout mount, Dagster reload) or keeps checking the generated YAML only.
+- Format and location of the accepted-change record, what accept-schema --env stage/prod does now, and how applied-once is tracked per Environment.
+- How STARTED-after-crash runs are handled on the Server (run monitoring config vs cleanup on startup) and whether that alerts through the webhook.
+- Which vision item comes next: ADR-0015 records, the MCP server, the six skills, or the Verified Source E2E suite, and whether the skills wait for the MCP server.
+- Whether to fix short-branch-name Branch Environment collisions now that drop-branch runs automatically on every PR close.
+- Whether the lock timeout stays a fixed 30 minutes or becomes configurable, decided from real feedback rather than up front.
 
 ## Artifacts to inspect
-- docs/adr/0014-schedules-run-on-a-pull-based-server.md (plus the horizon-7 clarification on the bind-mounted folder)
+- docs/adr/0014-schedules-run-on-a-pull-based-server.md
 - docs/adr/0015-breaking-changes-accepted-through-git.md
-- src/adops/application/accept_schema.py (accept_schema saves straight to the snapshot store and makes dropped columns nullable)
-- src/adops/interface/accept_schema_command.py
-- src/adops/application/run_pipeline.py (PlannedStep._raise_if_breaking, BreakingChangeError, run_pipeline, FingerprintSavingStep)
-- src/adops/infrastructure/schema_snapshot_store.py (_adops_schema_snapshots table)
-- src/adops/application/ports.py (SchemaSnapshotStore, StepFingerprintStore, StepReport, Orchestrator)
-- src/adops/domain/schema_snapshot.py and src/adops/domain/branch_environment.py (step_fingerprint, first_changed_step, saves_stage_fingerprint)
-- src/adops/interface/validate_command.py (validate_project Report, which acceptance needs to call)
-- adops.interface.server and the Dagster Definitions builder from horizon 7 (src/adops/interface/server*, src/adops/infrastructure/dagster_*)
-- src/adops/templates/demo/ (docker-compose.yml server profile, Dockerfile, dagster.yaml, adops.yaml with dev+stage only) and src/adops/templates/plain/
-- tests/e2e/test_demo_sync.py (stack fixture, horizon-7 server scenario) and tests/unit/interface/test_init_command.py
-- docs/roadmaps/agentic-dataops/decisions.md (horizon-2 accept-schema line to supersede; horizon-6 fingerprint lines) and blockers.md
+- docs/adr/0006-branch-environments-as-warehouse-schemas.md
+- docs/adr/0002-assistant-driven-via-mcp.md and docs/adr/0009-assistant-acts-only-in-dev-and-branch-environments.md
+- src/adops/templates/github/workflows/ (adops-pull-request.yml, adops-stage.yml, adops-prod.yml, as built in horizon 8)
+- src/adops/infrastructure/warehouse_lock.py
+- src/adops/interface/run_command.py (run_project, run_in_environment, _run_branch, --all, RUN_ERRORS)
+- src/adops/interface/server.py and src/adops/infrastructure/dagster_server.py
+- src/adops/templates/server/dagster.yaml (QueuedRunCoordinator max_concurrent_runs: 1, no run_monitoring)
+- src/adops/application/accept_schema.py and src/adops/interface/accept_schema_command.py
+- src/adops/application/run_pipeline.py (PlannedStep._raise_if_breaking) and src/adops/infrastructure/schema_snapshot_store.py
+- src/adops/domain/branch_environment.py (branch_environment_name, hashing of long names only)
+- tests/e2e/conftest.py, tests/e2e/test_demo_sync.py, tests/e2e/test_server.py
+- docs/playbooks/promotion.md and docs/roadmaps/agentic-dataops/blockers.md

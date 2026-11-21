@@ -5,9 +5,10 @@ import typer
 
 from adops.application.drop_branch import BranchState, DroppedBranch, WarehouseSchemas
 from adops.application.drop_branch import drop_branch as drop_branch_environment
-from adops.application.ports import WarehouseUnreachable
+from adops.application.ports import WarehouseLocked, WarehouseUnreachable
 from adops.application.run_pipeline import stage_environment
 from adops.application.secrets import MissingSecretError
+from adops.domain.branch_environment import STAGE
 from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import load_project_settings
 from adops.infrastructure.warehouse_schemas import LocalBranchState, WarehouseSchemaAdmin
@@ -28,7 +29,7 @@ def drop_branch(
         dropped = drop_project_branch(project.resolve(), branch)
     except PipelineValidationError as error:
         fail(*error.problems)
-    except (ProjectFileError, MissingSecretError) as error:
+    except (ProjectFileError, MissingSecretError, WarehouseLocked) as error:
         fail(str(error))
     except WarehouseUnreachable:
         fail(f"Branch {branch}: stage's Warehouse is unreachable or locked by another process")
@@ -46,13 +47,16 @@ def drop_branch(
 def drop_project_branch(project: Path, branch: str) -> DroppedBranch:
     settings_text = run_command.read_settings(project)
     stage = stage_environment(load_project_settings(settings_text).environments)
-    return drop_branch_environment(
-        settings_text,
-        branch,
-        run_command.project_env(project),
-        build_warehouse_schemas(project, stage.warehouse.type),
-        build_branch_state(project),
-    )
+    env = run_command.project_env(project)
+    warehouse = run_command.resolve_environment_warehouse(stage, env)
+    with run_command.build_warehouse_lock(warehouse, project, STAGE):
+        return drop_branch_environment(
+            settings_text,
+            branch,
+            env,
+            build_warehouse_schemas(project, stage.warehouse.type),
+            build_branch_state(project),
+        )
 
 
 def build_warehouse_schemas(project: Path, warehouse_kind: str) -> WarehouseSchemas:

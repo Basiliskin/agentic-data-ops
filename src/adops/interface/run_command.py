@@ -1,6 +1,6 @@
 import os
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, NoReturn
@@ -20,14 +20,18 @@ from adops.application.ports import (
     RunResult,
     SchemaSnapshotStore,
     StepFingerprintStore,
+    StepReport,
     StepStatus,
     Sync,
     Transform,
     TransformResult,
+    WarehouseLocked,
+    WarehouseUnreachable,
 )
 from adops.application.run_pipeline import (
     StageNotRunError,
     StepFingerprinting,
+    WarehouseUnreachableError,
     pick_environment,
     plan_branch_run,
     run_pipeline,
@@ -58,6 +62,7 @@ from adops.infrastructure.dlt_sync import DltSync
 from adops.infrastructure.postgres_reverse_sync import PostgresReverseSync
 from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
 from adops.infrastructure.step_fingerprint_store import ProjectTree, WarehouseFingerprintStore
+from adops.infrastructure.warehouse_lock import warehouse_lock
 
 SETTINGS_FILE = Path("adops.yaml")
 PIPELINES_DIR = Path("pipelines")
@@ -78,6 +83,7 @@ RUN_ERRORS = (
     MissingSecretError,
     JobCompileError,
     StageNotRunError,
+    WarehouseLocked,
 )
 
 
@@ -147,6 +153,12 @@ def build_project_files(project: Path) -> ProjectFiles:
     return ProjectTree(project)
 
 
+def build_warehouse_lock(
+    warehouse: ResolvedWarehouse, project: Path, environment: str
+) -> AbstractContextManager[None]:
+    return warehouse_lock(warehouse, project, environment)
+
+
 @dataclass(frozen=True)
 class StepTransforms:
     """One Transform per Step, because each Step of a Branch run reads its own raw schemas."""
@@ -179,7 +191,13 @@ def warehouse_kind(settings_text: str, environment: str) -> str:
 
 
 def run(
-    pipeline: Annotated[str, typer.Argument(help="Pipeline name (pipelines/<name>.yaml).")],
+    pipeline: Annotated[
+        str | None, typer.Argument(help="Pipeline name (pipelines/<name>.yaml).")
+    ] = None,
+    run_all: Annotated[
+        bool,
+        typer.Option("--all", help="Run every Pipeline in name order; stop at the first failure."),
+    ] = False,
     env: Annotated[
         str | None, typer.Option("--env", help="Environment from adops.yaml [default: dev].")
     ] = None,
@@ -207,8 +225,33 @@ def run(
             "cannot be combined with --env: a Branch Environment always derives from stage",
             param_hint="'--branch'",
         )
+    root = project.resolve()
+    if run_all:
+        if pipeline is not None:
+            raise typer.BadParameter(
+                "cannot be combined with a Pipeline name", param_hint="'--all'"
+            )
+        names = [path.stem for path in pipeline_files(root)]
+        if not names:
+            fail(f"No Pipelines in {PIPELINES_DIR}/")
+    elif pipeline is None:
+        raise typer.BadParameter(
+            "give a Pipeline name, or --all to run every Pipeline", param_hint="'PIPELINE'"
+        )
+    else:
+        names = [pipeline]
+    for name in names:
+        _run_one(root, name, env or "dev", branch)
+
+
+def pipeline_files(project: Path) -> list[Path]:
+    """pipelines/*.yaml in name order: the order `adops run --all` and the Server both use."""
+    return sorted((project / PIPELINES_DIR).glob("*.yaml"))
+
+
+def _run_one(project: Path, pipeline: str, env: str, branch: str | None) -> None:
     try:
-        result = run_project(project.resolve(), pipeline, env or "dev", branch)
+        result = run_project(project, pipeline, env, branch)
     except RUN_ERRORS as error:
         fail(*error_lines(error))
     except Exception as error:
@@ -244,24 +287,32 @@ def _dagster_environ(project: Path) -> dict[str, str]:
 def run_in_environment(
     project: Path, pipeline: str, environment: str, orchestrator: Orchestrator
 ) -> RunResult:
-    """Run a Pipeline in a named Environment, reading the Project files and .env at call time."""
+    """Run a Pipeline in a named Environment, holding its Warehouse lock for the whole run.
+
+    The Project files and .env are read at call time.
+    """
     settings_text, pipeline_text = read_project_files(project, pipeline)
     env = project_env(project)
     chosen = pick_environment(load_project_settings(settings_text).environments, environment)
     kind = chosen.warehouse.type
-    return run_pipeline(
-        pipeline_text,
-        settings_text,
-        environment,
-        env,
-        build_sync(project, pipeline, environment, kind),
-        build_snapshot_store(project, environment, kind),
-        build_clock(),
-        orchestrator,
-        build_transform(project, kind),
-        build_reverse_sync(project, environment, kind),
-        _fingerprinting(project, environment, chosen, env),
-    )
+    warehouse = resolve_environment_warehouse(chosen, env)
+
+    def run() -> RunResult:
+        return run_pipeline(
+            pipeline_text,
+            settings_text,
+            environment,
+            env,
+            build_sync(project, pipeline, environment, kind),
+            build_snapshot_store(project, environment, kind),
+            build_clock(),
+            orchestrator,
+            build_transform(project, kind),
+            build_reverse_sync(project, environment, kind),
+            _fingerprinting(project, environment, kind, warehouse),
+        )
+
+    return _holding_lock(project, environment, warehouse, pipeline_text, environment, run)
 
 
 def _run_branch(
@@ -273,9 +324,30 @@ def _run_branch(
     env: Mapping[str, str],
 ) -> RunResult:
     stage = stage_environment(load_project_settings(settings_text).environments)
-    kind = stage.warehouse.type
     name = stage_branch_name(stage, branch)
-    fingerprinting = _fingerprinting(project, STAGE, stage, env)
+    warehouse = resolve_environment_warehouse(stage, env)
+
+    def run() -> RunResult:
+        return _run_branch_locked(
+            project, pipeline, name, stage, warehouse, settings_text, pipeline_text, env
+        )
+
+    # A Branch Environment lives in stage's Warehouse, so it shares stage's lock.
+    return _holding_lock(project, STAGE, warehouse, pipeline_text, name, run)
+
+
+def _run_branch_locked(
+    project: Path,
+    pipeline: str,
+    name: str,
+    stage: Environment,
+    warehouse: ResolvedWarehouse,
+    settings_text: str,
+    pipeline_text: str,
+    env: Mapping[str, str],
+) -> RunResult:
+    kind = stage.warehouse.type
+    fingerprinting = _fingerprinting(project, STAGE, kind, warehouse)
     plan = plan_branch_run(pipeline_text, name, fingerprinting)
     layout = SchemaLayout.for_branch(name)
     steps = load_pipeline(pipeline_text).steps
@@ -309,13 +381,44 @@ def _run_branch(
     )
 
 
-def _fingerprinting(
-    project: Path, environment: str, settings: Environment, env: Mapping[str, str]
-) -> StepFingerprinting:
+def _holding_lock(
+    project: Path,
+    lock_environment: str,
+    warehouse: ResolvedWarehouse,
+    pipeline_text: str,
+    environment: str,
+    run: Callable[[], RunResult],
+) -> RunResult:
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(build_warehouse_lock(warehouse, project, lock_environment))
+        except WarehouseUnreachable:
+            return _warehouse_unreachable(pipeline_text, environment)
+        return run()
+
+
+def _warehouse_unreachable(pipeline_text: str, environment: str) -> RunResult:
+    """Reported as the first Step's failure, as a Sync would, so the Server retries it."""
+    pipeline = load_pipeline(pipeline_text)
+    first, *rest = pipeline.steps
+    error = WarehouseUnreachableError(pipeline.name, first.name)
+    failed = StepReport(first.name, StepStatus.FAILED, error=str(error), retryable=True)
+    skipped = (StepReport(step.name, StepStatus.SKIPPED) for step in rest)
+    return RunResult(pipeline.name, environment, (failed, *skipped))
+
+
+def resolve_environment_warehouse(
+    settings: Environment, env: Mapping[str, str]
+) -> ResolvedWarehouse:
     secrets = resolve_secret_references(env, secret_references(settings.warehouse, ()))
-    warehouse = resolve_warehouse(settings.warehouse, secrets)
+    return resolve_warehouse(settings.warehouse, secrets)
+
+
+def _fingerprinting(
+    project: Path, environment: str, kind: str, warehouse: ResolvedWarehouse
+) -> StepFingerprinting:
     return StepFingerprinting(
-        build_fingerprint_store(project, environment, settings.warehouse.type, warehouse),
+        build_fingerprint_store(project, environment, kind, warehouse),
         build_project_files(project),
     )
 

@@ -1,0 +1,827 @@
+# Horizon 8 — GitHub Actions Promotion
+
+## 🎯 What are we trying to achieve?
+
+`adops init` (plain and `--demo`) will write three GitHub Actions workflows into every Project, so Promotion happens through Git without the user touching a Server. A pull request builds its Branch Environment (its own schemas in the stage Warehouse) and drops it when closed. A merge to `main` deploys to stage, and a published release deploys to prod after a reviewer approves. A new `adops run --all` keeps each workflow step one line, and a Warehouse lock stops overlapping runs from colliding.
+
+## 🧠 Why does this change need to happen?
+
+Today Branch Environments are built and dropped only by hand, and nothing deploys a merged change to stage or a release to prod. A GitHub-hosted runner cannot see a stage Warehouse that is a localhost Postgres or a DuckDB file on the Server machine, and putting Warehouse passwords into GitHub is what ADR-0014 tried to avoid. Nothing stops a PR run, a deploy and a scheduled Server run from writing to the same Warehouse at once, and DuckDB allows only one writer.
+
+**At a glance**
+
+- Phases: 6
+- Complexity: Medium — six small/medium phases, one heal round with no blockers, but real security edges (self-hosted runner, fork PRs, branch-name injection)
+- Main risk: a self-hosted runner holds the Server's secrets. The workflow's fork check is not a security boundary, so safety depends on GitHub's fork-approval setting, which adops cannot enforce
+- Target: 100% line+branch coverage kept; the Docker E2E stays inside its 20-minute job
+- Testing focus: parsing generated YAML (job routing, no `${ }` in scripts, no secrets, step order), lock exclusion and timeout with an injected clock, and a two-process E2E overlap case on Postgres and DuckDB
+
+## Order of work
+
+```
+Phase 1 — Add --all option to adops run
+        ↓  (Phase 2 needs: nothing)
+Phase 2 — Add Warehouse lock for Postgres and DuckDB
+        ↓  (Phase 3 needs: Add Warehouse lock for Postgres and DuckDB)
+Phase 3 — Take the Warehouse lock on every Warehouse run
+        ↓  (Phase 4 needs: Add --all option to adops run, Take the Warehouse lock on every Warehouse run)
+Phase 4 — Add generated pull request workflow to adops init
+        ↓  (Phase 5 needs: Add generated pull request workflow to adops init)
+Phase 5 — Add generated stage and prod deploy workflows
+        ↓  (Phase 6 needs: Add generated stage and prod deploy workflows)
+Phase 6 — Document Promotion setup and record its decisions
+```
+
+```mermaid
+graph TD
+  add_run_all["Add --all option to adops run (add-run-all)"]
+  add_warehouse_lock_adapters["Add Warehouse lock for Postgres and DuckDB (add-warehouse-lock-adapters)"]
+  take_lock_on_every_run["Take the Warehouse lock on every Warehouse run (take-lock-on-every-run)"]
+  generate_pull_request_workflow["Add generated pull request workflow to adops init (generate-pull-request-workflow)"]
+  generate_stage_and_prod_workflows["Add generated stage and prod deploy workflows (generate-stage-and-prod-workflows)"]
+  document_promotion_setup["Document Promotion setup and record its decisions (document-promotion-setup)"]
+  add_warehouse_lock_adapters --> take_lock_on_every_run
+  add_run_all --> generate_pull_request_workflow
+  take_lock_on_every_run --> generate_pull_request_workflow
+  generate_pull_request_workflow --> generate_stage_and_prod_workflows
+  generate_stage_and_prod_workflows --> document_promotion_setup
+```
+
+### Phase 1 — Add --all option to adops run
+
+Technical ID: `add-run-all` · adops CLI (run command) · interface · blast radius small
+
+**Goal** — `adops run --all` runs every Pipeline in the Project in name order and stops with a non-zero exit at the first failure. It works with --env and with --branch, so each generated workflow step can be one plain line.
+
+**Why** — Every generated workflow has to run all Pipelines, and putting a shell loop in each workflow file would leave that logic untested. A single flag keeps the workflows short, and the logic is unit-tested at 100% coverage.
+
+**Changes**
+- Change run()'s positional `pipeline` (run_command.py:182) to `str | None = None` and add an `--all` bool option with help text 'Run every Pipeline in name order; stop at the first failure.'
+- Reject a Pipeline name together with --all, and reject neither of them, with typer.BadParameter and a plain message. Keep the existing --env/--branch conflict check as it is.
+- When --all is set, list pipelines/*.yaml sorted by name (the same rule server._pipelines uses at server.py:66-68). Exit 1 with 'No Pipelines in pipelines/' when there are none. Call run_project for each Pipeline in turn, print each result as today, and stop at the first failed result, exiting through fail().
+- Pass --env or --branch through unchanged to every run_project call, so `--all --branch <b>` keeps deferring unchanged Steps to stage for each Pipeline exactly as `--branch` does now.
+- Add unit tests for: name order, stop at the first failure (later Pipelines are not run), --all with --env, --all with --branch, name plus --all rejected, neither given rejected, and an empty pipelines/ folder. Update the CLI help tests in test_cli.py.
+
+**Files / areas**
+- `src/adops/interface/run_command.py`
+- `tests/unit/interface/test_run_command.py`
+- `tests/unit/interface/test_cli.py`
+
+**How to verify**
+- **Name order and stop at first failure** — In tests/unit/interface/test_run_command.py, a test creates at least three Pipeline files whose creation order differs from name order (for example c.yaml, a.yaml, b.yaml) and asserts run_project was called in the order a, b, c
+- **Pipeline name versus --all argument rules** — A test runs `adops run my_pipeline --all` through the CLI runner and asserts a non-zero exit, a message naming the conflict, and that run_project was not called
+- **--env and --branch reach every Pipeline unchanged** — A test of `adops run --all --env stage` with two Pipelines asserts both run_project calls received environment 'stage'
+
+**Done when** — `adops run --all [--env X | --branch B]` runs every Pipeline in name order and stops at the first failure, covered by unit tests at 100% line and branch coverage., and every check under *How to verify* passes its bar.
+
+**Depends on** — nothing — can start immediately
+
+**Guards**
+- g1: new code is ruff clean (line length 100, import order).
+- g2: every new branch (both/neither given, empty folder, first-failure stop) has a unit test, so coverage stays at 100% with no exclusions.
+- g7: no pragma: no cover. Error output still goes through the existing error_lines/fail helpers, which redact secrets.
+
+<details><summary>Reference — full rubric</summary>
+
+#### Name order and stop at first failure (`run-all-order-and-first-failure-stop`, minScore 7)
+
+`adops run --all` runs every pipelines/*.yaml in the same sorted-by-name order the Server uses (server._pipelines), and the first failed result ends the loop with a non-zero exit so no later Pipeline runs. 10 = order, stop and exit code are all proven by tests that would fail if any one broke; 8 = expected competent implementation; 7 = acceptable.
+
+Pass criteria:
+- In tests/unit/interface/test_run_command.py, a test creates at least three Pipeline files whose creation order differs from name order (for example c.yaml, a.yaml, b.yaml) and asserts run_project was called in the order a, b, c
+- A test makes the second of three Pipelines fail and asserts the third Pipeline's run_project was never called and the CLI exit code is 1
+- The failure test asserts the first (successful) Pipeline's result was still printed before the failure output
+- The sorting in run_command.py uses the same rule as server.py's _pipelines (same glob and sort key), or both call one shared helper, so the two cannot drift
+- `uv run adops run --help` output (checked in test_cli.py) shows the --all option with the text 'Run every Pipeline in name order; stop at the first failure.'
+
+Failure examples:
+- Plausible: the loop uses Path.glob without sorted(), so tests pass on the developer's filesystem order but the order is not guaranteed
+- Plausible: the loop collects all results and fails at the end, so every Pipeline runs even after the first failure
+- Plausible: the code sorts by full path or includes non-.yaml files (for example a README or .yml file) that the Server ignores
+- The exit code after a failed Pipeline is 0 because the loop returns normally
+
+#### Pipeline name versus --all argument rules (`run-all-argument-validation`, minScore 7)
+
+Giving both a Pipeline name and --all, or neither, is rejected with a plain typer.BadParameter message before anything runs; an empty pipelines/ folder exits 1 with 'No Pipelines in pipelines/'; the existing --env/--branch conflict check still fires with --all. 10 = every combination is tested and messages are exact; 8 = expected; 7 = acceptable.
+
+Pass criteria:
+- A test runs `adops run my_pipeline --all` through the CLI runner and asserts a non-zero exit, a message naming the conflict, and that run_project was not called
+- A test runs `adops run` with no name and no --all and asserts a non-zero exit with a plain message and no run_project call
+- A test with an existing but empty pipelines/ folder asserts exit 1 and the exact text 'No Pipelines in pipelines/'
+- A test with --all --env stage --branch x asserts the existing --env/--branch conflict error still appears
+- No error path in the new code prints a raw Python traceback; output goes through the existing fail()/error_lines helpers
+
+Failure examples:
+- Plausible: a missing pipelines/ folder (not just an empty one) raises FileNotFoundError with a traceback instead of the 'No Pipelines' message
+- Plausible: the neither-given case falls through and crashes with a TypeError on None.endswith or similar
+- Plausible: the --env/--branch conflict check is moved after the --all branch and is skipped when --all is set
+
+#### --env and --branch reach every Pipeline unchanged (`run-all-flag-passthrough`, minScore 7)
+
+Every run_project call inside the --all loop receives the same --env or --branch value the user passed, so `--all --branch b` defers unchanged Steps to stage for each Pipeline exactly as a single `--branch` run does. 10 = asserted per call for both flags plus the default; 8 = expected; 7 = acceptable.
+
+Pass criteria:
+- A test of `adops run --all --env stage` with two Pipelines asserts both run_project calls received environment 'stage'
+- A test of `adops run --all --branch feat-x` with two Pipelines asserts both run_project calls received branch 'feat-x' and no environment override
+- A test of `adops run --all` with no flag asserts each call gets the same default Environment a single-Pipeline run gets
+- A single-Pipeline `adops run <name>` test still passes unchanged, showing the positional path was not broken
+
+Failure examples:
+- Plausible: only the first Pipeline gets the branch argument because the loop rebuilds the call arguments from defaults
+- Plausible: --all with --branch routes to run_in_environment instead of _run_branch, so branch deferral silently stops working
+- Plausible: the default Environment differs between --all and single-Pipeline runs because a new default was hard-coded in the loop
+
+Healer hint: The usual miss is an untested edge (missing pipelines/ folder, neither-argument case, or the stop-at-first-failure assertion that later Pipelines were never called); add one CLI-runner test per branch and assert run_project call order and count with a mock.
+
+</details>
+
+### Phase 2 — Add Warehouse lock for Postgres and DuckDB
+
+Technical ID: `add-warehouse-lock-adapters` · Warehouse access (run safety) · infrastructure · blast radius small
+
+**Goal** — Add one infrastructure module that holds an exclusive Warehouse lock for the length of a `with` block. On Postgres it is a session-level advisory lock on its own connection. On DuckDB it is an OS file lock (fcntl.flock) on '<warehouse file>.lock'. It waits up to a timeout, then raises a sanitized WarehouseLocked error.
+
+**Why** — Today nothing stops a PR branch run, a stage run and a Server scheduled run from writing to the stage Warehouse at the same time, and DuckDB only allows one writer. This phase builds the lock mechanism by itself so its acquire, wait, timeout and release behaviour can be tested before anything relies on it. The repo has no file-lock code yet.
+
+**Changes**
+- Add a `WarehouseLocked` exception to application/ports.py next to WarehouseUnreachable (ports.py:52). Its message names only the Environment and the wait time, never a DSN or file path. It uses stdlib only.
+- Create infrastructure/warehouse_lock.py with a context manager `warehouse_lock(warehouse: ResolvedWarehouse, project_dir, environment, timeout=DEFAULT_LOCK_TIMEOUT, poll=..., sleep=time.sleep, monotonic=time.monotonic)`. It chooses the lock kind from ResolvedConnection versus ResolvedDuckDb. DEFAULT_LOCK_TIMEOUT is a fixed 30 minutes, with no env var or flag.
+- Postgres: open a dedicated autocommit psycopg connection from the ResolvedConnection fields, the same way postgres_reverse_sync._connected does. Poll `pg_try_advisory_lock(<fixed adops key>)` until it succeeds or the timeout passes. On exit, unlock and close in a finally block. Map psycopg.Error to WarehouseUnreachable without the DSN.
+- DuckDB: resolve the path with dlt_sync.duckdb_file(project_dir, path) and append '.lock'. Create the parent folder if it is missing, open the file and poll fcntl.flock(LOCK_EX | LOCK_NB) until the timeout. Release it in a finally block. Because flock belongs to the open file, a lock held by a process that crashed clears by itself, so the code does not check whether the file exists.
+- Unit-test both kinds with an injected clock and sleep, so no test really waits: acquire and release; a second holder waits and then gets the lock; a timeout raises WarehouseLocked whose message has no path or DSN; the lock is released when the block raises. For the DuckDB kind use two file handles. For the Postgres kind use ADOPS_TEST_POSTGRES_DSN, as the existing infrastructure tests do.
+
+**Files / areas**
+- `src/adops/infrastructure/warehouse_lock.py`
+- `src/adops/application/ports.py`
+- `tests/unit/infrastructure/test_warehouse_lock.py`
+
+**How to verify**
+- **Lock really excludes a second holder on Postgres and DuckDB** — tests/unit/infrastructure/test_warehouse_lock.py has a DuckDB test that holds the lock and shows a second warehouse_lock on the same file polls (fake sleep is called) and gets the lock only after the first block exits
+- **Timeout, release on exception, and no real waiting** — A test with a fake monotonic that jumps past the timeout asserts WarehouseLocked is raised and that the fake sleep was called with the poll interval, with no real time.sleep (the test file runs in well under a second)
+- **Sanitized errors and correct layer placement** — A test asserts str(WarehouseLocked) from a DuckDB timeout contains the Environment name and the minutes, and does not contain the lock file path or the Warehouse file name
+
+**Done when** — src/adops/infrastructure/warehouse_lock.py: a tested warehouse_lock context manager that serializes holders on Postgres and DuckDB and raises a sanitized WarehouseLocked on timeout., and every check under *How to verify* passes its bar.
+
+**Depends on** — nothing — can start immediately
+
+**Guards**
+- g2: the timeout, wait-then-acquire and release-on-exception branches are each unit-tested with an injected clock, so coverage stays at 100%.
+- g6: application/ports.py gains only a plain Exception subclass with stdlib imports. psycopg and fcntl stay in infrastructure.
+- g7: no pragma: no cover. Exceptions and messages never include the DSN or the lock file path.
+- g1: ruff clean.
+
+**Rollback** — Delete warehouse_lock.py and the WarehouseLocked exception. Nothing calls them until the next phase.
+
+<details><summary>Reference — full rubric</summary>
+
+#### Lock really excludes a second holder on Postgres and DuckDB (`lock-mutual-exclusion-both-kinds`, minScore 8)
+
+While one warehouse_lock block is held, a second holder on the same Warehouse cannot enter until the first exits, for both a ResolvedConnection (Postgres advisory lock on its own connection) and a ResolvedDuckDb (fcntl.flock on '<file>.lock'). 10 = proven with two real holders for each kind, plus a test that two different Warehouses do not block each other; 8 = expected; 7 = acceptable.
+
+Pass criteria:
+- tests/unit/infrastructure/test_warehouse_lock.py has a DuckDB test that holds the lock and shows a second warehouse_lock on the same file polls (fake sleep is called) and gets the lock only after the first block exits
+- The DuckDB test uses two separate open file handles (two warehouse_lock calls), not a mocked flock, so real flock semantics are exercised
+- A Postgres test against ADOPS_TEST_POSTGRES_DSN holds the lock and shows a second warehouse_lock with a tiny timeout raises WarehouseLocked, and succeeds after the first exits
+- The Postgres lock uses a dedicated autocommit connection that stays open for the whole block (grep warehouse_lock.py for autocommit and for the connection being closed in finally)
+- The DuckDB lock file path is the resolved Warehouse file path plus '.lock' (from dlt_sync.duckdb_file), and the test asserts the parent folder is created when it is missing
+
+Failure examples:
+- Plausible: the Postgres lock uses pg_try_advisory_xact_lock or runs inside a transaction that ends immediately, so the lock is released before the with-block body runs
+- Plausible: the DuckDB test mocks fcntl.flock entirely, so a wrong flag (LOCK_SH, or missing LOCK_NB causing an endless block) is never caught
+- Plausible: the lock path is built from the raw relative adops.yaml path instead of the resolved one, so a CLI run and a Server run (different cwd) lock different files
+- Plausible: the lock file's parent folder (.adops/) does not exist on a fresh Project and open() raises FileNotFoundError
+
+#### Timeout, release on exception, and no real waiting (`lock-timeout-and-release-safety`, minScore 8)
+
+The lock waits up to DEFAULT_LOCK_TIMEOUT (a fixed 30 minutes) using the injected monotonic and sleep, then raises WarehouseLocked; it is always released and its connection or file closed when the block raises; and a failure to acquire leaves nothing open. 10 = every path tested with an injected clock and the suite has no real sleeps; 8 = expected; 7 = acceptable.
+
+Pass criteria:
+- A test with a fake monotonic that jumps past the timeout asserts WarehouseLocked is raised and that the fake sleep was called with the poll interval, with no real time.sleep (the test file runs in well under a second)
+- A test raises an exception inside the with-block and asserts a second warehouse_lock on the same Warehouse then succeeds immediately (lock released)
+- For Postgres, a test asserts the connection is closed after a timeout and after an in-block exception (for example pg_stat_activity shows no extra adops session, or a fake connection's close() was called)
+- DEFAULT_LOCK_TIMEOUT in warehouse_lock.py equals 30 minutes in seconds and is not read from an environment variable or flag (grep shows no os.environ near it)
+- The timeout check uses the injected monotonic, not time.time, so a wall-clock change cannot shorten or lengthen the wait
+
+Failure examples:
+- Plausible: the release lives after the yield instead of in a finally, so an exception in the run leaves the DuckDB file locked until the process exits
+- Plausible: on timeout the Postgres connection opened for polling is never closed, leaking one connection per failed attempt
+- Plausible: the timeout comparison is off by one poll (checks after sleeping), so with a 0 timeout it still sleeps once
+- Plausible: the default parameter captures time.sleep at import so tests patch the wrong name and really wait
+
+#### Sanitized errors and correct layer placement (`lock-errors-are-sanitized-and-layered`, minScore 8)
+
+WarehouseLocked lives in application/ports.py as a plain stdlib Exception whose message names only the Environment and the wait time; psycopg errors map to WarehouseUnreachable without a DSN; psycopg and fcntl are imported only in infrastructure. 10 = sanitization asserted for every raise site including str(), repr() and __cause__; 8 = expected; 7 = acceptable.
+
+Pass criteria:
+- A test asserts str(WarehouseLocked) from a DuckDB timeout contains the Environment name and the minutes, and does not contain the lock file path or the Warehouse file name
+- A test asserts the Postgres timeout message and a psycopg.Error mapped to WarehouseUnreachable contain no host, user, password or DSN text from the test DSN
+- The raised exceptions use `from None` (or the test asserts __cause__/__context__ carries no DSN), so a traceback cannot print the DSN
+- `grep -n 'import psycopg\|import fcntl' src/adops/application/` returns nothing
+- application/ports.py's WarehouseLocked definition has no new non-stdlib import
+
+Failure examples:
+- Plausible: the message is sanitized but the exception is raised with `from exc`, so the chained psycopg error with the DSN prints in the traceback
+- Plausible: WarehouseLocked's __init__ stores the lock path as an attribute and its repr shows it
+- Plausible: the DuckDB message says 'could not lock /srv/project/.adops/warehouse.duckdb.lock', leaking the server path
+
+Healer hint: The most likely failure is a Postgres lock that is not held for the whole block (transaction-scoped lock or connection not autocommit) or a release that is not in finally; use a dedicated autocommit connection with pg_try_advisory_lock, unlock and close in finally, and prove it with a real second holder in the test.
+
+</details>
+
+### Phase 3 — Take the Warehouse lock on every Warehouse run
+
+Technical ID: `take-lock-on-every-run` · adops CLI and Server run paths · interface · blast radius medium
+
+**Goal** — Wrap every code path that touches a Warehouse in warehouse_lock: `adops run` on an Environment (which the Server's scheduled runs also use), `adops run --branch` (locks stage's Warehouse), and `adops drop-branch` (locks stage's Warehouse). Overlapping runs on the same Warehouse then wait for each other instead of colliding. A lock timeout is a clear, sanitized, non-retried failure.
+
+**Why** — The lock only helps if every writer takes it, including the Server's scheduled runs, which skip the CLI entry point and call run_in_environment directly. Taking the lock at the three shared call sites covers branch, stage, prod, drop-branch and scheduled runs in one place.
+
+**Changes**
+- In run_command.run_in_environment (:244) resolve the Environment's Warehouse with the existing secret-resolving path (as _fingerprinting does at :312-320) and run the Pipeline inside warehouse_lock(...). In _run_branch (:267) take the lock on stage's Warehouse. Add a `build_warehouse_lock` factory next to the other build_* helpers so tests can swap in a fake.
+- In drop_branch_command.drop_project_branch (:46) take the lock on stage's Warehouse around the drop.
+- Add WarehouseLocked to RUN_ERRORS (:75) and to drop_branch_command's except list (:29-37). Print 'Another run is using the <env> Warehouse; gave up after <n> minutes.' with no path or DSN.
+- In server._runner (:71-83) a WarehouseLocked becomes a FAILED StepReport that is not retryable and alerts like any other failure. Add a code comment that a Server run waiting for the lock holds the single run slot (max_concurrent_runs: 1). This is accepted behaviour.
+- Unit-test that each of the three call sites takes and releases the lock (also when the run fails), and that a lock timeout gives the sanitized message and exit 1 for run, drop-branch and a Server run (not retryable).
+- Add one E2E case to tests/e2e/test_demo_sync.py, parametrized over [postgres, duckdb] with the existing demo fixture. Start two `adops run --env stage` processes with Popen and assert from their start and end timestamps that they did not overlap and that both succeeded. Record the new E2E runtime against the 20-minute limit in state.md (a step inside this phase).
+- Record in decisions.md that a Server is a Linux host, because flock is not reliably shared across a Docker Desktop for macOS bind mount, so macOS is not a supported Server for the DuckDB lock.
+- The lock is taken per Pipeline run, not around the whole `adops run --all` loop: another run may take the lock between two Pipelines of a deploy. Record this as a decisions.md line (user choice, 2026-11-21).
+
+**Files / areas**
+- `src/adops/interface/run_command.py`
+- `src/adops/interface/drop_branch_command.py`
+- `src/adops/interface/server.py`
+- `tests/unit/interface/test_run_command.py`
+- `tests/unit/interface/test_drop_branch_command.py`
+- `tests/unit/interface/test_server.py`
+- `tests/e2e/test_demo_sync.py`
+- `docs/roadmaps/agentic-dataops/decisions.md`
+
+**How to verify**
+- **All four run paths lock the right Warehouse** — test_run_command.py has a test with a fake build_warehouse_lock asserting run_in_environment enters the lock with the named Environment's resolved Warehouse before run_project's Warehouse work and exits it after
+- **Lock timeout is a sanitized, non-retried failure everywhere** — A test of `adops run --env stage` with a fake lock raising WarehouseLocked asserts exit 1 and the output contains 'Another run is using the stage Warehouse; gave up after' and no file path or DSN
+- **Real two-process overlap test on both Warehouse kinds** — `uv run pytest tests/e2e -m e2e -k overlap` (or the new test's name) runs two cases, one for postgres and one for duckdb, and both pass
+
+**Done when** — Every Warehouse-touching run path (run --env, run --branch, drop-branch, Server scheduled run) holds the Warehouse lock, shown by unit tests and an E2E overlap case on both Warehouse kinds., and every check under *How to verify* passes its bar.
+
+**Depends on** — Add Warehouse lock for Postgres and DuckDB
+
+**Guards**
+- g2: lock-taken, lock-released-on-failure and timeout paths are unit-tested at each call site with a fake lock factory.
+- g4: adds one two-process overlap case per Warehouse kind on the shared module-scoped demo fixture. The phase records the measured E2E runtime and keeps it well under 20 minutes.
+- g7: secrets are still read inside the run worker by closure. The lock error message names only the Environment, and no pragma is added.
+- g1: ruff clean.
+
+**Rollback** — Remove the warehouse_lock wrapping from the three call sites and the RUN_ERRORS entry. Runs go back to having no locking.
+
+<details><summary>Reference — full rubric</summary>
+
+#### All four run paths lock the right Warehouse (`every-warehouse-path-takes-lock`, minScore 8)
+
+`adops run --env X`, `adops run --branch B` (stage Warehouse), `adops drop-branch` (stage Warehouse) and a Server scheduled run (which calls run_in_environment directly) each run inside warehouse_lock on the correct Warehouse, and release it when the run fails. 10 = each path tested for the right Warehouse and the release-on-failure case, and no Warehouse-touching call sits outside the lock; 8 = expected; 7 = acceptable.
+
+Pass criteria:
+- test_run_command.py has a test with a fake build_warehouse_lock asserting run_in_environment enters the lock with the named Environment's resolved Warehouse before run_project's Warehouse work and exits it after
+- A test of the --branch path asserts the lock is taken on stage's Warehouse, not dev's or the default Environment's
+- test_drop_branch_command.py asserts drop_project_branch takes the lock on stage's Warehouse around the schema drop
+- test_server.py asserts a scheduled Server run goes through the locked path (the fake lock is entered once per Pipeline run)
+- For each of the three call sites a test makes the run raise and asserts the fake lock's exit was still called
+- The lock is resolved with the secret-resolving path inside the run worker, and no secret value is passed through Dagster run config (grep the new code for run_config additions)
+
+Failure examples:
+- Plausible: the lock is added in the CLI run() function rather than in run_in_environment, so the Server's scheduled runs bypass it
+- Plausible: --branch takes the lock on the current default Environment's Warehouse instead of stage's, so a branch run and a stage run do not exclude each other
+- Plausible: Warehouse resolution (with secrets) happens outside the lock but fingerprinting or dlt state writes also happen outside it, so part of the run is unprotected
+- Plausible: drop-branch takes the lock only when the branch exists, so the 'nothing to drop' path is untested and a later change skips it
+
+#### Lock timeout is a sanitized, non-retried failure everywhere (`lock-timeout-surfaces-cleanly`, minScore 7)
+
+A WarehouseLocked from any path prints exactly 'Another run is using the <env> Warehouse; gave up after <n> minutes.' with exit 1 on the CLI, and becomes a FAILED, non-retryable StepReport that alerts on the Server. 10 = message, exit code and non-retry asserted for run, drop-branch and Server; 8 = expected; 7 = acceptable.
+
+Pass criteria:
+- A test of `adops run --env stage` with a fake lock raising WarehouseLocked asserts exit 1 and the output contains 'Another run is using the stage Warehouse; gave up after' and no file path or DSN
+- A matching test exists for `adops drop-branch <b>` (lock on stage) with the same message and exit 1
+- A test in test_server.py asserts a WarehouseLocked becomes a FAILED StepReport marked not retryable and that the alert hook is called once
+- WarehouseLocked appears in RUN_ERRORS in run_command.py and in drop_branch_command.py's handled-error list (grep both files)
+- server.py has a code comment at the runner noting a waiting run holds the single run slot (max_concurrent_runs: 1)
+
+Failure examples:
+- Plausible: WarehouseLocked subclasses or is caught as WarehouseUnreachable, so the Server retries it like a network blip and waits another 30 minutes per retry
+- Plausible: drop-branch is not updated and a lock timeout prints a raw traceback
+- Plausible: the message uses the Warehouse's name or file instead of the Environment name, leaking a path
+
+#### Real two-process overlap test on both Warehouse kinds (`e2e-two-process-overlap`, minScore 7)
+
+tests/e2e/test_demo_sync.py has a case parametrized over [postgres, duckdb] that starts two real `adops run --env stage` processes at once and shows from their timestamps that the Warehouse work did not overlap and both succeeded. 10 = timestamps bracket the locked section, both exit codes checked, and runtime stays well inside the 20-minute job; 8 = expected; 7 = acceptable.
+
+Pass criteria:
+- `uv run pytest tests/e2e -m e2e -k overlap` (or the new test's name) runs two cases, one for postgres and one for duckdb, and both pass
+- The test launches both processes with subprocess.Popen before waiting on either, and asserts both return codes are 0
+- The test asserts one process's locked interval ends before the other's begins, using timestamps taken from the runs (process output or recorded start/end), not just total elapsed time
+- The test reuses the existing module-scoped demo fixture and does not start a new Docker stack
+- The whole `uv run pytest tests/e2e -m e2e` suite still completes inside the CI job's 20-minute timeout
+
+Failure examples:
+- Plausible: the test starts the second process only after the first finishes (calls wait() in between), so it passes even with no lock
+- Plausible: the test only asserts both succeeded, which DuckDB-on-Postgres or a fast run would satisfy without any locking
+- Plausible: overlap is judged from process start/end times that include Python start-up, so a tiny real overlap inside the Warehouse is missed or a false failure appears
+- Plausible: only the duckdb case is added because Postgres seemed to handle concurrency already
+
+Healer hint: The likely miss is the Server path: put the lock inside run_in_environment (not the CLI run()) so scheduled runs take it too, and make sure WarehouseLocked is not classified as retryable.
+
+</details>
+
+### Phase 4 — Add generated pull request workflow to adops init
+
+Technical ID: `generate-pull-request-workflow` · Project templates (adops init) · interface · blast radius medium
+
+**Goal** — `adops init` and `adops init --demo` write .github/workflows/adops-pull-request.yml. For a Fork PR (a PR from another repository) it runs only `adops validate` on a GitHub-hosted runner with no secrets and prints a plain skip message. For a same-repo PR it runs `adops validate` and `adops run --all --branch <head branch>` inside the Server image on the self-hosted runner labelled adops-stage, which is a GitHub Actions runner installed on the stage Server machine. When the PR is closed or merged, it runs `adops drop-branch <head branch>` there.
+
+**Why** — A PR needs to build its Branch Environment (its own schemas in the stage Warehouse) and remove it on close, without stage secrets ever going into GitHub. Running these jobs on a runner on the stage Server machine reaches a localhost Postgres or DuckDB file Warehouse with that machine's .env. This phase also adds the shared workflow-writing code to init.
+
+**Changes**
+- Add a template folder src/adops/templates/github/workflows/. Use a name without a leading dot so the wheel build keeps it. Add `_write_workflow_files(project)` to init_command.py, which writes each file to <project>/.github/workflows/ and replaces {{ADOPS_VERSION}} with __version__. Call it from both the demo and the plain branch of init().
+- Write adops-pull-request.yml with `on: pull_request: types [opened, synchronize, reopened, closed]` and top-level `permissions: contents: read`. Pin actions by SHA with the version comment exactly as ci.yml does (actions/checkout@3d3c42e…# v7.0.1). Give branch jobs `concurrency: group adops-branch-<head ref>, cancel-in-progress: false`, so a close waits for an in-flight branch run and never leaves a half-built Branch Environment.
+- Job fork-validate: run when the head repository differs from the base repository and the PR is not closed. Use runs-on ubuntu-latest with no secrets. Install adops from `ADOPS_PACKAGE: ${{ vars.ADOPS_PACKAGE || 'adops=={{ADOPS_VERSION}}' }}` (the same spec as the Server Dockerfile) with pip, run `adops validate`, then echo 'Fork PR: Branch run skipped; a maintainer must run it from a branch in this repository.'
+- Job branch-run: run when it is a same-repo PR and not closed, on runs-on [self-hosted, adops-stage]. Check out the PR. Run `adops validate`, then `adops run --all --branch "$BRANCH"` through `docker compose --project-directory "$ADOPS_SERVER_DIR" --profile server run --rm --no-deps` on the Server service. Mount the PR checkout at /project and the Server folder's .adops/ over /project/.adops, so Branch schemas, dlt state and the lock file are the stage ones. Keep the Server's .env. ADOPS_SERVER_DIR comes from the repository variable `vars.ADOPS_SERVER_DIR`. Add a final `if: always()` step that hands root-owned build output in the checkout back to the runner user, so the next checkout can clean it.
+- Job drop-branch: run when it is a same-repo PR and closed, on [self-hosted, adops-stage], and run `adops drop-branch "$BRANCH"` the same way. In every job the branch name reaches the shell only as `env: BRANCH: ${{ github.event.pull_request.head.ref }}` and is never written as ${{ }} inside a run: script.
+- Unit tests in test_init_command.py parse the generated YAML and check: the triggers, each job's `if`, runs-on and step commands, that the fork job uses no `secrets.` reference, that no workflow references `secrets.`, that no run: script contains `${{`, that the version marker is replaced, and that action SHA pins match ci.yml. Add .github, .github/workflows and the workflow file to SERVER_FILES/DEMO_FILES and the plain exact set.
+- Add 'github/workflows/adops-pull-request.yml' to ci.yml's template-in-wheel grep list.
+
+**Files / areas**
+- `src/adops/templates/github/workflows/adops-pull-request.yml`
+- `src/adops/interface/init_command.py`
+- `tests/unit/interface/test_init_command.py`
+- `.github/workflows/ci.yml`
+
+**How to verify**
+- **Fork, branch and close jobs fire on the right events** — Running `adops init <tmp>` and `adops init --demo <tmp>` both writes <tmp>/.github/workflows/adops-pull-request.yml
+- **No script injection, no secrets, pinned actions** — A test walks every step of every job in the parsed adops-pull-request.yml and asserts no `run:` value contains the text '${{'
+- **Branch jobs run inside the Server image against stage state** — A test asserts the branch-run and drop-branch commands contain `docker compose --project-directory "$ADOPS_SERVER_DIR" --profile server run --rm --no-deps`
+- **Init file sets and wheel packaging** — The exact file-set tests for plain and demo init (SERVER_FILES/DEMO_FILES and the plain set) include .github, .github/workflows and .github/workflows/adops-pull-request.yml and pass
+
+**Done when** — `adops init` (plain and --demo) writes .github/workflows/adops-pull-request.yml, and unit tests check its fork-validate, branch-run and drop-branch jobs., and every check under *How to verify* passes its bar.
+
+**Depends on** — Add --all option to adops run, Take the Warehouse lock on every Warehouse run
+
+**Guards**
+- g3: the new template path github/workflows/adops-pull-request.yml is added to the ci.yml wheel grep list. The source folder has no leading dot, so hatch packages it.
+- g9: the workflow only calls adops, docker compose, git and pip. Exact file-set tests are updated, and test_init_writes_no_tool_code still passes because no *.py is written.
+- g8: the workflow reads repository variables (ADOPS_SERVER_DIR, ADOPS_PACKAGE), not .env variables, and the .env.example scan does not cover workflows, so .env.example needs no new entry.
+- g2: _write_workflow_files is exercised by both the demo and plain init tests.
+- g1: ruff clean.
+- g7: init_command.py gains no pragma: no cover; generated workflows reference no secrets.
+
+**Rollback** — Remove the template folder, _write_workflow_files and its tests, and the ci.yml grep entry. Projects already generated keep their workflow file, and a user can delete it.
+
+<details><summary>Reference — full rubric</summary>
+
+#### Fork, branch and close jobs fire on the right events (`pr-workflow-job-routing`, minScore 8)
+
+The generated adops-pull-request.yml runs fork-validate (ubuntu-latest, validate only) for an open Fork PR, branch-run ([self-hosted, adops-stage], validate then `adops run --all --branch`) for an open same-repo PR, and drop-branch on the stage runner when a same-repo PR closes; exactly one job runs per event. 10 = tests evaluate each job's `if` against fork/same-repo x open/closed and assert exactly one job matches; 8 = expected; 7 = acceptable.
+
+Pass criteria:
+- Running `adops init <tmp>` and `adops init --demo <tmp>` both writes <tmp>/.github/workflows/adops-pull-request.yml
+- A test parses the YAML and asserts `on.pull_request.types` is exactly [opened, synchronize, reopened, closed]
+- A test asserts fork-validate has runs-on ubuntu-latest and its steps run only pip install of ADOPS_PACKAGE, `adops validate` and the 'Fork PR: Branch run skipped' echo
+- A test asserts branch-run and drop-branch have runs-on [self-hosted, adops-stage], branch-run runs `adops validate` before `adops run --all --branch "$BRANCH"`, and drop-branch runs `adops drop-branch "$BRANCH"`
+- A test checks each job's `if` compares github.event.pull_request.head.repo.full_name (or .fork) with the base repository and github.event.action == 'closed', covering the four fork/same-repo x open/closed combinations so exactly one job is selected
+- Branch jobs have concurrency group 'adops-branch-${{ github.event.pull_request.head.ref }}' with cancel-in-progress false
+
+Failure examples:
+- Plausible: drop-branch has no same-repo condition, so closing a Fork PR runs a job on the self-hosted stage runner
+- Plausible: fork-validate's `if` forgets the not-closed condition, so it runs again when a fork PR is closed
+- Plausible: concurrency uses cancel-in-progress: true, so a close cancels an in-flight branch run and leaves a half-built Branch Environment
+- Plausible: the fork check uses github.repository vs github.head_ref, which is wrong for forks with the same branch name
+
+#### No script injection, no secrets, pinned actions (`pr-workflow-injection-and-secret-safety`, minScore 9)
+
+The generated workflow references no `secrets.`, never interpolates `${{ }}` inside a run: script (the branch name reaches the shell only through env: BRANCH), has top-level permissions contents: read, and pins every action by the same SHA and version comment ci.yml uses. This guards a real security invariant: a PR branch name is attacker-controlled. 10 = all asserted by tests across every generated workflow file, including a quoting check; 8 = expected; 7 = acceptable.
+
+Pass criteria:
+- A test walks every step of every job in the parsed adops-pull-request.yml and asserts no `run:` value contains the text '${{'
+- A test asserts the raw file text contains no 'secrets.' anywhere
+- A test asserts every `uses:` value matches the SHA used for the same action in .github/workflows/ci.yml, and the file keeps the '# vX.Y.Z' comment
+- A test asserts the top-level `permissions` is exactly {contents: read}
+- Every shell use of the branch name is double-quoted ("$BRANCH"); grep the template for an unquoted $BRANCH returns nothing
+- The generated file contains the real adops version in place of {{ADOPS_VERSION}} (a test asserts the marker is gone and __version__ appears)
+
+Failure examples:
+- Plausible: the docker compose step writes `--branch ${{ github.head_ref }}` directly in run:, allowing a branch named `x;curl evil|sh` to run code on the stage Server
+- Plausible: the test checks for '${{' only in branch-run, and drop-branch still interpolates the ref
+- Plausible: actions/checkout is pinned to @v4 by tag instead of the ci.yml SHA
+- Plausible: the workflow sets no permissions block, so the GITHUB_TOKEN gets the repository default write scope
+
+#### Branch jobs run inside the Server image against stage state (`pr-workflow-runs-against-stage-state`, minScore 7)
+
+Branch-run and drop-branch run adops through `docker compose --project-directory "$ADOPS_SERVER_DIR" --profile server run --rm --no-deps` on the Server service, mounting the PR checkout at /project and the Server folder's .adops/ over /project/.adops, keeping the Server's .env, and finish with an `if: always()` ownership fix-up so the next checkout can clean. 10 = every mount and flag asserted and the cleanup step verified; 8 = expected; 7 = acceptable.
+
+Pass criteria:
+- A test asserts the branch-run and drop-branch commands contain `docker compose --project-directory "$ADOPS_SERVER_DIR" --profile server run --rm --no-deps`
+- A test asserts the run mounts the PR checkout ($GITHUB_WORKSPACE) at /project and "$ADOPS_SERVER_DIR/.adops" at /project/.adops
+- ADOPS_SERVER_DIR comes from `env: ADOPS_SERVER_DIR: ${{ vars.ADOPS_SERVER_DIR }}` at job or step level, not from a run: interpolation
+- branch-run's last step has `if: always()` and changes ownership of the checkout back to the runner user (for example chown with $(id -u):$(id -g) run through the image)
+- The service name used in the compose command matches the Server service name in the demo docker-compose template (grep both files)
+
+Failure examples:
+- Plausible: .adops/ is not mounted from the Server folder, so the branch run creates fresh dlt state and a separate lock file in the checkout and does not exclude stage runs
+- Plausible: the cleanup step lacks `if: always()`, so after a failed branch run root-owned files make the next actions/checkout fail
+- Plausible: the compose command omits --no-deps and starts or restarts the Server's Dagster containers on every PR
+- Plausible: the service name is guessed and does not match the compose template, so the job fails only on a real runner
+
+#### Init file sets and wheel packaging (`init-file-sets-and-wheel`, minScore 7)
+
+Both init modes write exactly the expected file set including .github/workflows/adops-pull-request.yml, the template ships in the built wheel, no *.py is generated, and _write_workflow_files is called from both init branches. 10 = every item verified, including a test that the plain and demo sets differ only by their non-workflow files; 8 = expected; 7 = acceptable.
+
+Pass criteria:
+- The exact file-set tests for plain and demo init (SERVER_FILES/DEMO_FILES and the plain set) include .github, .github/workflows and .github/workflows/adops-pull-request.yml and pass
+- `uv build --wheel` then `unzip -l dist/*.whl | grep github/workflows/adops-pull-request.yml` finds the file, and ci.yml's grep list names it
+- The source template folder is src/adops/templates/github/workflows/ (no leading dot)
+- _write_workflow_files is called from both the demo and the plain branch of init(), shown by both init tests finding the workflow file
+
+Failure examples:
+- Plausible: the template folder is named .github, and hatch drops dot-folders from the wheel, so init works from source but fails from a pip install
+- Plausible: _write_workflow_files is called only in the demo branch of init(), so plain init writes no workflow
+- Plausible: _write_workflow_files copies the file but leaves {{ADOPS_VERSION}} in place, so the fork job pip-installs a package spec that does not exist
+
+Healer hint: The most likely failure is a `${{ github.head_ref }}` or similar expression slipping into a run: script or a job condition that lets a closed Fork PR reach the self-hosted runner; route every event value through env: and add a test that evaluates all four fork/same-repo x open/closed combinations.
+
+</details>
+
+### Phase 5 — Add generated stage and prod deploy workflows
+
+Technical ID: `generate-stage-and-prod-workflows` · Project templates (adops init) · interface · blast radius medium
+
+**Goal** — `adops init` also writes adops-stage.yml (push to main) and adops-prod.yml (release published). Each runs on its Server's self-hosted runner and follows the same order: validate the runner's fresh checkout; only then move the Server Project folder (the folder the Server bind-mounts) to that commit or tag; ask the Server's Dagster to reload its code location; run `adops run --all --env stage|prod` inside the Server image. The prod job sits behind a GitHub `prod` environment that needs reviewer approval. The adops.yaml templates gain a commented prod Environment block.
+
+**Why** — Merging to main must deploy to stage, and a release must deploy to prod after approval. The workflow pushes the new version to the Server instead of the Server polling Git, so no Git credentials or polling loop are needed. Validating before touching the Server folder means a bad version never replaces the running one, and reloading the code location (not restarting containers) lets an in-progress run finish on the old version.
+
+**Changes**
+- Write adops-stage.yml with `on: push: branches [main]`, runs-on [self-hosted, adops-stage], `permissions: contents: read`, `concurrency: group adops-stage, cancel-in-progress: false`, and the SHA-pinned checkout with fetch-depth: 0.
+- Step 1: run `adops validate` inside the Server image against the runner's checkout (the same docker compose run pattern as the PR workflow). If it fails, the job stops and the Server folder is left untouched.
+- Step 2: move the Server Project folder with `git -C "$ADOPS_SERVER_DIR" fetch "$GITHUB_WORKSPACE" "$GITHUB_SHA"` and `git -C "$ADOPS_SERVER_DIR" checkout --detach FETCH_HEAD`. This is a local fetch, so no Git credentials are needed, and the gitignored .env and .adops/ are not touched.
+- Step 3: reload Dagster with curl --fail POST to http://127.0.0.1:<DAGSTER_WEBSERVER_PORT>/graphql using the `reloadRepositoryLocation(repositoryLocationName: "adops.interface.server")` mutation (dagster-graphql 1.13.30; the location name is the python_module in workspace.yaml). Query `__typename` and, on WorkspaceLocationEntry, `loadStatus` and `locationOrLoadError { __typename }`. Read the port from the Server's .env with grep and do not source the file. Fail the step unless the response has __typename WorkspaceLocationEntry, loadStatus LOADED and locationOrLoadError.__typename RepositoryLocation; HTTP 200 alone, a PythonError location or a RepositoryLocationNotFound/UnauthorizedError union member is a failure. Step 4: `adops run --all --env stage` inside the Server image with the normal Server folder mount.
+- Write adops-prod.yml with the same four steps: `on: release: types [published]`, runs-on [self-hosted, adops-prod], `environment: prod`, checkout of the release tag (github.event.release.tag_name, passed through env) and `--env prod`. ADOPS_SERVER_DIR is read from the prod environment's variables.
+- Add a commented `# prod:` Environment block to the demo and plain adops.yaml, saying the release workflow needs it uncommented. It is commented so yaml.safe_load ignores it and test_init_command.py:119 (environments == {dev, stage}) still passes.
+- Unit tests parse both files and check: triggers, runs-on labels, `environment: prod` on the release job only, the exact step order (validate before git checkout before reload before run --all), no `secrets.` references, no `${{` inside run: scripts, and that the prod block is present but commented. Add both files to the exact init file sets and to ci.yml's wheel grep list.
+- Keep init_command.py's _write_workflow_files writing every file in templates/github/workflows/; if it lists files by name, add adops-stage.yml and adops-prod.yml to that list.
+
+**Files / areas**
+- `src/adops/templates/github/workflows/adops-stage.yml`
+- `src/adops/templates/github/workflows/adops-prod.yml`
+- `src/adops/templates/demo/adops.yaml`
+- `src/adops/templates/plain/adops.yaml`
+- `src/adops/interface/init_command.py`
+- `tests/unit/interface/test_init_command.py`
+- `.github/workflows/ci.yml`
+
+**How to verify**
+- **Validate before touching the Server folder** — A test parses both files and asserts, by step index, that the step running `adops validate` comes before the step with `git -C "$ADOPS_SERVER_DIR" checkout --detach FETCH_HEAD`, which comes before the reload step, which comes before `adops run --all --env stage` (or prod)
+- **Code location reload actually verified** — A test asserts the reload step's run: text contains `reloadRepositoryLocation` and the location name 'adops.interface.server', and that this name equals the python_module in the demo workspace.yaml template
+- **Triggers, runner labels and prod approval gate** — A test asserts adops-stage.yml has on.push.branches == [main] and runs-on [self-hosted, adops-stage], with concurrency group 'adops-stage' and cancel-in-progress false
+- **Commented prod block and file sets** — The demo and plain adops.yaml each contain a commented '# prod:' block, and the existing test asserting environments == {dev, stage} still passes
+
+**Done when** — `adops init` (plain and --demo) also writes adops-stage.yml and adops-prod.yml, and unit tests check their trigger, runner label, environment and validate→update folder→reload→run --all step order., and every check under *How to verify* passes its bar.
+
+**Depends on** — Add generated pull request workflow to adops init
+
+**Guards**
+- g3: github/workflows/adops-stage.yml and github/workflows/adops-prod.yml are added to the ci.yml wheel grep list.
+- g8: the prod block is commented, so it adds no *_env the .env.example test would require. DAGSTER_WEBSERVER_PORT is already in .env.example.
+- g9: workflows only call adops, docker compose, git and curl, and no *.py is written. Exact file sets are updated.
+- g4: the demo adops.yaml changes only by a comment, so E2E behaviour does not change.
+- g2: init_command.py changes (template listing, if any) stay covered by the plain and demo init tests at 100%.
+- g1: ruff clean.
+- g7: no pragma: no cover; generated workflows reference no secrets.
+
+**Rollback** — Remove the two workflow templates, their tests and grep entries, any init_command.py listing change, and the commented prod block.
+
+<details><summary>Reference — full rubric</summary>
+
+#### Validate before touching the Server folder (`deploy-step-order-protects-server-folder`, minScore 8)
+
+In both adops-stage.yml and adops-prod.yml the steps run in exactly this order: validate the runner's checkout in the Server image, then git fetch/checkout --detach into the Server Project folder, then the Dagster reload, then `adops run --all --env stage|prod`; a failing validate leaves the Server folder untouched. 10 = order asserted by index for both files and no step uses continue-on-error or if: always() before the run; 8 = expected; 7 = acceptable.
+
+Pass criteria:
+- A test parses both files and asserts, by step index, that the step running `adops validate` comes before the step with `git -C "$ADOPS_SERVER_DIR" checkout --detach FETCH_HEAD`, which comes before the reload step, which comes before `adops run --all --env stage` (or prod)
+- The validate step mounts the runner's checkout ($GITHUB_WORKSPACE), not the Server folder, and the final run step mounts the normal Server folder
+- The folder update is `git -C "$ADOPS_SERVER_DIR" fetch "$GITHUB_WORKSPACE" <sha or tag>` followed by `checkout --detach FETCH_HEAD`, with no `git reset --hard`, `git clean` or credentials
+- A test asserts no step in either deploy job has continue-on-error: true and no step before the run has `if: always()`
+- The checkout step uses fetch-depth: 0, and the prod checkout uses the release tag passed through env, not an inline ${{ }} in run:
+
+Failure examples:
+- Plausible: validate runs against $ADOPS_SERVER_DIR after the git checkout, so a broken version already replaced the running one when validate fails
+- Plausible: the update uses `git reset --hard` plus `git clean -fdx`, which deletes the gitignored .env and .adops/ in the Server folder
+- Plausible: prod fetches github.sha (the tag's commit on the default branch at the event) instead of the release tag, deploying the wrong commit for a release made from an older tag
+
+#### Code location reload actually verified (`dagster-reload-is-checked`, minScore 7)
+
+The reload step POSTs the reloadRepositoryLocation(repositoryLocationName: "adops.interface.server") mutation to http://127.0.0.1:<port>/graphql, reads the port from the Server's .env with grep (never sourcing it), and fails the job unless the response has __typename WorkspaceLocationEntry, loadStatus LOADED and locationOrLoadError.__typename RepositoryLocation (the dagster-graphql 1.13.30 success shape). 10 = location name matches workspace.yaml, all three success fields are checked, failure on a PythonError or error union member is shown, and no .env value other than the port is read; 8 = expected; 7 = acceptable.
+
+Pass criteria:
+- A test asserts the reload step's run: text contains `reloadRepositoryLocation` and the location name 'adops.interface.server', and that this name equals the python_module in the demo workspace.yaml template
+- The step reads DAGSTER_WEBSERVER_PORT from "$ADOPS_SERVER_DIR/.env" with grep (and cut or similar); a test asserts the step contains no `source` or `. "$ADOPS_SERVER_DIR/.env"`
+- The step fails unless the response is the success shape: curl uses --fail (or -f), the mutation selects __typename, loadStatus and locationOrLoadError { __typename }, and a test asserts the script checks for all three of 'WorkspaceLocationEntry', 'LOADED' and 'RepositoryLocation' and exits non-zero otherwise
+- The step does not restart or recreate containers (no `docker compose restart`, `up` or `down` in either workflow)
+- A test asserts the reload check does not treat HTTP 200 alone as success: the script has a non-zero exit path taken when the response contains PythonError or lacks any of the three success values
+
+Failure examples:
+- Plausible: curl without --fail and no response check, so a GraphQL error (HTTP 200 with errors) or a PythonError location still passes and the run uses the old code
+- Plausible: the port is read by sourcing .env, exporting every Warehouse secret into the job's shell
+- Plausible: the location name is written as 'adops' or the module path from a different file, so the mutation returns RepositoryLocationNotFound
+- Plausible: the script greps only for 'RepositoryLocation', which also matches the RepositoryLocationNotFound error type, so a wrong location name passes
+
+#### Triggers, runner labels and prod approval gate (`prod-approval-and-trigger-wiring`, minScore 8)
+
+adops-stage.yml runs on push to main on [self-hosted, adops-stage] with concurrency group adops-stage (no cancel); adops-prod.yml runs on release published on [self-hosted, adops-prod] behind `environment: prod`, reading ADOPS_SERVER_DIR from that environment's variables; neither references secrets or puts ${{ }} in run:. 10 = all asserted, including that environment: prod appears only on the prod job; 8 = expected; 7 = acceptable.
+
+Pass criteria:
+- A test asserts adops-stage.yml has on.push.branches == [main] and runs-on [self-hosted, adops-stage], with concurrency group 'adops-stage' and cancel-in-progress false
+- A test asserts adops-prod.yml has on.release.types == [published], runs-on [self-hosted, adops-prod] and job-level `environment: prod`
+- A test asserts no job in adops-stage.yml or adops-pull-request.yml has an `environment` key
+- A test asserts neither file contains 'secrets.' and no run: script contains '${{'
+- Both files have top-level permissions contents: read and use the ci.yml SHA pin for actions/checkout
+- adops-prod.yml has its own concurrency group (for example adops-prod) with cancel-in-progress false, so two releases cannot deploy at once
+
+Failure examples:
+- Plausible: `environment: prod` is set at workflow level or missing, so a release deploys to prod with no reviewer approval
+- Plausible: prod has no concurrency group, so publishing two releases quickly runs two deploys that interleave folder checkouts
+- Plausible: the prod job runs on the adops-stage label copied from the stage file
+
+#### Commented prod block and file sets (`prod-block-and-packaging`, minScore 7)
+
+Both adops.yaml templates contain a commented `# prod:` Environment block noting the release workflow needs it, so yaml.safe_load still sees only {dev, stage}; both new workflow files are in the exact init file sets and the wheel. 10 = all verified and the uncommented block parses as a valid Environment; 8 = expected; 7 = acceptable.
+
+Pass criteria:
+- The demo and plain adops.yaml each contain a commented '# prod:' block, and the existing test asserting environments == {dev, stage} still passes
+- A test strips the leading '# ' from the prod block, loads the result, and asserts it validates as an Environment with the same keys as stage
+- Exact file-set tests for plain and demo init include .github/workflows/adops-stage.yml and .github/workflows/adops-prod.yml
+- `uv build --wheel` then `unzip -l` lists github/workflows/adops-stage.yml and github/workflows/adops-prod.yml, and ci.yml's grep list names both
+
+Failure examples:
+- Plausible: the commented prod block, once uncommented, has wrong indentation or references a *_env variable missing from .env.example, so the user's first prod release fails validate
+- Plausible: the prod block is added only to the demo adops.yaml, not the plain one
+- Plausible: the files are written by init but missing from the ci.yml wheel grep list, so a packaging regression goes unnoticed
+
+Healer hint: The most likely failure is validate running after the Server folder is updated, or a reload step that passes on a GraphQL error; validate the runner checkout first, and make the reload step use curl --fail plus a grep for the loaded status.
+
+</details>
+
+### Phase 6 — Document Promotion setup and record its decisions
+
+Technical ID: `document-promotion-setup` · User documentation and decision records (Promotion) · cross-cutting · blast radius small
+
+**Goal** — Write a Promotion setup guide that tells a user how to: install and register a self-hosted GitHub Actions runner on each Server machine with the adops-stage or adops-prod label; make the Server Project folder a Git checkout; set the ADOPS_SERVER_DIR (and optional ADOPS_PACKAGE) variables; create the GitHub `prod` environment with required reviewers; uncomment the prod block in adops.yaml; and keep 'require approval for fork PR workflows' on. Alongside the guide, record the Promotion decisions: a new ADR-0016, dated clarifications to ADR-0006 and ADR-0014, the GLOSSARY entries, and the resolved horizon-6/7 blockers.
+
+**Why** — The generated workflows only work after manual GitHub and Server setup that adops cannot do for the user without repo-admin credentials. The fork-approval setting is the real security boundary for self-hosted runners. Without written steps, a user cannot turn Promotion on safely. The decisions behind the workflows (self-hosted runner per Server, Fork PR policy, push instead of Git pull) are written here, next to the guide that explains them, so the workflow phases stay about YAML generation and the records are reviewed together on their own grounds.
+
+**Changes**
+- Create docs/playbooks/promotion.md, following the plain-language style of the ADRs (ADR-0011: no Git or Docker knowledge assumed beyond copy-paste commands).
+- Explain what each generated workflow does and when it runs (PR open or update, PR close, merge to main, release published), and that a Fork PR only gets `adops validate`.
+- Give the runner setup steps: register the runner as a service on the Linux Server machine with label adops-stage or adops-prod, check the user can run docker compose, and clone the Project into the Server folder. State that a Linux host is required (flock and Docker Desktop for macOS) and that Warehouse secrets stay in that machine's .env.
+- Give the GitHub settings: repository variable ADOPS_SERVER_DIR, prod environment with required reviewers and its own ADOPS_SERVER_DIR, optional ADOPS_PACKAGE override for a wheel or Git URL, and 'Require approval for all outside collaborators' fork PR workflows. Say plainly that GitHub advises against self-hosted runners on public repositories and why.
+- Describe the Warehouse lock: overlapping runs wait up to 30 minutes, a waiting Server run holds the single run slot, and a timeout fails and alerts. Describe how to recover a branch that sanitizes to the same Branch Environment name as another.
+- Say in the guide that after a deploy the webserver reload is immediate and the Dagster daemon picks up Schedule changes within about 60 seconds (it refreshes its own workspace every 60 s), so no restart is needed.
+- Write ADR-0016 covering: Warehouse-touching jobs run on a self-hosted runner on each Server machine (adops-stage, adops-prod) with that machine's .env, never GitHub secrets; adops runs inside the Server image through docker compose run; the Fork PR policy (validate only, no secrets), and that the job condition is not a security boundary, so GitHub's GitHub's fork PR workflow approval setting (its exact current name and location from the GitHub requiredMaterials entry) must stay on, citing (with a link, per the GitHub requiredMaterials entry) GitHub's warning about self-hosted runners on public repos; one Warehouse lock for overlap. Add a dated 2026-11-21 clarification to ADR-0006: drop-branch runs when the PR closes, and short branch names that sanitize to the same name can still collide (recorded, not fixed).
+- Add a dated 2026-11-21 clarification to ADR-0014: the Server no longer polls Git; the merge and release workflows push the version to the Server Project folder after validate and then reload the code location (a restart was rejected because it kills in-progress runs); merge→stage runs every Pipeline.
+- GLOSSARY.md: add Self-hosted runner, Fork PR, Warehouse lock and Run all. In the Server entry's _Avoid_ list, keep 'runner' only as a word for the Server itself. Reword the Server entry so it no longer says it pulls from Git.
+- Mark the horizon-6 and horizon-7 Git-pull, polling and reload blockers resolved in docs/roadmaps/agentic-dataops/blockers.md, pointing to ADR-0016 and the ADR-0014 clarification.
+
+**Files / areas**
+- `docs/playbooks/promotion.md`
+- `docs/adr/0016-promotion-runs-on-a-self-hosted-runner-per-server.md`
+- `docs/adr/0006-branch-environments-as-warehouse-schemas.md`
+- `docs/adr/0014-schedules-run-on-a-pull-based-server.md`
+- `GLOSSARY.md`
+- `docs/roadmaps/agentic-dataops/blockers.md`
+
+**How to verify**
+- **Guide matches what the workflows actually need** — The guide mentions the labels adops-stage and adops-prod, the variables ADOPS_SERVER_DIR and ADOPS_PACKAGE, and the environment name prod, each spelled exactly as in src/adops/templates/github/workflows/*.yml (check with grep on both)
+- **Fork approval and self-hosted runner risk stated plainly** — The guide contains the setting name 'Require approval for all outside collaborators' and its location in GitHub (Settings > Actions > General)
+- **Linux host, runner service and lock behaviour** — The guide shows the runner's svc.sh install and start commands (or equivalent) and a `docker compose version` / `docker ps` check run as the runner user
+- **ADR-0016, ADR clarifications, GLOSSARY and blockers** — docs/adr/0016-promotion-runs-on-a-self-hosted-runner-per-server.md exists and states that Warehouse secrets stay in each Server's .env, that Fork PRs get validate only, that the job `if` is not a security boundary and the fork PR approval setting must stay on, with a link to GitHub's self-hosted runner security guidance
+
+**Done when** — docs/playbooks/promotion.md: a step-by-step Promotion setup guide covering runner registration, the prod environment approval, the fork PR approval setting and the prod block, with its companion decision records (ADR-0016, ADR-0006 and ADR-0014 clarifications, GLOSSARY entries, resolved blockers)., and every check under *How to verify* passes its bar.
+
+**Depends on** — Add generated stage and prod deploy workflows
+
+**Rollback** — Delete docs/playbooks/promotion.md and ADR-0016, and revert the ADR-0006 and ADR-0014 clarifications, the GLOSSARY edits and the blockers.md resolution.
+
+<details><summary>Reference — full rubric</summary>
+
+#### Guide matches what the workflows actually need (`guide-matches-generated-workflows`, minScore 8)
+
+docs/playbooks/promotion.md names exactly the runner labels, variables, environment name, file names and triggers the generated workflows use, so a user following it ends with working Promotion. 10 = every name a workflow reads appears in the guide spelled identically and nothing in the guide is unused; 8 = expected; 7 = acceptable.
+
+Pass criteria:
+- The guide mentions the labels adops-stage and adops-prod, the variables ADOPS_SERVER_DIR and ADOPS_PACKAGE, and the environment name prod, each spelled exactly as in src/adops/templates/github/workflows/*.yml (check with grep on both)
+- The guide names the three files adops-pull-request.yml, adops-stage.yml and adops-prod.yml and says when each runs: PR open or update, PR close, merge to main, release published
+- The guide says ADOPS_SERVER_DIR is set twice: as a repository variable for stage and as a prod environment variable for prod
+- The guide tells the user to uncomment the '# prod:' block in adops.yaml before the first release
+- Every command block in the guide is copy-paste ready (no unexplained placeholders; each placeholder like <your-server-folder> is explained once)
+
+Failure examples:
+- Plausible: the guide says to add ADOPS_SERVER_DIR as a secret, but the workflows read vars.ADOPS_SERVER_DIR, so the deploy runs with an empty folder
+- Plausible: the guide only sets the repository variable, and the prod job (which reads the prod environment's variable) fails on the prod Server
+- Plausible: the guide registers the runner with label 'stage' instead of 'adops-stage', so jobs wait forever for a runner
+
+#### Fork approval and self-hosted runner risk stated plainly (`guide-states-security-boundary`, minScore 8)
+
+The guide tells the user to keep 'Require approval for all outside collaborators' for fork PR workflows, explains that this setting (not the job condition) is what stops fork code running on the Server, says GitHub advises against self-hosted runners on public repositories and why, and that Warehouse secrets stay in the Server's .env. 10 = all stated with a link to GitHub's docs and the exact settings path; 8 = expected; 7 = acceptable.
+
+Pass criteria:
+- The guide contains the setting name 'Require approval for all outside collaborators' and its location in GitHub (Settings > Actions > General)
+- The guide explicitly says the workflow's fork check is not a security boundary on its own
+- The guide states GitHub's advice against self-hosted runners on public repositories, with a reason (untrusted PR code can run on the machine) and a link to GitHub's self-hosted runner security docs
+- The guide says the prod environment must have required reviewers and shows where to set them
+- The guide says Warehouse secrets live only in each Server machine's .env and are never added as GitHub secrets
+
+Failure examples:
+- Plausible: the guide mentions fork approval as optional or 'recommended' without saying it is the real protection
+- Plausible: the guide tells the user to set the weaker 'first-time contributors' option, which lets a returning contributor's fork run on the Server
+- Plausible: required reviewers are mentioned but the guide never says the prod job waits for them, so a user skips the step
+
+#### Linux host, runner service and lock behaviour (`guide-covers-server-host-and-lock-operations`, minScore 7)
+
+The guide gives runnable steps to register the runner as a service on a Linux Server machine, confirm the runner user can run docker compose, and make the Server Project folder a Git clone; it states a Linux host is required and why; and it explains the Warehouse lock (30-minute wait, a waiting Server run holds the single run slot, timeout fails and alerts) and how to recover from two branches sharing a Branch Environment name. 10 = each has a concrete command or check a user can run; 8 = expected; 7 = acceptable.
+
+Pass criteria:
+- The guide shows the runner's svc.sh install and start commands (or equivalent) and a `docker compose version` / `docker ps` check run as the runner user
+- The guide shows a `git clone` of the Project into the Server folder and says .env and .adops/ stay in that folder and are not committed
+- The guide states Linux is required for a Server and gives the reason (file locks are not reliably shared through a Docker Desktop for macOS bind mount)
+- The guide states overlapping runs wait up to 30 minutes, a waiting scheduled run holds the Server's single run slot, and a timeout fails and alerts
+- The guide gives recovery steps for two branch names that map to the same Branch Environment (for example rename one branch, or run `adops drop-branch` and rerun)
+- The guide says the Dagster daemon picks up Schedule changes within about 60 seconds of the reload, with no restart
+
+Failure examples:
+- Plausible: the guide says the runner user needs docker access but gives no check, and the user's runner runs as a user outside the docker group so every job fails
+- Plausible: the lock section gives the wait time but not that a waiting scheduled run blocks other Schedules, so a user is surprised by missed runs
+- Plausible: the collision recovery tells the user to drop the branch but not that this removes the other PR's Branch Environment too
+- Plausible: the guide tells the user to restart the Server after each deploy to pick up Schedule changes, killing in-progress runs that the reload was chosen to protect
+
+#### ADR-0016, ADR clarifications, GLOSSARY and blockers (`promotion-decisions-recorded`, minScore 7)
+
+ADR-0016 records the self-hosted runner per Server, Warehouse secrets in each Server's .env, the Fork PR policy (validate only) with the approval setting as the real boundary, running adops in the Server image and the single Warehouse lock; ADR-0006 and ADR-0014 get dated 2026-11-21 clarifications; GLOSSARY has the new terms and no longer says the Server pulls from Git; blockers.md marks the Git-pull, polling and reload blockers resolved. 10 = every item verified and ADR-0016 links GitHub's self-hosted-runner security guidance and names the approval setting exactly as the guide does; 8 = expected; 7 = acceptable.
+
+Pass criteria:
+- docs/adr/0016-promotion-runs-on-a-self-hosted-runner-per-server.md exists and states that Warehouse secrets stay in each Server's .env, that Fork PRs get validate only, that the job `if` is not a security boundary and the fork PR approval setting must stay on, with a link to GitHub's self-hosted runner security guidance
+- docs/adr/0006-branch-environments-as-warehouse-schemas.md has a dated 2026-11-21 clarification saying drop-branch runs on PR close and that branch names sanitizing to the same name can collide
+- docs/adr/0014-schedules-run-on-a-pull-based-server.md has a dated 2026-11-21 clarification that workflows push the version to the Server folder after validate and reload the code location (restart rejected), and that merge to stage runs every Pipeline
+- GLOSSARY.md has entries for Self-hosted runner, Fork PR, Warehouse lock and Run all, and its Server entry no longer says it pulls from Git and keeps 'runner' in _Avoid_ only as a word for the Server itself
+- docs/roadmaps/agentic-dataops/blockers.md marks the horizon-6 and horizon-7 Git-pull, polling and reload blockers resolved with a pointer to ADR-0016 / ADR-0014
+- The fork PR approval setting name in ADR-0016 is spelled identically to the one in docs/playbooks/promotion.md (grep both)
+
+Failure examples:
+- Plausible: ADR-0016 describes the fork job condition as what keeps forks off the self-hosted runner, missing that approval-for-fork-workflows is the real boundary
+- Plausible: the ADR-0014 clarification is added but GLOSSARY's Server entry still says it pulls from Git, so the two records contradict each other
+- Plausible: blockers.md is left unchanged, so the next horizon re-plans the Git-pull Server that this horizon replaced
+
+Healer hint: The most likely failure is a name in the guide (variable, label, environment, setting) that does not match the generated workflows or GitHub's UI; grep each name the workflows read and copy it into the guide exactly. For the records, check that ADR-0016, the guide and GLOSSARY use the same names for the runner labels and the approval setting.
+
+</details>
+
+## Discovery Findings
+
+| Area | Finding | File | Implication |
+|---|---|---|---|
+| needs: init template writing | present. _copy_tree copies a template dir recursively, renaming any entry by name via RENAMED={"gitignore": ".gitignore"} (init_command.py:11,53). {{ADOPS_VERSION}} is replaced only in server/Dockerfile (_write_server_files, :41-47); other files are copied byte for byte. | src/adops/interface/init_command.py | Ship workflows as e.g. templates/github/workflows/*.yml and add "github": ".github" to RENAMED, or write them in a _write_workflow_files that substitutes VERSION_MARKER. Workflows go to both plain and demo, so a shared templates/workflows dir like server/ fits best. |
+| guard g3: template-in-wheel check | ci.yml:39-53 greps the wheel listing for a hard-coded list of demo files and plain/server files. Hatch packages src/adops (pyproject wheel packages), so a dot-dir like templates/.github would also need checking. | .github/workflows/ci.yml | Add every new workflow template path to the grep loop in the same phase. Use a non-dot source dir name (github/) renamed at init, so a template never sits in a .github path and hatch cannot drop it. |
+| guard g9 / exact init file sets | test_init_command.py:25-46 pins SERVER_FILES and DEMO_FILES. test_demo_writes_the_demo_project_files (:109) asserts equality, test_plain_init_... (:370-380) asserts the plain set exactly (including the 'pipelines' and 'server' dirs), and test_init_writes_no_tool_code (:422) asserts no *.py. | tests/unit/interface/test_init_command.py | Add .github, .github/workflows and each workflow file to both expected sets (listing() includes dirs). Workflows must call adops, never a Python script. Keep the git checkout steps and install steps as shell only. |
+| guard g8: .env.example coverage | test_every_variable_the_demo_reads_is_in_env_example (:202) scans compose ${VAR}, adops.yaml *_env and dagster.yaml {env:}. It does not scan workflows yet. A new prod block in adops.yaml with password_env adds variables the test will require in .env.example. | tests/unit/interface/test_init_command.py | A commented prod block is ignored by yaml.safe_load, so it is safe. Any uncommented prod *_env must go in .env.example. Any lock-timeout env var (if added) must also go in .env.example. |
+| needs: run single-Pipeline resolution | present. run() takes a required positional `pipeline` (run_command.py:182). --env and --branch together raise BadParameter (:205-209). run_project wraps everything in _scoped_environ(_dagster_environ) (:228). The no-branch path goes to run_in_environment, the branch path to _run_branch. Exit 1 through fail() (:394). The env default is 'dev'. | src/adops/interface/run_command.py | Change pipeline to `str \| None = None` and add a --all bool option. Reject both or neither with BadParameter. Loop over sorted pipelines/*.yaml (as server._pipelines does, server.py:66-68) through run_project, stopping at the first failed result. Tests in test_run_command.py and test_cli.py need updating. |
+| needs: single lock seam for run + Server | present but split. The Server calls run_in_environment directly (server.py:76), not run_project. CLI branch runs go through _run_branch, and drop-branch goes through drop_project_branch (drop_branch_command.py:46). These are three call sites with no shared wrapper. | src/adops/interface/server.py | Take the lock in run_in_environment and _run_branch (or one helper both use) and in drop_project_branch, so the Server's run worker takes it too. A lock in run() alone would miss Server scheduled runs. |
+| needs: Server run process | present. build_server_definitions makes one op per Pipeline calling run(name) inside the run worker (dagster_server.py:64-66, in_process_executor). server/dagster.yaml sets no run_launcher (DefaultRunLauncher, a subprocess of the code server in the daemon container) and QueuedRunCoordinator max_concurrent_runs:1. | src/adops/infrastructure/dagster_server.py | Take the lock inside the op's run() call (the run worker process), which the run_in_environment seam gives for free. A run waiting on the lock holds the only run slot. Either accept and document this, or make the Server lock wait shorter. |
+| conflict: Dagster does not reload on file change | load_definitions reads pipelines/*.yaml and schedules once, when the code location loads (server.py:43-63). run_in_environment re-reads the Pipeline file on each run. The horizon-7 blocker on how a new version reaches the code location is still open (blockers.md:35). | docs/roadmaps/agentic-dataops/blockers.md | After a checkout, a merge/release workflow must reload the code location (e.g. `docker compose --profile server restart` or a Dagster workspace reload), or new or removed Pipelines and Schedule changes are missed. Plan this step, test it in the generated YAML, and close the blocker. |
+| needs: Server bind mount and .env | present. dagster_daemon/webserver use build: ., network_mode: host, env_file: .env, volumes ./:/project, DAGSTER_HOME=/project/server, ADOPS_PROJECT=/project (demo docker-compose.yml; pinned by test_server_services_run_from_the_bind_mounted_project). The Dockerfile has no USER, so the container runs as root. | src/adops/templates/demo/docker-compose.yml | The host runner runs adops in the same folder as the container (/project). Project-relative paths resolve to the same file. Files the root container creates in .adops/ (DuckDB, lock file, dlt state) may be root-owned and fail for the runner user. Plan permissions, and note that git checkout must not touch .env or .adops/ (both gitignored). |
+| needs: DuckDB path seen by host and container | present. duckdb_file(project_dir, path) = project_dir / path (dlt_sync.py:83-85). Demo stage path is .adops/warehouse_stage.duckdb (adops.yaml comment). The host resolves against the host folder and the container against /project, which is the same bind-mounted file. | src/adops/infrastructure/dlt_sync.py | Put the lock at duckdb_file(...).with_suffix('.duckdb.lock') or '<path>.lock' through the same helper. flock works across a Linux bind mount. Docker Desktop on macOS (virtiofs) does not reliably share flock, so record the Server as a Linux-host requirement. |
+| needs: Postgres connection for advisory lock | present. psycopg[binary] is a dependency (pyproject.toml:14). postgres_reverse_sync._connected uses psycopg.connect (postgres_reverse_sync.py:129-140). Warehouse connections otherwise go through dlt's sql_client/SQLAlchemy postgresql+psycopg (dlt_sync.py:61-64, warehouse_client :288). | src/adops/infrastructure/postgres_reverse_sync.py | Build the lock adapter in infrastructure with a dedicated autocommit psycopg connection that holds pg_advisory_lock (or a try-lock loop for the timeout) for the whole run. Reuse ResolvedConnection fields. Map psycopg.Error to a sanitized error with no DSN. |
+| needs: fcntl / file lock usage | missing. There is no fcntl, flock, filelock or portalocker anywhere in src/ or tests/. DuckDB's own single-writer lock surfaces today as WarehouseUnreachable ('unreachable or locked by another process', drop_branch_command.py:34). | src/adops/interface/drop_branch_command.py | Add a stdlib fcntl.flock adapter in infrastructure (Unix only). Use LOCK_EX\|LOCK_NB polling until the timeout, so a stale lock clears when the process dies. No new dependency is needed. Unit-test it with two file handles. |
+| guard g6: application purity | application imports only stdlib (not os/sys/io/pathlib/subprocess/socket/sqlite3) plus domain and itself (test_application_purity.py:7). fcntl and time are not banned, but ports are Protocols in application/ports.py. drop_branch defines its own WarehouseSchemas/BranchState Protocols in application/drop_branch.py. | src/adops/application/ports.py | Define a WarehouseLock Protocol (context manager acquire(warehouse, timeout)) in ports.py plus a WarehouseLocked exception (sanitized, like WarehouseUnreachable :52). Keep the psycopg and fcntl adapters in infrastructure. The application does not need the lock if the interface wraps it, but a port lets fakes test it. |
+| needs: Warehouse identity for lock key | present. ResolvedWarehouse = ResolvedConnection \| ResolvedDuckDb(path) (ports.py:35-41). drop-branch and --branch both target stage's warehouse (stage_environment). _fingerprinting already resolves the warehouse secrets for the chosen Environment (run_command.py:312-320). | src/adops/application/ports.py | Key the lock on the resolved Warehouse: a fixed advisory key per database on Postgres, the file path on DuckDB. Branch runs, drop-branch and stage then serialize on one lock. Resolve it with the same secret path, and never print it. |
+| needs: error mapping for lock timeout | present. RUN_ERRORS tuple and error_lines (run_command.py:75-88). server._runner turns RUN_ERRORS into a FAILED StepReport (server.py:77-83). drop_branch_command has its own except chain (:29-37). | src/adops/interface/run_command.py | Add the lock-timeout exception to RUN_ERRORS and to drop_branch_command's except list with a clear message. Decide whether a Server lock timeout counts as retryable (RunResult.retryable) or as a hard failure. |
+| needs: pinned adops install spec | present. The Server Dockerfile uses ARG ADOPS_PACKAGE=adops=={{ADOPS_VERSION}}, pip install "$ADOPS_PACKAGE" (templates/server/Dockerfile), pinned by test_dockerfile_installs_the_current_adops_version... (:327). __version__='0.1.0'. adops is not on PyPI. | src/adops/templates/server/Dockerfile | Workflows must substitute {{ADOPS_VERSION}} (extend _write_server_files or add a workflow writer). Expose the same ADOPS_PACKAGE override (repo variable) so users can point at a wheel or Git URL. Unit-test that the marker is gone and the version is present. |
+| needs: CI action pin style | present. ci.yml pins actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 and astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3 with version "0.11.32". Top-level permissions: contents: read. | .github/workflows/ci.yml | Generated workflows reuse these SHA pins and the comment style, plus permissions: contents: read. Pin them in the init tests so a drift is caught, or keep them in one constant shared by the tests. |
+| needs: E2E harness for overlap case | present. The module-scoped stack fixture (conftest.py:17-29) is shared, and demo is parametrized [postgres, duckdb] (:32). Runtime was 183s after horizon 6 (state.md:15); horizon 7 added Server cases (test_server.py, each with its own Dagster DB). The CI e2e timeout is 20 min. | tests/e2e/conftest.py | Add one overlap test using the demo fixture: start two adops processes (Popen) on stage, then assert they are serialized via timestamps or a lock wait message. Run it on both kinds. Record the new runtime against 20 min. |
+| conflict: ADR-0014 rejects the self-hosted runner | ADR-0014 Considered Options rejects 'a self-hosted GitHub runner on the Server (a forked PR could run code on it)' and chooses Git pull. Its 2026-11-20 clarification defers the Git pull to horizon 8. The GLOSSARY Server entry says it 'pulls the Project from Git'. | docs/adr/0014-schedules-run-on-a-pull-based-server.md | Write a new ADR-0016 (next free; 0001-0015 exist) that reverses this with the fork policy. Add a dated clarification to ADR-0014 and to ADR-0006 (branch drop on close). Update the GLOSSARY Server entry, which also lists 'runner' under _Avoid_, so choose the term 'Self-hosted runner' with care. |
+| needs: glossary terms | present. GLOSSARY.md has Promotion (:124, 'Branch Environment → stage → prod through Git'), Server (:17-20), Branch Environment, and Drop. It has no Warehouse lock, Fork PR, Generated workflow or Run all. | GLOSSARY.md | Add Warehouse lock, Fork PR and Self-hosted runner. Reword Server so it no longer says it pulls from Git. Promotion stays as defined, and the workflows implement it. |
+| needs: README / playbook to extend | missing. The repo has no README.md and no docs/playbooks. Templates have no README. Vision item 11 asks for an Environments/Promotion playbook. | docs/roadmaps/agentic-dataops/vision.md | Create a new doc for the runner/prod-environment/fork-approval setup (e.g. a docs/playbooks/promotion.md, or a README shipped in the template). If it is a template file, add it to the init file sets and the g3 grep list. |
+| needs: prod Environment in templates | missing. The demo adops.yaml has only dev and stage (test asserts set(environments)=={'dev','stage'} at test_init_command.py:119). The plain adops.yaml has only dev. | src/adops/templates/demo/adops.yaml | Add prod only as a commented block so that test (and stage-keeps-own-warehouse) still pass. The release workflow then needs the user to uncomment prod, so make the playbook say so. Otherwise `adops run --env prod` fails with a 'not in adops.yaml' error. |
+| needs: drop-branch name handling | present. drop_branch derives the environment via stage_branch_name and drops only schemas with the exact prefix (application/drop_branch.py:53-63). branch_environment_name hashes long names (domain/branch_environment.py:21,40). Short names that sanitize the same still collide. | src/adops/application/drop_branch.py | The workflow passes github.head_ref (or github.event.pull_request.head.ref) to drop-branch, quoted through an env var and not interpolated into the shell (injection risk). Record the collision risk; it needs no code change in this horizon. |
+| guard g7: no pragma, secrets by closure | Secrets are read inside the run worker (dagster_server.py:48, server.py:96). Errors print only the exception type for unexpected errors (run_command.py:215). | src/adops/interface/server.py | The lock adapter must not put the DSN or file path in exceptions or Dagster metadata, and lock wait messages must name only the Environment. Coverage must be 100% with no pragma, so the timeout and release-on-failure branches need real unit tests. |
+| needs: Dagster reload mutation | present in dagster-graphql 1.13.30: reloadRepositoryLocation(repositoryLocationName: String!) returns a union; success is __typename WorkspaceLocationEntry with loadStatus LOADED and locationOrLoadError.__typename RepositoryLocation (PythonError on a load failure). | .venv/lib/python3.12/site-packages/dagster_graphql/schema/roots/mutation.py | The reload step must check __typename WorkspaceLocationEntry, loadStatus LOADED and locationOrLoadError __typename RepositoryLocation; HTTP 200 alone is not success. Location name is the workspace.yaml module adops.interface.server. |
+| needs: daemon picks up reload | present: the Dagster daemon refreshes its own workspace every 60 s (RELOAD_WORKSPACE_INTERVAL = 60, dagster/_daemon/controller.py:51); the webserver reload updates only the webserver process. | .venv/lib/python3.12/site-packages/dagster/_daemon/controller.py | After the reload, Schedule changes reach the scheduler within about a minute without a restart; the playbook says so. No daemon restart step is needed. |
+
+## Repo guards this plan works under
+
+| Id | What it enforces | When | Defined in | Phases and how they comply |
+|---|---|---|---|---|
+| g1 | ruff check (E,F,W,I,B,UP; line length 100) must pass | on pull request and push to main | `.github/workflows/ci.yml` | Add --all option to adops run: new code is ruff clean (line length 100, import order).; Add Warehouse lock for Postgres and DuckDB: ruff clean.; Take the Warehouse lock on every Warehouse run: ruff clean.; Add generated pull request workflow to adops init: ruff clean.; Add generated stage and prod deploy workflows: ruff clean. |
+| g2 | unit tests pass with 100% line+branch coverage of the adops package; only 'if TYPE_CHECKING:' is excluded | on pull request and push to main | `.github/workflows/ci.yml + pyproject.toml [tool.coverage]` | Add --all option to adops run: every new branch (both/neither given, empty folder, first-failure stop) has a unit test, so coverage stays at 100% with no exclusions.; Add Warehouse lock for Postgres and DuckDB: the timeout, wait-then-acquire and release-on-exception branches are each unit-tested with an injected clock, so coverage stays at 100%.; Take the Warehouse lock on every Warehouse run: lock-taken, lock-released-on-failure and timeout paths are unit-tested at each call site with a fake lock factory.; Add generated pull request workflow to adops init: _write_workflow_files is exercised by both the demo and plain init tests.; Add generated stage and prod deploy workflows: init_command.py changes (template listing, if any) stay covered by the plain and demo init tests at 100%. |
+| g3 | listed demo/plain template files must be present in the built wheel; a new template file the tests rely on must be added to the grep list | on pull request and push to main | `.github/workflows/ci.yml` | Add generated pull request workflow to adops init: the new template path github/workflows/adops-pull-request.yml is added to the ci.yml wheel grep list. The source folder has no leading dot, so hatch packages it.; Add generated stage and prod deploy workflows: github/workflows/adops-stage.yml and github/workflows/adops-prod.yml are added to the ci.yml wheel grep list. |
+| g4 | the Docker demo E2E suite (tests/e2e -m e2e) passes within a 20-minute job timeout | on pull request and push to main | `.github/workflows/ci.yml` | Take the Warehouse lock on every Warehouse run: adds one two-process overlap case per Warehouse kind on the shared module-scoped demo fixture. The phase records the measured E2E runtime and keeps it well under 20 minutes.; Add generated stage and prod deploy workflows: the demo adops.yaml changes only by a comment, so E2E behaviour does not change. |
+| g5 | src/adops/domain imports only stdlib (not os/sys/io/pathlib/random/time/subprocess/socket/sqlite3), pydantic, yaml and itself, and never reads the clock (now/utcnow/today) | on unit test run | `tests/unit/domain/test_domain_purity.py` | repo-wide, run as a gate |
+| g6 | src/adops/application imports only stdlib (not os/sys/io/pathlib/subprocess/socket/sqlite3), adops.domain and itself — no frameworks | on unit test run | `tests/unit/application/test_application_purity.py` | Add Warehouse lock for Postgres and DuckDB: application/ports.py gains only a plain Exception subclass with stdlib imports. psycopg and fcntl stay in infrastructure. |
+| g7 | no '# pragma: no cover' except TYPE_CHECKING; secrets reach Dagster ops only by closure, never via run config | always | `docs/roadmaps/agentic-dataops/decisions.md (horizon 1)` | Add --all option to adops run: no pragma: no cover. Error output still goes through the existing error_lines/fail helpers, which redact secrets.; Add Warehouse lock for Postgres and DuckDB: no pragma: no cover. Exceptions and messages never include the DSN or the lock file path.; Take the Warehouse lock on every Warehouse run: secrets are still read inside the run worker by closure. The lock error message names only the Environment, and no pragma is added.; Add generated pull request workflow to adops init: init_command.py gains no pragma: no cover; generated workflows reference no secrets.; Add generated stage and prod deploy workflows: no pragma: no cover; generated workflows reference no secrets. |
+| g8 | every ${VAR} in the demo compose, every *_env in adops.yaml and every dagster.yaml {env: X} must be defined in .env.example | on unit test run | `tests/unit/interface/test_init_command.py (test_every_variable_the_demo_reads_is_in_env_example)` | Add generated pull request workflow to adops init: the workflow reads repository variables (ADOPS_SERVER_DIR, ADOPS_PACKAGE), not .env variables, and the .env.example scan does not cover workflows, so .env.example needs no new entry.; Add generated stage and prod deploy workflows: the prod block is commented, so it adds no *_env the .env.example test would require. DAGSTER_WEBSERVER_PORT is already in .env.example. |
+| g9 | no *.py file may be generated into a Project by adops init (demo or plain), per ADR-0008 | on unit test run | `tests/unit/interface/test_init_command.py (test_init_writes_no_tool_code)` | Add generated pull request workflow to adops init: the workflow only calls adops, docker compose, git and pip. Exact file-set tests are updated, and test_init_writes_no_tool_code still passes because no *.py is written.; Add generated stage and prod deploy workflows: workflows only call adops, docker compose, git and curl, and no *.py is written. Exact file sets are updated. |
+
+## Out of Scope
+- The Git-pull Server from the horizon-8 brief (polling, Git credentials, latest-tag rule, hot-swap): replaced by the workflow pushing the version to the Server's Project folder.
+- ADR-0015 accepted-change records and changing `accept-schema` for stage/prod: a separate horizon.
+- `accept-schema --branch` and unattended handling of a Breaking Change in a PR branch: the horizon-6 gap stays recorded.
+- Merge→stage running only changed Pipelines: `--all` was chosen.
+- Automatically registering the self-hosted runner, creating the GitHub `prod` environment, or changing GitHub repo settings: need repo-admin credentials; documented as manual steps.
+- A live end-to-end run of the release→prod workflow or of GitHub Actions itself: prod is tested by checking the generated workflow file.
+- Reaching a Warehouse from GitHub-hosted runners (tunnels, cloud Warehouses, GitHub secrets for Warehouse credentials): rejected in favour of the self-hosted runner.
+- Publishing adops to PyPI: workflows use a pinned package spec.
+- The MCP server, the six skills and the Assistant opening PRs: later horizons.
+- Server run monitoring for runs left STARTED after a crash (horizon-7 blocker): separate.
+- Parallel or Step-graph execution, and locks for dev Warehouses: Steps stay linear.
+- The full single-VM production playbook (vision item 11): only the runner, fork-approval and prod-environment setup notes are written here.
+- Configurable lock timeout (env var or --lock-timeout flag): fails YAGNI gate 3 (a flag nobody flips yet). A fixed 30-minute default is enough, and an env var would also add a .env.example entry.
+- A WarehouseLock Protocol port in application/ports.py with fakes: fails YAGNI gate 4 (ceremony). The interface layer wraps the infrastructure context manager directly, and tests swap it through a build_warehouse_lock factory.
+- Live E2E run of the stage or prod workflow commands (docker compose run with the PR checkout mount, Dagster reload) against the Docker stack: fails YAGNI gate 2 under the E2E 20-minute budget (g4). The workflows are checked by parsing the generated YAML, as scope answer 6 decided for prod. This is a candidate for the next horizon, together with the first user feedback.
+- Fixing Branch Environment name collisions for short branch names that sanitize to the same value: fails YAGNI gate 2. It is recorded in the ADR-0006 clarification and the playbook, and no phase is blocked by it.
+- Git-pull Server (polling, Git credentials, latest-tag rule): fails gate 1. scope-answers.md decision 3 replaced it with the workflow pushing the version.
+- ADR-0015 accepted-change records and `accept-schema --branch`: fail gate 1 (out of scope for this horizon per the analysis).
+- Server run monitoring for runs left STARTED after a crash: fails gate 1 (a separate horizon-7 blocker).
+- Running only changed Pipelines on merge to stage: fails gate 1 (`--all` was chosen).
+- Automating runner registration or GitHub environment setup: fails gate 1 (needs repo-admin credentials, so it is documented as manual steps).
+
+## Required Materials
+
+| Name | Kind | Why | How to get it |
+|---|---|---|---|
+| GitHub self-hosted runner security guidance and fork PR approval setting | document | ADR-0016 and the Promotion guide must link to GitHub's self-hosted runner security docs and name the exact fork-PR workflow approval setting and its location. | Read docs.github.com (security hardening for GitHub Actions: self-hosted runners; managing GitHub Actions settings for a repository: approval for fork pull request workflows) at execute time and copy the current names exactly. |
+
+## Success Criteria
+- Done when ALL hold, with 100% line+branch coverage on adops package code and the repo gates (uv sync --locked, ruff, pytest, the template-in-wheel check, the Docker E2E within its 20-minute limit) green: (1) `adops init` and `adops init --demo` write workflow files under .github/workflows/ (exact file set asserted by test_init_command; no *.py written, per ADR-0008), and every generated file is listed in the CI template-in-wheel check. (2) Unit tests parse each generated workflow and assert its triggers, jobs and steps: pull_request opened/synchronize/reopened, where a Fork PR runs only `adops validate` on a GitHub-hosted runner with no secrets and prints a plain skip message, while a same-repo PR runs `adops validate` then `adops run --all --branch <head branch>` on the runner labelled for stage; pull_request closed (same-repo only) runs `adops drop-branch <head branch>` on the stage runner; push to main updates the stage Server's Project folder to the merged commit, then runs `adops validate` and then `adops run --all --env stage`; release published runs the same steps on the runner labelled for prod with `environment: prod`, checking out the release tag. No workflow puts a Warehouse or Source secret in GitHub secrets. adops is installed at the pinned version from the same spec the Server Dockerfile uses. (3) `adops run --all` runs every Pipeline in name order, stops at the first failure with a non-zero exit, works with --env and with --branch, and exits with a clear error when combined with a Pipeline name or when there are no Pipelines; unit tested. (4) A Warehouse lock is taken by every run that touches a Warehouse: adops run (stage, prod, --branch), adops drop-branch, and Server scheduled runs. Postgres advisory lock on Postgres, an OS file lock beside the DuckDB file on DuckDB, waits up to a set timeout, then fails with a clear sanitized error. Unit tests cover acquire, wait, timeout and release-on-failure for both kinds, and an E2E case on both Warehouse kinds shows two overlapping runs are serialized. (5) A new ADR records the self-hosted runner on each Server machine, the Fork PR policy and the push of versions to the Server's Project folder; ADR-0014 and ADR-0006 get dated clarifications. (6) The demo and plain adops.yaml templates ship a commented prod Environment block, and a README/playbook section tells the user how to register the self-hosted runner with the stage/prod labels, create the GitHub `prod` environment with required reviewers, and keep 'require approval for fork PR workflows' on.
+- Add --all option to adops run: `adops run --all [--env X | --branch B]` runs every Pipeline in name order and stops at the first failure, covered by unit tests at 100% line and branch coverage.
+- Add Warehouse lock for Postgres and DuckDB: src/adops/infrastructure/warehouse_lock.py: a tested warehouse_lock context manager that serializes holders on Postgres and DuckDB and raises a sanitized WarehouseLocked on timeout.
+- Take the Warehouse lock on every Warehouse run: Every Warehouse-touching run path (run --env, run --branch, drop-branch, Server scheduled run) holds the Warehouse lock, shown by unit tests and an E2E overlap case on both Warehouse kinds.
+- Add generated pull request workflow to adops init: `adops init` (plain and --demo) writes .github/workflows/adops-pull-request.yml, and unit tests check its fork-validate, branch-run and drop-branch jobs.
+- Add generated stage and prod deploy workflows: `adops init` (plain and --demo) also writes adops-stage.yml and adops-prod.yml, and unit tests check their trigger, runner label, environment and validate→update folder→reload→run --all step order.
+- Document Promotion setup and record its decisions: docs/playbooks/promotion.md: a step-by-step Promotion setup guide covering runner registration, the prod environment approval, the fork PR approval setting and the prod block, with its companion decision records (ADR-0016, ADR-0006 and ADR-0014 clarifications, GLOSSARY entries, resolved blockers).
+
+## Alignment Preview
+- Four grilling rounds settled: CI reach (self-hosted runner on each Server machine), Fork PRs (validate only, no secrets), who runs stage/prod (the workflows push to the Server folder, replacing ADR-0014's Git polling), overlap (an adops Warehouse lock), `--all`, prod (approval-gated, verified by parsing YAML), the Server reload (Dagster reload, not a restart), and where adops runs (inside the Server image).
+- Concerns raised: (1) the size rule would have kept only phases 1–3, with no workflows. The user chose all 6 phases, above the 3–5 target but under the ceiling of 7. (2) Lock span inside `--all` was left open. The user chose per Pipeline.
+- No redirect rounds.
+
+## Quality Gate
+- Path: full. One critic pass: 0 blockers, 2 majors, 9 minors.
+- Healed: **phase-blast-radius** (ADR-0016, the ADR-0006/0014 clarifications, GLOSSARY and the blockers resolution moved out of the two workflow phases into the docs phase; no phase added). **resources-gathered** (the Dagster `reloadRepositoryLocation` mutation and success shape and the daemon's 60 s workspace refresh were checked in the installed dagster 1.13.30 and added as findings; GitHub's self-hosted-runner docs added as a required material).
+- Fixed mechanically: an analysis assumption that said adops runs on the runner host (it runs in the Server image); a guard note with no guard id; exact-duplicate deferred entries.
+- Accepted debt (minor): some deferred items are still listed twice in different words; phase 2 records the E2E runtime in state.md as a step; phase 4 depends on the lock phase for safe sequencing rather than as a code input.
+- No verification call was needed. Verdict: passed after heal.
+
+## Cost
+- Agent calls: 8 (Stage 1, Discovery, Stage 3, preview concerns, Stage 3.5, Stage 4, critic, healer), within the 8–10 budget. No patch calls.
+
+## Full analysis
+
+**Domain shape:** technical — The work is CI/CD machinery: generated workflow files, a self-hosted runner, a run lock and an `--all` flag. The Promotion rules it serves are already decided, and no new domain rule is modelled.
+
+| Term | Meaning |
+|---|---|
+| Promotion | Moving a Project version forward through Git: a PR runs a Branch Environment, a merge to main deploys to stage, and a published release deploys to prod after approval. |
+| Generated workflow | A GitHub Actions YAML file that `adops init` writes into the Project's .github/workflows/; plain adops commands, no tool code. |
+| Self-hosted runner | The GitHub Actions runner installed on a Server machine and labelled for stage or prod; it runs Warehouse-touching jobs with that machine's .env. |
+| Fork PR | A pull request whose head repository differs from the base repository; it gets only `adops validate` on a GitHub-hosted runner with no secrets. |
+| Branch Environment | The per-PR br_<branch>__ schemas in the stage Warehouse that `adops run --all --branch` builds and `adops drop-branch` removes. |
+| Server Project folder | The Git checkout on a Server machine that the horizon-7 Server bind-mounts; merge and release workflows update it before running. |
+| Warehouse lock | The lock adops takes for each run that touches a Warehouse; a second run waits, up to a timeout, instead of overlapping. |
+| Run all | `adops run --all`: runs every Pipeline in name order and stops at the first failure. |
+
+**Assumptions**
+- confirmed: Warehouse-touching jobs run on a self-hosted runner on each Server machine; secrets stay in that machine's .env (user, 2026-11-21).
+- confirmed: Fork PRs run only adops validate on a GitHub-hosted runner with no secrets; GitHub's fork-approval setting is the real boundary (user).
+- confirmed: Merge/release workflows validate a fresh checkout, then update the Server Project folder by local git fetch, reload Dagster's code location, then run --all inside the Server image (user).
+- confirmed: adops takes a Warehouse lock per Pipeline run (Postgres advisory lock / flock on <duckdb>.lock), fixed 30-minute timeout, not retried on the Server; a waiting Server run holds the single run slot (user).
+- confirmed: adops run --all runs every Pipeline in name order and stops at the first failure; merge->stage runs every Pipeline (user).
+- confirmed: Release->prod runs on runner label adops-prod behind GitHub environment prod with required reviewers; templates gain a commented prod block; verified by parsing generated YAML (user).
+- confirmed: Runner labels adops-stage/adops-prod; Server folder from repo variable ADOPS_SERVER_DIR; ADOPS_PACKAGE default adops==<version> for the fork validate job (user).
+- confirmed: The Server must be a Linux host (flock across bind mounts); short-branch-name collisions are recorded, not fixed (user).
+- The scope answers in scope-answers.md are binding and replace the horizon-8 brief's Git-pull Server and ADR-0015 record work.
+- Each Server machine has one self-hosted runner, labelled `adops-stage` or `adops-prod`, running jobs on the host. The Server's Project folder is a Git checkout the runner can fetch into; .env and .adops/ are untracked and survive a checkout.
+- Warehouse-touching workflow steps run adops inside the Server image via docker compose run with the Server's .env loaded, so the same localhost adops.yaml reaches the Warehouse, as horizon 7 used network_mode: host.
+- adops is not on PyPI. Workflows install adops from one pinned package spec (same idea as the Server Dockerfile's ADOPS_PACKAGE/ADOPS_VERSION, defaulting to the generating adops __version__). No tool code is copied into the Project.
+- Merge to main runs every Pipeline (`--all`), not only changed ones, keeping stage's fingerprints current; closes the horizon-6 'changed-only' blocker by choice.
+- `adops run --all --branch <b>` defers unchanged Steps to stage per Pipeline exactly as `--branch` does today; the branch name comes from github.head_ref and is sanitized by the existing Branch name rule.
+- One self-hosted runner per Server runs one job at a time. The Warehouse lock is still required because the Server's Dagster schedule and the runner share the Warehouse.
+- The lock is taken around the whole Pipeline run, in one place reused by `adops run`, `drop-branch` and the Server's Dagster job. Postgres: session-level advisory lock on a dedicated connection. DuckDB: OS file lock on `<warehouse path>.lock`. Fixed default timeout (e.g. 30 minutes).
+- GitHub workflow behaviour itself is verified by asserting on the generated YAML, not by running GitHub Actions. The E2E proves the command sequence each workflow runs against the Docker stack.
+- A Breaking Change during a PR branch run fails the job with the existing sanitized error, fixed by hand (horizon-6 decision).
+
+**Risks**
+- Decision conflict: ADR-0014 rejected a self-hosted runner on the Server and chose Git polling. The user's scope answers reverse both; must be recorded as a new ADR plus a dated ADR-0014 clarification, not done silently.
+- Security: the `if: not fork` job condition is not a security boundary because a fork can edit the workflow file. Safety depends on GitHub's 'require approval for fork PR workflows' setting and trusting collaborators; adops cannot enforce this, so ADR and playbook must say so plainly, naming GitHub's guidance against self-hosted runners on public repos.
+- Updating the Server's Project folder from a workflow can fail or corrupt state: local edits, a checkout while a scheduled run reads files, untracked .env/.adops clobbered, or the running Dagster code location not picking up new definitions without a reload.
+- If `adops validate` fails after checkout, the folder is left on a bad version unless the workflow rolls back to the last good commit.
+- The Postgres advisory lock is per session; Dagster Server runs execute in a separate run process, so the lock must be taken inside the run, not in the daemon.
+- DuckDB lock file: runner host and Server container must see the same path through the bind mount; a stale lock after a crash must not block forever (use flock, not file existence).
+- A long PR branch run holding the lock can delay scheduled runs, and a Dagster run waiting on the lock holds the only run slot.
+- drop-branch on PR close races with the stage run and any in-flight branch run; GitHub cancel-in-progress could leave a half-built Branch Environment.
+- Short branch names can sanitize to the same Branch Environment, so drop-branch for one PR can drop another PR's schemas.
+- Installing a pinned adops on the runner without PyPI needs a reachable wheel or Git URL source; a wrong spec makes every workflow fail before adops runs.
+- The prod path is checked only through the generated YAML, so a runtime bug on prod goes unseen until a user's first release.
+- Adding workflow files changes the exact init file-set tests, the template-in-wheel grep and the .env.example coverage test, so those guards must be updated in the same phase.

@@ -53,6 +53,18 @@ class WarehouseUnreachable(Exception):
     """An adapter could not connect to the Warehouse; it holds no driver text."""
 
 
+class WarehouseLocked(Exception):
+    """Another run kept the Warehouse locked for the whole wait; names no DSN or file path."""
+
+    def __init__(self, environment: str, waited_seconds: float) -> None:
+        minutes = waited_seconds // 60
+        super().__init__(
+            f"Another run is using the {environment} Warehouse; "
+            f"gave up after {minutes:.0f} minutes."
+        )
+        self.environment = environment
+
+
 class TargetUnreachable(Exception):
     """A Reverse Sync could not connect to its Target; it holds no driver text."""
 

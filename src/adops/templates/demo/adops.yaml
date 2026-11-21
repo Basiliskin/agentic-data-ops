@@ -59,3 +59,29 @@ environments:
         database: shop
         user: shop
         password_env: SHOP_PASSWORD
+  # The release workflow (.github/workflows/adops-prod.yml) deploys to prod on its own Server
+  # machine: uncomment this block and point it at that machine's Warehouse, Sources and Targets.
+  # prod:
+  #   warehouse:
+  #     type: postgres
+  #     host: localhost
+  #     port: 15433
+  #     database: warehouse
+  #     user: warehouse
+  #     password_env: WAREHOUSE_PASSWORD
+  #   sources:
+  #     shop:
+  #       type: postgres
+  #       host: localhost
+  #       port: 15432
+  #       database: shop
+  #       user: shop
+  #       password_env: SHOP_PASSWORD
+  #   targets:
+  #     shop:
+  #       type: postgres
+  #       host: localhost
+  #       port: 15432
+  #       database: shop
+  #       user: shop
+  #       password_env: SHOP_PASSWORD

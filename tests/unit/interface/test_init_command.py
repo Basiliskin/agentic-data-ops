@@ -1,5 +1,9 @@
 import importlib.util
+import json
+import os
 import re
+import subprocess
+from pathlib import Path
 
 import pytest
 import yaml
@@ -25,8 +29,17 @@ runner = CliRunner()
 SERVER_FILES = {"Dockerfile", "server/dagster.yaml", "server/workspace.yaml"}
 SERVER_SERVICES = {"dagster_daemon", "dagster_webserver"}
 WORKSPACE = "/project/server/workspace.yaml"
+PULL_REQUEST_WORKFLOW = ".github/workflows/adops-pull-request.yml"
+STAGE_WORKFLOW = ".github/workflows/adops-stage.yml"
+PROD_WORKFLOW = ".github/workflows/adops-prod.yml"
+DEPLOY_WORKFLOWS = {"stage": STAGE_WORKFLOW, "prod": PROD_WORKFLOW}
+WORKFLOW_FILES = {PULL_REQUEST_WORKFLOW, STAGE_WORKFLOW, PROD_WORKFLOW}
+CI_WORKFLOW = Path(__file__).parents[3] / ".github" / "workflows" / "ci.yml"
+SERVER_COMPOSE_RUN = (
+    'docker compose --project-directory "$ADOPS_SERVER_DIR" --profile server run --rm --no-deps'
+)
 
-DEMO_FILES = SERVER_FILES | {
+DEMO_FILES = SERVER_FILES | WORKFLOW_FILES | {
     ".env.example",
     ".gitignore",
     "adops.yaml",
@@ -368,8 +381,10 @@ def test_demo_seed_has_no_time_or_randomness_dependent_values(demo):
 
 
 def test_plain_init_writes_settings_server_files_and_an_empty_pipelines_folder(plain):
-    assert listing(plain) == SERVER_FILES | {
+    assert listing(plain) == SERVER_FILES | WORKFLOW_FILES | {
         ".env.example",
+        ".github",
+        ".github/workflows",
         "adops.yaml",
         "docker-compose.yml",
         "pipelines",
@@ -423,3 +438,469 @@ def test_init_writes_no_tool_code(tmp_path, demo_flag):
     runner.invoke(cli.app, ["init", str(tmp_path), *demo_flag])
 
     assert list(tmp_path.rglob("*.py")) == []
+
+
+def workflow(project, name=PULL_REQUEST_WORKFLOW):
+    return yaml.safe_load((project / name).read_text())
+
+
+def triggers(parsed):
+    # PyYAML reads the bare key `on` as the boolean True.
+    return parsed[True]
+
+
+def commands(job):
+    return [step["run"] for step in job["steps"] if "run" in step]
+
+
+def pull_request_context(head_repo, action):
+    head = {"repo": {"full_name": head_repo}}
+    event = {"action": action, "pull_request": {"head": head}}
+    return {"github": {"repository": "acme/shop", "event": event}}
+
+
+def evaluate(condition, context):
+    def operand(text):
+        if text.startswith("'") and text.endswith("'"):
+            return text[1:-1]
+        value = context
+        for key in text.split("."):
+            value = value[key]
+        return value
+
+    results = []
+    for clause in condition.split(" && "):
+        match = re.fullmatch(r"(\S+) (==|!=) (\S+)", clause)
+        assert match, f"unsupported condition: {clause}"
+        left, operator, right = match.groups()
+        equal = operand(left) == operand(right)
+        results.append(equal if operator == "==" else not equal)
+    return all(results)
+
+
+def test_pull_request_workflow_triggers_on_open_update_and_close(project):
+    assert triggers(workflow(project)) == {
+        "pull_request": {"types": ["opened", "synchronize", "reopened", "closed"]}
+    }
+
+
+@pytest.mark.parametrize(
+    ("head_repo", "action", "expected"),
+    [
+        ("someone/shop", "opened", {"fork-validate"}),
+        ("someone/shop", "synchronize", {"fork-validate"}),
+        ("someone/shop", "closed", set()),
+        ("acme/shop", "opened", {"branch-run"}),
+        ("acme/shop", "reopened", {"branch-run"}),
+        ("acme/shop", "closed", {"drop-branch"}),
+        (None, "opened", {"fork-validate"}),
+        (None, "closed", set()),
+    ],
+)
+def test_pull_request_workflow_selects_at_most_one_job_per_event(
+    project, head_repo, action, expected
+):
+    jobs = workflow(project)["jobs"]
+    context = pull_request_context(head_repo, action)
+
+    selected = {name for name, job in jobs.items() if evaluate(job["if"], context)}
+
+    assert selected == expected
+    assert set(jobs) == {"fork-validate", "branch-run", "drop-branch"}
+
+
+def test_fork_job_only_validates_on_a_github_hosted_runner(project):
+    job = workflow(project)["jobs"]["fork-validate"]
+
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["env"] == {
+        "ADOPS_PACKAGE": f"${{{{ vars.ADOPS_PACKAGE || 'adops=={adops.__version__}' }}}}"
+    }
+    install, validate, skip = commands(job)
+    assert '"$RUNNER_TEMP/adops/bin/pip" install "$ADOPS_PACKAGE"' in install
+    assert validate == "adops validate"
+    assert skip == (
+        "echo 'Fork PR: Branch run skipped; a maintainer must run it from a branch in this"
+        " repository.'"
+    )
+    assert "concurrency" not in job
+
+
+def test_branch_jobs_run_on_the_stage_runner_one_at_a_time_per_branch(project):
+    jobs = workflow(project)["jobs"]
+
+    for name in ("branch-run", "drop-branch"):
+        job = jobs[name]
+        assert job["runs-on"] == ["self-hosted", "adops-stage"]
+        assert job["concurrency"] == {
+            "group": "adops-branch-${{ github.event.pull_request.head.ref }}",
+            "cancel-in-progress": False,
+        }
+        assert job["env"] == {
+            "BRANCH": "${{ github.event.pull_request.head.ref }}",
+            "ADOPS_SERVER_DIR": "${{ vars.ADOPS_SERVER_DIR }}",
+        }
+
+
+def test_branch_run_validates_then_runs_every_pipeline_in_the_server_image(project):
+    validate, run, cleanup = commands(workflow(project)["jobs"]["branch-run"])
+
+    assert validate.endswith("dagster_daemon adops validate")
+    assert run.endswith('dagster_daemon adops run --all --branch "$BRANCH"')
+    for command in (validate, run):
+        assert command.startswith(SERVER_COMPOSE_RUN)
+        assert '-v "$GITHUB_WORKSPACE:/project"' in command
+        assert '-v "$ADOPS_SERVER_DIR/.adops:/project/.adops"' in command
+    assert cleanup.endswith('dagster_daemon chown -R "$(id -u):$(id -g)" /project')
+
+
+def test_drop_branch_drops_the_closed_branch_in_the_server_image(project):
+    job = workflow(project)["jobs"]["drop-branch"]
+    drop, cleanup = commands(job)
+
+    assert job["steps"][0]["with"]["ref"] == "${{ github.event.pull_request.head.sha }}"
+    assert drop.startswith(SERVER_COMPOSE_RUN)
+    assert '-v "$GITHUB_WORKSPACE:/project"' in drop
+    assert '-v "$ADOPS_SERVER_DIR/.adops:/project/.adops"' in drop
+    assert drop.endswith('dagster_daemon adops drop-branch "$BRANCH"')
+    assert cleanup.endswith('dagster_daemon chown -R "$(id -u):$(id -g)" /project')
+
+
+def test_branch_jobs_always_give_the_checkout_back_and_never_chown_server_state(project):
+    jobs = workflow(project)["jobs"]
+
+    for name in ("branch-run", "drop-branch"):
+        last = jobs[name]["steps"][-1]
+        assert last["if"] == "always()"
+        assert last["run"].startswith(SERVER_COMPOSE_RUN)
+        assert '-v "$GITHUB_WORKSPACE:/project"' in last["run"]
+        assert ".adops" not in last["run"]
+
+
+def test_branch_jobs_use_the_server_service_of_the_project_compose_file(project):
+    jobs = workflow(project)["jobs"]
+    service = "dagster_daemon"
+
+    assert service in compose_services(project)
+    assert compose_services(project)[service]["env_file"] == ".env"
+    for name in ("branch-run", "drop-branch"):
+        for command in commands(jobs[name]):
+            assert f" {service} " in command
+
+
+def every_workflow(project):
+    return sorted((project / ".github" / "workflows").glob("*.yml"))
+
+
+def test_workflows_never_expand_expressions_inside_scripts(project):
+    for path in every_workflow(project):
+        for job in yaml.safe_load(path.read_text())["jobs"].values():
+            for command in commands(job):
+                assert "${{" not in command, path.name
+
+
+def test_workflows_use_no_secrets_and_read_only_permissions(project):
+    for path in every_workflow(project):
+        text = path.read_text()
+        assert "secrets." not in text, path.name
+        assert yaml.safe_load(text)["permissions"] == {"contents": "read"}, path.name
+
+
+def test_workflows_quote_every_shell_variable_from_the_event(project):
+    for path in every_workflow(project):
+        text = path.read_text()
+        assert not re.search(r'(?<!")\$(BRANCH|ADOPS_SERVER_DIR)\b', text), path.name
+
+
+def test_workflows_pin_actions_exactly_as_ci_does(project):
+    pins = set(re.findall(r"uses: (\S+ # v\S+)", CI_WORKFLOW.read_text()))
+
+    for path in every_workflow(project):
+        text = path.read_text()
+        used = re.findall(r"uses: (.+)", text)
+        assert used, path.name
+        assert set(used) <= pins, path.name
+
+
+def test_workflows_carry_the_installed_adops_version(project):
+    for path in every_workflow(project):
+        text = path.read_text()
+        assert "{{ADOPS_VERSION}}" not in text, path.name
+    assert f"adops=={adops.__version__}" in (project / PULL_REQUEST_WORKFLOW).read_text()
+
+
+FOLDER_UPDATE = 'git -C "$ADOPS_SERVER_DIR" checkout --detach FETCH_HEAD'
+GIT_ENV = {
+    **os.environ,
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_AUTHOR_NAME": "adops",
+    "GIT_AUTHOR_EMAIL": "adops@example.com",
+    "GIT_COMMITTER_NAME": "adops",
+    "GIT_COMMITTER_EMAIL": "adops@example.com",
+}
+
+
+def deploy_job(project, environment):
+    return workflow(project, DEPLOY_WORKFLOWS[environment])["jobs"]["deploy"]
+
+
+def step_index(job, text):
+    matches = [index for index, step in enumerate(job["steps"]) if text in step.get("run", "")]
+    assert len(matches) == 1, text
+    return matches[0]
+
+
+def step_script(job, text):
+    return job["steps"][step_index(job, text)]["run"]
+
+
+def git(*args, cwd):
+    result = subprocess.run(
+        ["git", *args], cwd=cwd, env=GIT_ENV, check=True, capture_output=True, text=True
+    )
+    return result.stdout.strip()
+
+
+@pytest.mark.parametrize(
+    ("environment", "trigger"),
+    [
+        ("stage", {"push": {"branches": ["main"]}}),
+        ("prod", {"release": {"types": ["published"]}}),
+    ],
+)
+def test_deploy_workflows_trigger_on_merge_to_main_and_on_a_published_release(
+    project, environment, trigger
+):
+    parsed = workflow(project, DEPLOY_WORKFLOWS[environment])
+
+    assert triggers(parsed) == trigger
+    assert set(parsed["jobs"]) == {"deploy"}
+
+
+@pytest.mark.parametrize("environment", ["stage", "prod"])
+def test_deploy_runs_on_its_server_runner_one_deploy_at_a_time(project, environment):
+    job = deploy_job(project, environment)
+
+    assert job["runs-on"] == ["self-hosted", f"adops-{environment}"]
+    assert job["concurrency"] == {"group": f"adops-{environment}", "cancel-in-progress": False}
+    assert job["env"]["ADOPS_SERVER_DIR"] == "${{ vars.ADOPS_SERVER_DIR }}"
+
+
+def test_only_the_prod_deploy_waits_for_reviewer_approval(project):
+    paths = every_workflow(project)
+
+    assert {path.name for path in paths} == {Path(name).name for name in WORKFLOW_FILES}
+    for path in paths:
+        parsed = yaml.safe_load(path.read_text())
+        assert "environment" not in parsed, path.name
+        expected = "prod" if path.name == Path(PROD_WORKFLOW).name else None
+        for name, job in parsed["jobs"].items():
+            assert job.get("environment") == expected, (path.name, name)
+
+
+@pytest.mark.parametrize("environment", ["stage", "prod"])
+def test_deploy_validates_the_checkout_before_moving_the_server_folder(project, environment):
+    job = deploy_job(project, environment)
+    steps = job["steps"]
+
+    validate = step_index(job, "dagster_daemon adops validate")
+    update = step_index(job, FOLDER_UPDATE)
+    reload = step_index(job, "reloadRepositoryLocation")
+    run = step_index(job, f"dagster_daemon adops run --all --env {environment}")
+    assert 0 < validate < update < reload < run == len(steps) - 2
+    assert steps[0]["with"]["fetch-depth"] == 0
+    assert steps[validate]["run"].startswith(SERVER_COMPOSE_RUN)
+    assert '-v "$GITHUB_WORKSPACE:/project"' in steps[validate]["run"]
+    assert steps[run]["run"] == (
+        f"{SERVER_COMPOSE_RUN} -T dagster_daemon adops run --all --env {environment}"
+    )
+    assert "if" not in job and "continue-on-error" not in job
+    assert all("continue-on-error" not in step for step in steps)
+    assert all("if" not in step for step in steps[: run + 1])
+
+
+@pytest.mark.parametrize("environment", ["stage", "prod"])
+def test_deploy_always_gives_the_checkout_back_and_never_chowns_server_state(project, environment):
+    last = deploy_job(project, environment)["steps"][-1]
+
+    assert last["if"] == "always()"
+    assert last["run"] == (
+        f'{SERVER_COMPOSE_RUN} -T -v "$GITHUB_WORKSPACE:/project"'
+        ' dagster_daemon chown -R "$(id -u):$(id -g)" /project'
+    )
+
+
+@pytest.mark.parametrize(
+    ("environment", "version"), [("stage", '"$GITHUB_SHA"'), ("prod", '"refs/tags/$RELEASE_TAG"')]
+)
+def test_deploy_moves_the_server_folder_by_a_local_fetch_only(project, environment, version):
+    text = (project / DEPLOY_WORKFLOWS[environment]).read_text()
+    update = step_script(deploy_job(project, environment), FOLDER_UPDATE)
+
+    assert update.splitlines() == [
+        f'git -C "$ADOPS_SERVER_DIR" fetch "$GITHUB_WORKSPACE" {version}',
+        FOLDER_UPDATE,
+    ]
+    for forbidden in ("reset --hard", "git clean", "persist-credentials: true"):
+        assert forbidden not in text
+
+
+def test_prod_deploys_the_published_release_tag(project):
+    prod = deploy_job(project, "prod")
+    stage = deploy_job(project, "stage")
+
+    assert prod["env"]["RELEASE_TAG"] == "${{ github.event.release.tag_name }}"
+    assert prod["steps"][0]["with"]["ref"] == "refs/tags/${{ env.RELEASE_TAG }}"
+    assert "ref" not in stage["steps"][0]["with"]
+    assert "RELEASE_TAG" not in stage["env"]
+
+
+@pytest.mark.parametrize("environment", ["stage", "prod"])
+def test_folder_update_moves_the_server_to_the_new_version_and_keeps_its_local_files(
+    tmp_path, demo, environment
+):
+    workspace = tmp_path / "workspace"
+    server = tmp_path / "server"
+    git("init", "-q", "-b", "main", str(workspace), cwd=tmp_path)
+    (workspace / ".gitignore").write_text(".env\n.adops/\n")
+    (workspace / "version").write_text("old\n")
+    git("add", ".", cwd=workspace)
+    git("commit", "-qm", "old", cwd=workspace)
+    git("clone", "-q", str(workspace), str(server), cwd=tmp_path)
+    (server / ".env").write_text("WAREHOUSE_PASSWORD=secret\n")
+    (server / ".adops").mkdir()
+    (server / ".adops" / "warehouse.duckdb").write_text("state")
+    (workspace / "version").write_text("new\n")
+    git("commit", "-qam", "new", cwd=workspace)
+    git("tag", "-a", "v1", "-m", "v1", cwd=workspace)
+    new = git("rev-parse", "HEAD", cwd=workspace)
+    env = {
+        **GIT_ENV,
+        "ADOPS_SERVER_DIR": str(server),
+        "GITHUB_WORKSPACE": str(workspace),
+        "GITHUB_SHA": new,
+        "RELEASE_TAG": "v1",
+    }
+
+    script = step_script(deploy_job(demo, environment), FOLDER_UPDATE)
+    subprocess.run(["bash", "-e", "-c", script], env=env, check=True, capture_output=True)
+
+    assert git("rev-parse", "HEAD", cwd=server) == new
+    assert (server / "version").read_text() == "new\n"
+    assert (server / ".env").read_text() == "WAREHOUSE_PASSWORD=secret\n"
+    assert (server / ".adops" / "warehouse.duckdb").read_text() == "state"
+
+
+@pytest.mark.parametrize("environment", ["stage", "prod"])
+def test_deploy_reloads_the_code_location_the_server_workspace_names(project, environment):
+    script = step_script(deploy_job(project, environment), "reloadRepositoryLocation")
+    workspace = yaml.safe_load((project / "server" / "workspace.yaml").read_text())
+    location = workspace["load_from"][0]["python_module"]["module_name"]
+
+    assert f'reloadRepositoryLocation(repositoryLocationName: \\"{location}\\")' in script
+    assert "{ __typename ... on WorkspaceLocationEntry" in script
+    assert "{ loadStatus locationOrLoadError { __typename } }" in script
+    assert 'curl --fail --silent --show-error -X POST "http://127.0.0.1:$port/graphql"' in script
+    assert "port=$(grep -E '^DAGSTER_WEBSERVER_PORT=' \"$ADOPS_SERVER_DIR/.env\" | cut" in script
+    assert not re.search(r'(^|[\s;])(source|\.) +"?\$\{?ADOPS_SERVER_DIR', script)
+
+
+def test_deploys_reload_the_server_without_restarting_its_containers(project):
+    for name in DEPLOY_WORKFLOWS.values():
+        text = (project / name).read_text()
+        assert not re.search(r"docker compose\b.* (up|down|restart|stop|start)\b", text), name
+
+
+def reload_result(typename, status="LOADED", location="RepositoryLocation"):
+    entry = {"__typename": typename}
+    if typename == "WorkspaceLocationEntry":
+        entry |= {"loadStatus": status, "locationOrLoadError": {"__typename": location}}
+    return {"data": {"reloadRepositoryLocation": entry}}
+
+
+LOADED = reload_result("WorkspaceLocationEntry")
+
+
+@pytest.mark.parametrize("environment", ["stage", "prod"])
+@pytest.mark.parametrize(
+    ("response", "curl_exit", "reloaded"),
+    [
+        (json.dumps(LOADED), 0, True),
+        (json.dumps(LOADED, separators=(",", ":")), 0, True),
+        (json.dumps(reload_result("WorkspaceLocationEntry", location="PythonError")), 0, False),
+        (json.dumps(reload_result("WorkspaceLocationEntry", status="LOADING")), 0, False),
+        (json.dumps(reload_result("RepositoryLocationNotFound")), 0, False),
+        (json.dumps(reload_result("UnauthorizedError")), 0, False),
+        (json.dumps(reload_result("PythonError")), 0, False),
+        (json.dumps({"errors": [{"message": "Cannot query field"}]}), 0, False),
+        ("", 22, False),
+    ],
+)
+def test_reload_step_passes_only_when_the_server_loaded_the_new_code(
+    tmp_path, demo, environment, response, curl_exit, reloaded
+):
+    server = tmp_path / "server"
+    server.mkdir()
+    (server / ".env").write_text('WAREHOUSE_PASSWORD=secret\nDAGSTER_WEBSERVER_PORT="3456"\n')
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "curl").write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$@" > "$CURL_ARGS"\nprintf "%s" "$CURL_RESPONSE"\n'
+        'exit "$CURL_EXIT"\n'
+    )
+    (fake / "curl").chmod(0o755)
+    env = {
+        "PATH": f"{fake}{os.pathsep}{os.environ['PATH']}",
+        "ADOPS_SERVER_DIR": str(server),
+        "CURL_ARGS": str(tmp_path / "curl-args"),
+        "CURL_RESPONSE": response,
+        "CURL_EXIT": str(curl_exit),
+    }
+
+    script = step_script(deploy_job(demo, environment), "reloadRepositoryLocation")
+    result = subprocess.run(["bash", "-e", "-c", script], env=env, capture_output=True, text=True)
+
+    assert (result.returncode == 0) is reloaded, result.stderr
+    assert "http://127.0.0.1:3456/graphql" in (tmp_path / "curl-args").read_text().splitlines()
+    assert "secret" not in result.stdout + result.stderr
+
+
+def test_reload_step_fails_when_the_server_env_has_no_webserver_port(tmp_path, demo):
+    server = tmp_path / "server"
+    server.mkdir()
+    (server / ".env").write_text("WAREHOUSE_PASSWORD=secret\n")
+    env = {"PATH": os.environ["PATH"], "ADOPS_SERVER_DIR": str(server)}
+
+    script = step_script(deploy_job(demo, "stage"), "reloadRepositoryLocation")
+    result = subprocess.run(["bash", "-e", "-c", script], env=env, capture_output=True, text=True)
+
+    assert result.returncode == 1
+    assert "DAGSTER_WEBSERVER_PORT is not set" in result.stderr
+
+
+def uncomment_prod(text):
+    lines = text.splitlines()
+    start = lines.index("  # prod:")
+    end = start + 1
+    while end < len(lines) and lines[end].startswith("  #   "):
+        end += 1
+    block = [line.replace("  # ", "  ", 1) for line in lines[start:end]]
+    return "\n".join([*lines[:start], *block, *lines[end:]])
+
+
+def test_settings_carry_the_prod_environment_the_release_workflow_needs_commented_out(project):
+    text = (project / "adops.yaml").read_text()
+    environments = yaml.safe_load(text)["environments"]
+    reference = "stage" if "stage" in environments else "dev"
+
+    assert "prod" not in environments
+    assert "adops-prod.yml" in text
+    assert "uncomment this block" in text
+    uncommented = uncomment_prod(text)
+    settings = load_project_settings(uncommented)
+    assert set(settings.environments) == {*environments, "prod"}
+    parsed = yaml.safe_load(uncommented)["environments"]
+    assert parsed["prod"].keys() == parsed[reference].keys()
+    assert parsed["prod"]["warehouse"].keys() == parsed[reference]["warehouse"].keys()
+    assert settings_variables(parsed["prod"]) <= set(dotenv_values(project / ".env.example"))

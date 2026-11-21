@@ -6,7 +6,7 @@ import pytest
 from typer.testing import CliRunner
 
 from adops.application.drop_branch import BranchState, WarehouseSchemas
-from adops.application.ports import ResolvedConnection, ResolvedWarehouse
+from adops.application.ports import ResolvedConnection, ResolvedWarehouse, WarehouseLocked
 from adops.infrastructure.warehouse_schemas import LocalBranchState, WarehouseSchemaAdmin
 from adops.interface import cli, drop_branch_command
 
@@ -127,6 +127,7 @@ class RecordingSchemas:
         self.warehouses.append(warehouse)
 
 
+@pytest.mark.usefixtures("locks")
 def test_only_stages_secret_is_needed(tmp_path, monkeypatch):
     (tmp_path / "adops.yaml").write_text(postgres_settings("stage-db", 5432))
     for name in SECRETS:
@@ -193,6 +194,88 @@ def test_an_unexpected_error_prints_only_its_type(project, monkeypatch):
 
     assert result.exit_code == 1
     assert result.output == "unexpected KeyError while dropping Branch feat\n"
+
+
+STAGE_WAREHOUSE = ResolvedConnection(
+    host="stage-db", port=5432, database="wh", user="adops", password=SENTINEL
+)
+
+
+@dataclass
+class MarkingSchemas:
+    locks: object
+    names: tuple[str, ...] = ("br_feat__analytics", "analytics")
+    error: Exception | None = None
+
+    def list_schemas(self, warehouse: ResolvedWarehouse) -> list[str]:
+        self.locks.mark("list")
+        if self.error is not None:
+            raise self.error
+        return list(self.names)
+
+    def drop(self, warehouse: ResolvedWarehouse, schema: str) -> None:
+        self.locks.mark(f"drop {schema}")
+
+
+@pytest.fixture
+def stage_postgres(tmp_path, monkeypatch, locks):
+    (tmp_path / "adops.yaml").write_text(postgres_settings("stage-db", 5432))
+    monkeypatch.setenv("STAGE_WAREHOUSE_PASSWORD", SENTINEL)
+    marking = MarkingSchemas(locks)
+    monkeypatch.setattr(drop_branch_command, "build_warehouse_schemas", lambda *_: marking)
+    return marking
+
+
+def test_the_drop_holds_stages_warehouse_lock(tmp_path, stage_postgres, locks):
+    result = invoke(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    assert locks.events == [
+        ("enter", "stage"),
+        ("list",),
+        ("drop br_feat__analytics",),
+        ("exit", "stage"),
+    ]
+    assert locks.warehouses == [STAGE_WAREHOUSE]
+
+
+def test_nothing_to_drop_still_takes_the_lock(tmp_path, stage_postgres, locks):
+    stage_postgres.names = ("analytics",)
+
+    result = invoke(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    assert locks.events == [("enter", "stage"), ("list",), ("exit", "stage")]
+
+
+def test_a_failing_drop_still_releases_the_lock(tmp_path, stage_postgres, locks):
+    stage_postgres.error = KeyError(SENTINEL)
+
+    result = invoke(tmp_path)
+
+    assert result.exit_code == 1
+    assert locks.events == [("enter", "stage"), ("list",), ("exit", "stage")]
+
+
+def test_a_lock_timeout_is_one_plain_line(tmp_path, stage_postgres, locks):
+    locks.error = WarehouseLocked("stage", 30 * 60)
+
+    result = invoke(tmp_path)
+
+    assert result.exit_code == 1
+    assert result.output == (
+        "Another run is using the stage Warehouse; gave up after 30 minutes.\n"
+    )
+    for leaked in (SENTINEL, "stage-db", str(tmp_path)):
+        assert leaked not in result.output
+    assert locks.events == []
+
+
+def test_the_real_lock_is_taken_on_a_duckdb_stage(project):
+    lock_file = project / "stage.duckdb.lock"
+
+    assert invoke(project).exit_code == 0
+    assert lock_file.is_file()
 
 
 def test_a_project_without_a_stage_environment_is_rejected(tmp_path):

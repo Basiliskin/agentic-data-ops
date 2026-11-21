@@ -6,9 +6,9 @@ import pytest
 from dagster import Definitions
 from typer.testing import CliRunner
 
-from adops.application.ports import RunResult, StepReport, StepStatus
+from adops.application.ports import RunResult, StepReport, StepStatus, WarehouseLocked
 from adops.application.run_pipeline import InOrderOrchestrator
-from adops.interface import cli, server
+from adops.interface import cli, run_command, server
 from adops.interface.server import ServerConfigError, load_definitions
 
 runner = CliRunner()
@@ -130,6 +130,49 @@ def test_runs_go_through_run_in_environment_with_the_in_order_orchestrator(
     [(project_dir, pipeline, environment, orchestrator)] = calls
     assert (project_dir, pipeline, environment) == (project.resolve(), "shop_sync", "stage")
     assert isinstance(orchestrator, InOrderOrchestrator)
+
+
+@pytest.fixture
+def secrets_set(monkeypatch):
+    monkeypatch.setenv("WAREHOUSE_PASSWORD", SENTINEL)
+    monkeypatch.setenv("SHOP_PASSWORD", SENTINEL)
+
+
+@pytest.mark.usefixtures("secrets_set")
+def test_a_scheduled_run_holds_the_environments_warehouse_lock(
+    project, captured, locks, monkeypatch
+):
+    passed = RunResult("shop_sync", "stage", (StepReport("sync_shop", StepStatus.PASSED),))
+
+    def run_pipeline(*_):
+        locks.mark("work")
+        return passed
+
+    monkeypatch.setattr(run_command, "run_pipeline", run_pipeline)
+    load_definitions(environ(project))
+
+    assert captured["run"]("shop_sync") is passed
+    assert captured["run"]("shop_sync") is passed
+    assert locks.events == [("enter", "stage"), ("work",), ("exit", "stage")] * 2
+
+
+@pytest.mark.usefixtures("secrets_set")
+def test_a_lock_timeout_fails_once_without_retry_and_alerts(project, locks, monkeypatch):
+    locks.error = WarehouseLocked("stage", 30 * 60)
+    failures: list[RunResult] = []
+    monkeypatch.setattr(server, "print_failure", failures.append)
+    job = load_definitions(environ(project)).get_job_def("shop_sync")
+
+    outcome = job.execute_in_process(raise_on_error=False)
+
+    assert not outcome.success
+    [failure] = failures
+    assert failure.steps[0].status is StepStatus.FAILED
+    assert failure.steps[0].error == (
+        "Another run is using the stage Warehouse; gave up after 30 minutes."
+    )
+    assert not failure.retryable
+    assert SENTINEL not in failure.steps[0].error
 
 
 def test_a_missing_secret_becomes_the_failed_result_adops_run_prints(

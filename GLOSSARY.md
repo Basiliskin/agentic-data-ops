@@ -15,9 +15,16 @@ How often a Pipeline runs by itself, written once in the Pipeline file (in plain
 _Avoid_: cron, trigger, timer
 
 **Server**:
-The always-on machine that runs one Environment's Schedules (one for stage, one for prod). It pulls the Project from Git and switches to a new version only when that version passes validation.
-Until horizon 8 a Server runs the Project version in its bind-mounted folder rather than pulling from Git, and its Dagster page is bound to 127.0.0.1 because Dagster's open-source page cannot be limited to "Run now" and "Pause" (ADR-0014 clarification).
-_Avoid_: host, VM, worker, runner
+The always-on Linux machine that runs one Environment's Schedules (one for stage, one for prod) from its Project folder, a Git clone. It does not pull from Git: on a merge or release, its Self-hosted runner validates the new version, moves the folder to it and reloads the Server (ADR-0016). Its Dagster page is bound to 127.0.0.1 because Dagster's open-source page cannot be limited to "Run now" and "Pause" (ADR-0014 clarification).
+_Avoid_: host, VM, worker, runner (when meaning the Server itself; the GitHub agent on it is the Self-hosted runner)
+
+**Self-hosted runner**:
+GitHub's runner program installed on a Server machine, labelled `adops-stage` or `adops-prod`, that runs the Project's workflow jobs there so they reach that Server's Warehouse with the secrets in its `.env`.
+_Avoid_: agent, CI worker, Server (the Server is the machine and its Dagster)
+
+**Run all**:
+`adops run --all`: running every Pipeline of the Project one after another, in name order, stopping at the first failure. Branch runs and stage/prod deploys use it.
+_Avoid_: full run, run everything, batch
 
 **Step**:
 One unit of work inside a Pipeline: a Sync, a Transform, or a Reverse Sync.
@@ -124,6 +131,14 @@ _Avoid_: delete, clean up, teardown
 **Promotion**:
 Moving a reviewed change from one Environment to the next (Branch Environment → stage → prod) through Git.
 _Avoid_: deploy (when meaning this), release, push to prod
+
+**Fork PR**:
+A pull request whose branch lives in a copy of the repository under another account. It gets only `adops validate`, on a GitHub-hosted machine, with no secrets and no Branch run; GitHub's fork approval setting, not the workflow, keeps its code off the Servers.
+_Avoid_: external PR, untrusted PR
+
+**Warehouse lock**:
+The lock every Warehouse-writing run takes on one Warehouse, per Pipeline, so two runs never write to it at once. A run waits up to 30 minutes for it, then fails without retry. Branch runs and Drop use stage's lock.
+_Avoid_: mutex, run lock, concurrency limit
 
 **Secret Reference**:
 The name of a secret (e.g. `APP_DB_PASSWORD`) used in configuration in place of its value.

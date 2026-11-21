@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -453,3 +454,59 @@ def test_branch_environment_defers_rebuilds_and_drops(demo):
     assert_no_secret_or_row_value(output, env)
     assert [s for s in stage_schemas(demo) if s.startswith("br_")] == []
     assert stage_contents(demo) == stage_before
+
+
+# Runs `adops` with its Warehouse lock wrapped, so the test sees when each process held it.
+LOCK_PROBE = """
+import sys, time
+from contextlib import contextmanager
+from adops.interface import cli, run_command
+
+real_lock = run_command.build_warehouse_lock
+
+@contextmanager
+def probed_lock(*args):
+    with real_lock(*args):
+        print(f"LOCK_HELD {time.time()}", flush=True)
+        try:
+            yield
+        finally:
+            print(f"LOCK_RELEASED {time.time()}", flush=True)
+
+run_command.build_warehouse_lock = probed_lock
+cli.app(sys.argv[1:], prog_name="adops")
+"""
+
+
+def held_interval(output):
+    stamps = dict(
+        line.split()
+        for line in output.splitlines()
+        if line.startswith(("LOCK_HELD ", "LOCK_RELEASED "))
+    )
+    return float(stamps["LOCK_HELD"]), float(stamps["LOCK_RELEASED"])
+
+
+def test_two_stage_runs_at_once_do_not_overlap_on_the_warehouse(demo):
+    env = {k: v for k, v in os.environ.items() if k != "DAGSTER_HOME"}
+    command = [sys.executable, "-c", LOCK_PROBE, *RUN, "--env", "stage"]
+    runs = [
+        subprocess.Popen(
+            command,
+            cwd=demo.project,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    outputs = [run.communicate()[0] for run in runs]
+
+    for run, output in zip(runs, outputs, strict=True):
+        assert run.returncode == 0, output
+        assert "Pipeline shop_sync passed in Environment stage." in output
+        assert_no_secret_or_row_value(output, demo.env)
+    first, second = sorted(held_interval(output) for output in outputs)
+    overlap = f"both runs held the {demo.warehouse_kind} Warehouse at the same time"
+    assert first[1] <= second[0], overlap

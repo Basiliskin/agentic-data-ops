@@ -48,7 +48,9 @@ jobs:
             grep -qF "adops/templates/demo/$file" <<< "$listing" || { echo "missing $file"; exit 1; }
           done
           for file in plain/adops.yaml plain/docker-compose.yml plain/.env.example \
-                      server/Dockerfile server/workspace.yaml server/dagster.yaml; do
+                      server/Dockerfile server/workspace.yaml server/dagster.yaml \
+                      github/workflows/adops-pull-request.yml github/workflows/adops-stage.yml \
+                      github/workflows/adops-prod.yml; do
             grep -qF "adops/templates/$file" <<< "$listing" || { echo "missing $file"; exit 1; }
           done
 

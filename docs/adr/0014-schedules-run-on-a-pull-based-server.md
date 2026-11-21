@@ -14,3 +14,8 @@ stage and prod each get a Server: an always-on machine running Dagster's schedul
 **Clarification (2026-11-20):**
 - Until horizon 8, a Server runs the Project version in its bind-mounted folder instead of pulling it from Git. The Git pull, the switch after `adops validate` passes, and Git-based acceptance of Breaking Changes (ADR-0015) come with horizon 8.
 - Dagster's open-source web page has no per-action permissions, so it cannot be limited to "Run now" and "Pause". Instead it is bound to 127.0.0.1 (`DAGSTER_WEBSERVER_HOST`), so only someone on the Server machine can open it.
+
+**Clarification (2026-11-21):**
+- The Server no longer pulls from Git or polls for new versions. The generated merge and release workflows (`adops-stage.yml`, `adops-prod.yml`) run on a self-hosted runner on the Server machine (ADR-0016). They validate a fresh checkout, then push that version into the Server Project folder with a local `git fetch` and `git checkout --detach`, then reload Dagster's code location. Restarting the Server was rejected because it kills runs in progress; the daemon picks up Schedule changes within about 60 seconds of the reload.
+- Accepting a new version on stage runs every Pipeline (`adops run --all --env stage`), not only those whose files changed; prod does the same on a release.
+- The rejected option "a self-hosted GitHub runner on the Server (a forked PR could run code on it)" is now the chosen one, with a fork policy that answers that risk (ADR-0016).
