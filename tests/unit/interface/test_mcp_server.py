@@ -21,9 +21,11 @@ from typer.testing import CliRunner
 
 from adops.application.ports import (
     PreviewSample,
+    ResolvedConnection,
     ReverseSyncPreview,
     RunPlan,
     RunResult,
+    SourceUnreachable,
     StepReport,
     StepStatus,
     Sync,
@@ -31,16 +33,32 @@ from adops.application.ports import (
     WarehouseUnreachable,
 )
 from adops.application.run_pipeline import WarehouseUnreachableError
-from adops.domain.checks import CheckResult, CheckStatus
+from adops.domain.assistant_access import OUTSIDE_PROJECT_FILES, WRITES_ONLY_UNDER_ROOTS
+from adops.domain.checks import CheckResult, CheckStatus, SourceFacts
 from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import load_project_settings
+from adops.domain.schema_snapshot import TableShape
 from adops.infrastructure.warehouse_lock import DEFAULT_LOCK_TIMEOUT
-from adops.interface import cli, mcp_server, run_command
+from adops.interface import cli, drop_branch_command, mcp_server, run_command
+from adops.interface.assistant_files import MAX_WRITE_BYTES, NOT_A_FILE_TARGET, NOT_WRITABLE_TEXT
 from adops.interface.run_command import error_lines
+from adops.interface.validate_command import validate_project
 
 pytestmark = pytest.mark.anyio
 
 runner = CliRunner()
+
+TOOLS = {
+    "run",
+    "preview",
+    "validate",
+    "drop_branch",
+    "accept_schema",
+    "project_view",
+    "list_files",
+    "read_file",
+    "edit_file",
+}
 
 SEAMS = (
     "build_sync",
@@ -89,10 +107,46 @@ class StageFingerprints:
         self.saved[step] = fingerprint
 
 
+CUSTOMERS = {"id": "integer", "email": "text"}
+
+
+@dataclass
+class AcceptSync:
+    error: Exception | None = None
+    table_exists: bool = True
+    nullable: list[str] = field(default_factory=list)
+
+    def preflight(self, step, source: ResolvedConnection) -> dict[str, SourceFacts]:
+        if self.error is not None:
+            raise self.error
+        columns = CUSTOMERS if self.table_exists else {}
+        facts = SourceFacts(self.table_exists, frozenset(columns), columns)
+        return {table.name: facts for table in step.tables}
+
+    def make_columns_nullable(self, step, table, warehouse, columns) -> None:
+        self.nullable.extend(columns)
+
+
+@dataclass
+class InMemorySnapshots:
+    shapes: dict[tuple[str, str, str], TableShape] = field(default_factory=dict)
+    error: Exception | None = None
+
+    def load(self, warehouse, pipeline: str, source: str, table: str) -> TableShape | None:
+        if self.error is not None:
+            raise self.error
+        return self.shapes.get((pipeline, source, table))
+
+    def save(self, warehouse, pipeline: str, source: str, table: str, shape: TableShape) -> None:
+        self.shapes[(pipeline, source, table)] = shape
+
+
 @dataclass
 class Seams:
     orchestrator: FakeOrchestrator = field(default_factory=FakeOrchestrator)
     fingerprints: StageFingerprints = field(default_factory=StageFingerprints)
+    sync: AcceptSync = field(default_factory=AcceptSync)
+    snapshots: InMemorySnapshots = field(default_factory=InMemorySnapshots)
     calls: list[str] = field(default_factory=list)
     errors: dict[str, Exception] = field(default_factory=dict)
 
@@ -104,6 +158,8 @@ def seams(monkeypatch):
     results = {
         "build_orchestrator": lambda *_: fake.orchestrator,
         "build_fingerprint_store": lambda *_: fake.fingerprints,
+        "build_sync": lambda *_: fake.sync,
+        "build_snapshot_store": lambda *_: fake.snapshots,
         "build_project_files": real_project_files,
     }
 
@@ -236,9 +292,7 @@ async def test_every_other_environment_is_refused_before_anything_runs(
     assert_nothing_touched(seams, locks)
 
 
-async def test_dev_sharing_stages_warehouse_is_refused_before_anything_runs(
-    tmp_path, seams, locks
-):
+async def test_dev_sharing_stages_warehouse_is_refused_before_anything_runs(tmp_path, seams, locks):
     write_project(tmp_path, DEV_SHARES_STAGE_WAREHOUSE)
 
     result = await call_tool(tmp_path, "run", {"pipeline": "shop_sync", "environment": "dev"})
@@ -318,9 +372,7 @@ def test_adops_run_keeps_the_cli_wait(project, seams, locks):
     assert locks.timeouts == [DEFAULT_LOCK_TIMEOUT]
 
 
-async def test_a_branch_run_without_stages_secret_names_the_secret_reference(
-    project, seams, locks
-):
+async def test_a_branch_run_without_stages_secret_names_the_secret_reference(project, seams, locks):
     env = (project / ".env").read_text().splitlines()
     kept = [line for line in env if not line.startswith("ADOPS_MCP_STAGE_WAREHOUSE_PASSWORD=")]
     (project / ".env").write_text("\n".join(kept) + "\n")
@@ -347,9 +399,7 @@ async def test_invalid_adops_yaml_returns_the_validation_lines(project, seams, l
 
     result = await run_tool(project, pipeline="shop_sync", environment="dev")
 
-    assert error_text(result) == "Error executing tool run: " + "\n".join(
-        error_lines(caught.value)
-    )
+    assert error_text(result) == "Error executing tool run: " + "\n".join(error_lines(caught.value))
     assert_nothing_touched(seams, locks)
 
 
@@ -444,7 +494,7 @@ async def test_serve_streams_answers_json_rpc_over_the_given_streams(tmp_path):
 
     replies = [json.loads(line) for line in stdout.getvalue().splitlines()]
     tools = next(r for r in replies if r.get("id") == 2)["result"]["tools"]
-    assert {tool["name"] for tool in tools} == {"run", "preview", "validate"}
+    assert {tool["name"] for tool in tools} == TOOLS
 
 
 def test_adops_mcp_serves_the_project(monkeypatch, tmp_path):
@@ -465,7 +515,7 @@ async def list_tools(project: Path) -> dict[str, dict]:
 
 
 async def test_the_server_lists_exactly_the_built_tools(tmp_path):
-    assert set(await list_tools(tmp_path)) == {"run", "preview", "validate"}
+    assert set(await list_tools(tmp_path)) == TOOLS
 
 
 async def validate_tool(project: Path, **arguments: object) -> CallToolResult:
@@ -482,9 +532,7 @@ async def test_validate_takes_only_an_optional_pipeline(tmp_path):
 
 
 @pytest.mark.parametrize("arguments", [{}, {"pipeline": "shop_sync"}])
-async def test_validate_passes_a_valid_project_without_connecting(
-    project, seams, locks, arguments
-):
+async def test_validate_passes_a_valid_project_without_connecting(project, seams, locks, arguments):
     result = await validate_tool(project, **arguments)
 
     assert result.structuredContent == {
@@ -704,3 +752,995 @@ async def test_preview_maps_invalid_adops_yaml_to_its_problem_lines(project, sea
         "Error executing tool preview: (root): not valid YAML (line 2, column 1)"
     )
     assert_nothing_touched(seams, locks)
+
+
+STAGE_SCHEMAS = ("analytics", "raw_shop", "adops")
+FEAT_SCHEMAS = ("br_feat__raw_shop", "br_feat__analytics")
+
+
+@dataclass
+class FakeBranchWarehouse:
+    names: tuple[str, ...] = STAGE_SCHEMAS + FEAT_SCHEMAS + ("br_feat2__analytics",)
+    error: Exception | None = None
+    listed: list[object] = field(default_factory=list)
+    dropped: list[str] = field(default_factory=list)
+    deleted_state: list[str] = field(default_factory=list)
+
+    def list_schemas(self, warehouse) -> list[str]:
+        self.listed.append(warehouse)
+        if self.error is not None:
+            raise self.error
+        return list(self.names)
+
+    def drop(self, warehouse, schema: str) -> None:
+        self.dropped.append(schema)
+
+    def delete(self, environment: str) -> None:
+        self.deleted_state.append(environment)
+
+
+@pytest.fixture
+def branch_warehouse(monkeypatch):
+    fake = FakeBranchWarehouse()
+    monkeypatch.setattr(drop_branch_command, "build_warehouse_schemas", lambda *_: fake)
+    monkeypatch.setattr(drop_branch_command, "build_branch_state", lambda *_: fake)
+    return fake
+
+
+async def drop_branch_tool(project: Path, **arguments: object) -> CallToolResult:
+    result = await call_tool(project, "drop_branch", arguments)
+    assert_no_secret(result)
+    return result
+
+
+def assert_nothing_dropped(branch_warehouse, locks):
+    assert branch_warehouse.listed == []
+    assert branch_warehouse.dropped == []
+    assert branch_warehouse.deleted_state == []
+    assert locks.events == []
+
+
+async def test_drop_branch_takes_only_a_branch(tmp_path):
+    schema = (await list_tools(tmp_path))["drop_branch"]
+
+    assert set(schema["properties"]) == {"branch"}
+    assert schema["required"] == ["branch"]
+
+
+async def test_drop_branch_drops_only_the_branchs_schemas_under_stages_lock(
+    project, branch_warehouse, locks
+):
+    result = await drop_branch_tool(project, branch="feat")
+
+    assert result.structuredContent == {
+        "environment": "br_feat",
+        "dropped_schemas": ["br_feat__analytics", "br_feat__raw_shop"],
+    }
+    assert branch_warehouse.dropped == ["br_feat__analytics", "br_feat__raw_shop"]
+    assert branch_warehouse.deleted_state == ["br_feat"]
+    assert locks.events == [("enter", "stage"), ("exit", "stage")]
+    assert locks.timeouts == [mcp_server.ASSISTANT_LOCK_TIMEOUT]
+    assert [warehouse.database for warehouse in locks.warehouses] == ["w_stage"]
+
+
+async def test_drop_branch_with_nothing_left_succeeds(project, branch_warehouse, locks):
+    branch_warehouse.names = STAGE_SCHEMAS
+
+    result = await drop_branch_tool(project, branch="feat")
+
+    assert result.structuredContent == {"environment": "br_feat", "dropped_schemas": []}
+    assert branch_warehouse.dropped == []
+
+
+async def test_drop_branch_refuses_an_empty_branch_before_anything_runs(
+    project, branch_warehouse, locks
+):
+    result = await drop_branch_tool(project, branch="")
+
+    assert error_text(result) == (
+        "Error executing tool drop_branch: the Assistant works only in the Environment named "
+        "exactly `dev` or in a Branch Environment; name `dev` or a branch"
+    )
+    assert_nothing_dropped(branch_warehouse, locks)
+    assert locks.timeouts == []
+
+
+async def test_drop_branch_rejects_a_branch_name_without_letters_or_digits(
+    project, branch_warehouse, locks
+):
+    result = await drop_branch_tool(project, branch="///")
+
+    assert error_text(result) == (
+        "Error executing tool drop_branch: --branch: the branch name has no letters or digits "
+        "to name a Branch Environment"
+    )
+    assert branch_warehouse.listed == []
+    assert branch_warehouse.deleted_state == []
+
+
+async def test_a_held_stage_lock_replies_busy_to_drop_branch_at_once(
+    project, branch_warehouse, locks
+):
+    locks.error = WarehouseLocked("stage", 0)
+
+    result = await drop_branch_tool(project, branch="feat")
+
+    assert error_text(result) == (
+        "Error executing tool drop_branch: "
+        "The stage Warehouse is busy with another run; try again later."
+    )
+    assert locks.timeouts == [mcp_server.ASSISTANT_LOCK_TIMEOUT]
+    assert_nothing_dropped(branch_warehouse, locks)
+
+
+async def test_drop_branch_without_stages_secret_names_only_the_secret_reference(
+    project, branch_warehouse, locks
+):
+    env = (project / ".env").read_text().splitlines()
+    kept = [line for line in env if not line.startswith("ADOPS_MCP_STAGE_WAREHOUSE_PASSWORD=")]
+    (project / ".env").write_text("\n".join(kept) + "\n")
+
+    result = await drop_branch_tool(project, branch="feat")
+
+    assert "ADOPS_MCP_STAGE_WAREHOUSE_PASSWORD" in error_text(result)
+    assert_nothing_dropped(branch_warehouse, locks)
+
+
+async def test_drop_branch_on_an_unreachable_warehouse_gives_fixed_text(
+    project, branch_warehouse, locks
+):
+    branch_warehouse.error = WarehouseUnreachable()
+
+    result = await drop_branch_tool(project, branch="feat")
+
+    assert error_text(result) == (
+        "Error executing tool drop_branch: "
+        "The Warehouse is unreachable or locked by another process."
+    )
+    assert branch_warehouse.deleted_state == []
+    assert locks.events == [("enter", "stage"), ("exit", "stage")]
+
+
+async def test_drop_branch_without_adops_yaml_names_the_file(tmp_path, branch_warehouse, locks):
+    result = await drop_branch_tool(tmp_path, branch="feat")
+
+    assert error_text(result) == "Error executing tool drop_branch: adops.yaml: file not found"
+    assert_nothing_dropped(branch_warehouse, locks)
+
+
+async def test_drop_branch_reduces_an_unexpected_error_to_its_type(
+    project, branch_warehouse, locks
+):
+    secret = secret_values()["ADOPS_MCP_STAGE_WAREHOUSE_PASSWORD"]
+    branch_warehouse.error = KeyError(f"postgresql://w:{secret}@localhost/w_stage")
+
+    result = await drop_branch_tool(project, branch="feat")
+
+    assert error_text(result) == "Error executing tool drop_branch: unexpected KeyError"
+    assert branch_warehouse.deleted_state == []
+
+
+@dataclass
+class AcceptCalls:
+    arguments: list[tuple[object, ...]] = field(default_factory=list)
+
+
+@pytest.fixture
+def accepted(monkeypatch):
+    calls = AcceptCalls()
+    real = mcp_server.accept_project_schema
+
+    def spy(*arguments):
+        calls.arguments.append(arguments)
+        return real(*arguments)
+
+    monkeypatch.setattr(mcp_server, "accept_project_schema", spy)
+    return calls
+
+
+async def accept_schema_tool(project: Path, **arguments: object) -> CallToolResult:
+    result = await call_tool(project, "accept_schema", {"pipeline": "shop_sync", **arguments})
+    assert_no_secret(result)
+    return result
+
+
+def assert_nothing_accepted(seams, locks, accepted):
+    assert_nothing_touched(seams, locks)
+    assert accepted.arguments == []
+    assert seams.snapshots.shapes == {}
+
+
+async def test_accept_schema_takes_a_pipeline_a_table_and_dev_or_a_branch(tmp_path):
+    schema = (await list_tools(tmp_path))["accept_schema"]
+
+    assert set(schema["properties"]) == {"pipeline", "table", "environment", "branch"}
+    assert sorted(schema["required"]) == ["pipeline", "table"]
+
+
+async def test_accept_schema_in_dev_records_the_shape_without_a_lock(
+    project, seams, locks, accepted
+):
+    result = await accept_schema_tool(project, table="customers", environment="dev")
+
+    assert result.structuredContent == {
+        "pipeline": "shop_sync",
+        "table": "customers",
+        "step": "sync_shop",
+        "environment": "dev",
+        "column_count": 2,
+        "nullable_columns": [],
+    }
+    assert accepted.arguments == [(project, "shop_sync", "customers", "dev")]
+    assert seams.snapshots.shapes == {("shop_sync", "shop", "customers"): TableShape(CUSTOMERS)}
+    assert locks.events == []
+    assert locks.timeouts == []
+
+
+async def test_accept_schema_names_the_columns_that_may_now_be_null(
+    project, seams, locks, accepted
+):
+    seams.snapshots.shapes[("shop_sync", "shop", "customers")] = TableShape(
+        {**CUSTOMERS, "phone": "text"}
+    )
+
+    result = await accept_schema_tool(project, table="customers", environment="dev")
+
+    assert result.structuredContent["nullable_columns"] == ["phone"]
+    assert seams.sync.nullable == ["phone"]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"environment": "stage"},
+        {"environment": "prod"},
+        {"environment": "qa"},
+        {"environment": "production"},
+        {"environment": "Dev"},
+        {"environment": "dev "},
+        {"environment": "development"},
+        {"environment": "dev", "branch": "feat"},
+        {},
+    ],
+)
+async def test_accept_schema_refuses_every_other_environment_before_anything_runs(
+    project, seams, locks, accepted, arguments
+):
+    result = await accept_schema_tool(project, table="customers", **arguments)
+
+    assert "exactly `dev`" in error_text(result)
+    assert_nothing_accepted(seams, locks, accepted)
+
+
+async def test_accept_schema_refuses_a_branch_before_anything_runs(project, seams, locks, accepted):
+    result = await accept_schema_tool(project, table="customers", branch="feature")
+
+    assert error_text(result) == (
+        "Error executing tool accept_schema: the Assistant accepts a Breaking Change only in "
+        "`dev`; a Branch Environment records its accepted shapes afresh, so there is nothing "
+        "to accept there"
+    )
+    assert_nothing_accepted(seams, locks, accepted)
+
+
+async def test_accept_schema_refuses_dev_sharing_stages_warehouse(tmp_path, seams, locks, accepted):
+    write_project(tmp_path, DEV_SHARES_STAGE_WAREHOUSE)
+
+    result = await call_tool(
+        tmp_path,
+        "accept_schema",
+        {"pipeline": "shop_sync", "table": "customers", "environment": "dev"},
+    )
+
+    assert_no_secret(result, secret_values(DEV_SHARES_STAGE_WAREHOUSE))
+    assert "dev uses the same database as stage" in error_text(result)
+    assert_nothing_accepted(seams, locks, accepted)
+
+
+async def test_accept_schema_with_an_unreachable_source_names_only_the_table(project, seams, locks):
+    seams.sync.error = SourceUnreachable("customers")
+
+    result = await accept_schema_tool(project, table="customers", environment="dev")
+
+    assert error_text(result) == (
+        "Error executing tool accept_schema: The Source of table customers is unreachable."
+    )
+    assert seams.snapshots.shapes == {}
+
+
+async def test_accept_schema_with_an_unreachable_warehouse_gives_fixed_text(project, seams, locks):
+    seams.snapshots.error = WarehouseUnreachable()
+
+    result = await accept_schema_tool(project, table="customers", environment="dev")
+
+    assert error_text(result) == (
+        "Error executing tool accept_schema: "
+        "The Warehouse is unreachable or locked by another process."
+    )
+
+
+async def test_accept_schema_without_devs_source_secret_names_only_the_reference(
+    project, seams, locks
+):
+    env = (project / ".env").read_text().splitlines()
+    kept = [line for line in env if not line.startswith("ADOPS_MCP_DEV_SHOP_PASSWORD=")]
+    (project / ".env").write_text("\n".join(kept) + "\n")
+
+    result = await accept_schema_tool(project, table="customers", environment="dev")
+
+    assert error_text(result) == (
+        "Error executing tool accept_schema: these environment variables are not set or are "
+        "empty: ADOPS_MCP_DEV_SHOP_PASSWORD"
+    )
+    assert seams.snapshots.shapes == {}
+
+
+async def test_accept_schema_for_a_table_missing_from_the_source_says_nothing_was_accepted(
+    project, seams, locks
+):
+    seams.sync.table_exists = False
+
+    result = await accept_schema_tool(project, table="customers", environment="dev")
+
+    assert error_text(result) == (
+        "Error executing tool accept_schema: "
+        "Step sync_shop: customers not found in Source shop; nothing accepted"
+    )
+    assert seams.snapshots.shapes == {}
+
+
+async def test_accept_schema_for_a_table_no_step_copies_names_the_problem(project, seams, locks):
+    result = await accept_schema_tool(project, table="orders", environment="dev")
+
+    assert error_text(result) == (
+        "Error executing tool accept_schema: orders: no Step in Pipeline shop_sync copies it"
+    )
+
+
+async def test_accept_schema_reduces_an_unexpected_error_to_its_type(project, seams, locks):
+    secret = secret_values()["ADOPS_MCP_DEV_WAREHOUSE_PASSWORD"]
+    seams.snapshots.error = RuntimeError(f"postgresql://w:{secret}@localhost/w_dev")
+
+    result = await accept_schema_tool(project, table="customers", environment="dev")
+
+    assert error_text(result) == "Error executing tool accept_schema: unexpected RuntimeError"
+
+
+@dataclass
+class FileReads:
+    calls: list[str] = field(default_factory=list)
+
+
+@pytest.fixture
+def file_reads(monkeypatch):
+    reads = FileReads()
+
+    def spy(name):
+        def refuse(*_):
+            reads.calls.append(name)
+            raise AssertionError(f"{name} must not run for a refused Pipeline name")
+
+        return refuse
+
+    monkeypatch.setattr(run_command, "read_settings", spy("read_settings"))
+    monkeypatch.setattr(run_command, "read_project_files", spy("read_project_files"))
+    monkeypatch.setattr(mcp_server, "validate_project", spy("validate_project"))
+    return reads
+
+
+PIPELINE_TOOL_ARGUMENTS = {
+    "run": {"environment": "dev"},
+    "preview": {"environment": "dev"},
+    "validate": {},
+    "accept_schema": {"table": "customers", "environment": "dev"},
+}
+
+
+@pytest.mark.parametrize("tool", sorted(PIPELINE_TOOL_ARGUMENTS))
+@pytest.mark.parametrize("pipeline", ["../adops", "a/b", "a\\b", ".."])
+async def test_every_pipeline_tool_refuses_a_name_outside_pipelines_before_reading_a_file(
+    project, seams, locks, file_reads, tool, pipeline
+):
+    arguments = {"pipeline": pipeline, **PIPELINE_TOOL_ARGUMENTS[tool]}
+
+    result = await call_tool(project, tool, arguments)
+
+    assert_no_secret(result)
+    assert error_text(result) == (
+        f"Error executing tool {tool}: the Assistant takes only a plain Pipeline name, the file "
+        "name in pipelines/ without .yaml; a name with a slash, a backslash, two dots in a row "
+        "or a NUL character is refused"
+    )
+    assert file_reads.calls == []
+    assert_nothing_touched(seams, locks)
+
+
+VIEW_SETTINGS = (
+    SETTINGS.replace("user: w,", "user: wh_login_7,")
+    .replace("user: s,", "user: src_login_7,")
+    .replace("user: c,", "user: crm_login_7,")
+    + """  local:
+    warehouse: {type: duckdb, path: hidden_dir/local.duckdb}
+    sources:
+      shop: {type: postgres, host: src.local.example, port: 5440, database: shop_local,
+             user: src_login_7, password_env: ADOPS_MCP_LOCAL_SHOP_PASSWORD}
+"""
+)
+
+CONNECTION_DETAILS = (
+    "localhost",
+    "db.internal",
+    "src.local.example",
+    "w_dev",
+    "w_stage",
+    "w_prod",
+    "crm_dev",
+    "shop_local",
+    "wh_login_7",
+    "src_login_7",
+    "crm_login_7",
+    "5433",
+    "5434",
+    "5440",
+    "hidden_dir",
+    "local.duckdb",
+)
+
+FULL_PIPELINE = """
+name: a_full
+schedule: daily at 02:00
+steps:
+  - name: sync_shop
+    source: shop
+    tables:
+      - name: customers
+        mode: full_refresh
+        primary_key: id
+  - name: transform_shop
+    type: transform
+    project: dbt
+  - type: reverse_sync
+    name: push_stats
+    model: customer_stats
+    target: crm
+    target_table: customer_stats
+    key: customer_id
+    mapping: {order_count: orders}
+"""
+
+DEV_REFERENCES = (
+    "ADOPS_MCP_DEV_WAREHOUSE_PASSWORD",
+    "ADOPS_MCP_DEV_SHOP_PASSWORD",
+    "ADOPS_MCP_DEV_CRM_PASSWORD",
+)
+
+
+@pytest.fixture
+def view_project(tmp_path, monkeypatch):
+    secrets = write_project(tmp_path, VIEW_SETTINGS)
+    (tmp_path / "pipelines" / "z_last.yaml").write_text(FULL_PIPELINE)
+    for name in secrets:
+        monkeypatch.delenv(name, raising=False)
+    return tmp_path
+
+
+def project_tree(project: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(project).as_posix(): path.read_bytes()
+        for path in sorted(project.rglob("*"))
+        if path.is_file()
+    }
+
+
+async def project_view_tool(project: Path) -> CallToolResult:
+    result = await call_tool(project, "project_view", {})
+    assert_no_secret(result, secret_values(VIEW_SETTINGS))
+    return result
+
+
+def statuses(reply: dict) -> dict[str, str]:
+    found = dict(reply["alert_webhook"])
+    for environment in reply["environments"]:
+        found.update(environment["secret_references"])
+    return found
+
+
+async def test_project_view_takes_no_arguments(tmp_path):
+    schema = (await list_tools(tmp_path))["project_view"]
+
+    assert schema.get("properties", {}) == {}
+
+
+async def test_project_view_lists_pipelines_steps_schedules_and_environments(
+    view_project, seams, locks
+):
+    before = project_tree(view_project)
+
+    result = await project_view_tool(view_project)
+
+    assert not result.isError
+    reply = result.structuredContent
+    assert reply["pipelines"] == [
+        {
+            "name": "a_full",
+            "schedule": "daily at 02:00 (cron 0 2 * * *, UTC)",
+            "steps": [
+                {"name": "sync_shop", "kind": "sync"},
+                {"name": "transform_shop", "kind": "transform"},
+                {"name": "push_stats", "kind": "reverse_sync"},
+            ],
+        },
+        {"name": "shop_sync", "schedule": None, "steps": [{"name": "sync_shop", "kind": "sync"}]},
+    ]
+    assert [environment["name"] for environment in reply["environments"]] == [
+        "dev",
+        "local",
+        "prod",
+        "stage",
+    ]
+    assert reply["environments"][1] == {
+        "name": "local",
+        "warehouse_type": "duckdb",
+        "sources": ["shop"],
+        "targets": [],
+        "secret_references": {"ADOPS_MCP_LOCAL_SHOP_PASSWORD": "set"},
+    }
+    assert reply["environments"][2] == {
+        "name": "prod",
+        "warehouse_type": "postgres",
+        "sources": ["shop"],
+        "targets": ["crm"],
+        "secret_references": {
+            "ADOPS_MCP_PROD_WAREHOUSE_PASSWORD": "set",
+            "ADOPS_MCP_PROD_SHOP_PASSWORD": "set",
+            "ADOPS_MCP_PROD_CRM_PASSWORD": "set",
+        },
+    }
+    assert reply["problems"] == []
+    assert_nothing_touched(seams, locks)
+    assert project_tree(view_project) == before
+
+
+async def test_project_view_shows_every_secret_reference_set_and_no_connection_detail(
+    view_project,
+):
+    result = await project_view_tool(view_project)
+
+    found = statuses(result.structuredContent)
+    assert set(found) == set(secret_values(VIEW_SETTINGS))
+    assert set(found.values()) == {"set"}
+    assert found["ADOPS_MCP_ALERT_WEBHOOK"] == "set"
+    serialized = result.model_dump_json()
+    assert [detail for detail in CONNECTION_DETAILS if detail in serialized] == []
+
+
+def test_the_detail_scan_catches_an_environment_serialized_wholesale():
+    settings = load_project_settings(VIEW_SETTINGS)
+    serialized = json.dumps(
+        {name: env.model_dump(mode="json") for name, env in settings.environments.items()}
+    )
+
+    assert [detail for detail in CONNECTION_DETAILS if detail not in serialized] == []
+
+
+async def test_project_view_schedule_matches_what_validate_prints(view_project):
+    (view_project / "adops.yaml").write_text(VIEW_SETTINGS + "timezone: Europe/Berlin\n")
+
+    result = await project_view_tool(view_project)
+
+    pipelines = result.structuredContent["pipelines"]
+    lines = [f"{p['name']}: {p['schedule'] or 'no schedule'}" for p in pipelines]
+    assert sorted(lines) == sorted(validate_project(view_project, None).schedules)
+    assert pipelines[0]["schedule"] == "daily at 02:00 (cron 0 2 * * *, Europe/Berlin)"
+
+
+async def test_project_view_shows_missing_for_exactly_the_unset_references(
+    view_project, monkeypatch
+):
+    unset = {"ADOPS_MCP_DEV_SHOP_PASSWORD", "ADOPS_MCP_ALERT_WEBHOOK"}
+    secrets = secret_values(VIEW_SETTINGS)
+    kept = {name: value for name, value in secrets.items() if name not in unset}
+    (view_project / ".env").write_text("".join(f"{n}={v}\n" for n, v in kept.items()))
+    monkeypatch.setenv("ADOPS_MCP_DEV_CRM_PASSWORD", "")
+
+    result = await project_view_tool(view_project)
+
+    found = statuses(result.structuredContent)
+    missing = {name for name, status in found.items() if status == "missing"}
+    assert missing == unset | {"ADOPS_MCP_DEV_CRM_PASSWORD"}
+    assert found["ADOPS_MCP_DEV_WAREHOUSE_PASSWORD"] == "set"
+
+
+async def test_project_view_without_an_alert_webhook_shows_none(project):
+    (project / "adops.yaml").write_text(
+        SETTINGS.replace("alert_webhook_env: ADOPS_MCP_ALERT_WEBHOOK\n", "")
+    )
+
+    result = await project_view_tool(project)
+
+    assert result.structuredContent["alert_webhook"] == {}
+    dev = result.structuredContent["environments"][0]
+    assert list(dev["secret_references"]) == list(DEV_REFERENCES)
+
+
+async def test_project_view_without_a_pipelines_folder_lists_only_environments(
+    view_project, seams, locks
+):
+    for path in (view_project / "pipelines").iterdir():
+        path.unlink()
+    (view_project / "pipelines").rmdir()
+
+    result = await project_view_tool(view_project)
+
+    assert not result.isError
+    assert result.structuredContent["pipelines"] == []
+    assert result.structuredContent["problems"] == []
+    assert len(result.structuredContent["environments"]) == 4
+    assert_nothing_touched(seams, locks)
+
+
+async def test_project_view_lists_a_failing_pipelines_problems_and_still_shows_the_rest(
+    view_project, seams, locks
+):
+    (view_project / "pipelines" / "broken.yaml").write_text("name: [broken\n")
+    (view_project / "pipelines" / "binary.yaml").write_bytes(b"\xff\xfe\x00")
+    before = project_tree(view_project)
+
+    result = await project_view_tool(view_project)
+
+    reply = result.structuredContent
+    assert reply["problems"] == [
+        "pipelines/binary.yaml: not UTF-8 text",
+        "pipelines/broken.yaml: (root): not valid YAML (line 2, column 1)",
+    ]
+    assert [pipeline["name"] for pipeline in reply["pipelines"]] == ["a_full", "shop_sync"]
+    assert_nothing_touched(seams, locks)
+    assert project_tree(view_project) == before
+
+
+async def test_project_view_maps_invalid_adops_yaml_to_its_problem_lines(
+    view_project, seams, locks
+):
+    (view_project / "adops.yaml").write_text("environments: [dev\n")
+    before = project_tree(view_project)
+
+    result = await project_view_tool(view_project)
+
+    assert error_text(result) == (
+        "Error executing tool project_view: (root): not valid YAML (line 2, column 1)"
+    )
+    assert_nothing_touched(seams, locks)
+    assert project_tree(view_project) == before
+
+
+async def test_project_view_without_adops_yaml_names_the_file(tmp_path, seams, locks):
+    result = await project_view_tool(tmp_path)
+
+    assert error_text(result) == "Error executing tool project_view: adops.yaml: file not found"
+    assert_nothing_touched(seams, locks)
+    assert project_tree(tmp_path) == {}
+
+
+async def test_project_view_reduces_an_unexpected_error_to_its_type(view_project, monkeypatch):
+    secret = secret_values(VIEW_SETTINGS)["ADOPS_MCP_PROD_WAREHOUSE_PASSWORD"]
+
+    def explode(_):
+        raise RuntimeError(f"password {secret} at db.internal")
+
+    monkeypatch.setattr(mcp_server, "load_pipelines", explode)
+
+    result = await project_view_tool(view_project)
+
+    assert error_text(result) == "Error executing tool project_view: unexpected RuntimeError"
+
+
+def test_project_view_reply_builds_from_explicit_fields_only():
+    settings = load_project_settings(VIEW_SETTINGS)
+
+    reply = mcp_server.project_view_reply(settings, [], ["p: problem"], {})
+
+    assert set(reply) == {"pipelines", "environments", "alert_webhook", "problems"}
+    assert set(reply["environments"][0]) == {
+        "name",
+        "warehouse_type",
+        "sources",
+        "targets",
+        "secret_references",
+    }
+    assert set(statuses(reply).values()) == {"missing"}
+    assert reply["problems"] == ["p: problem"]
+
+
+async def file_tool(project: Path, tool: str, secrets: dict[str, str], **arguments: object):
+    result = await call_tool(project, tool, arguments)
+    assert_no_secret(result, secrets)
+    return result
+
+
+async def test_the_file_tools_take_a_path_or_an_optional_directory(tmp_path):
+    tools = await list_tools(tmp_path)
+
+    assert set(tools["list_files"]["properties"]) == {"directory"}
+    assert tools["list_files"].get("required", []) == []
+    assert set(tools["read_file"]["properties"]) == {"path"}
+    assert tools["read_file"]["required"] == ["path"]
+
+
+@pytest.mark.parametrize("relative", ["pipelines/x.yaml", "dbt/models/m.sql", "adops.yaml"])
+async def test_read_file_shows_a_secret_value_typed_into_the_file_as_stars(
+    project, seams, locks, relative
+):
+    secret = secret_values()["ADOPS_MCP_PROD_WAREHOUSE_PASSWORD"]
+    path = project / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    original = path.read_text() if path.exists() else ""
+    path.write_text(f"{original}# pasted by mistake: {secret}\n")
+    before = project_tree(project)
+
+    result = await file_tool(project, "read_file", secret_values(), path=relative)
+
+    assert not result.isError
+    assert result.structuredContent["path"] == relative
+    assert result.structuredContent["text"].endswith("# pasted by mistake: ***\n")
+    assert_nothing_touched(seams, locks)
+    assert project_tree(project) == before
+
+
+async def test_read_file_redacts_the_process_environment_value_that_wins(
+    project, seams, locks, monkeypatch
+):
+    monkeypatch.setenv("ADOPS_MCP_DEV_SHOP_PASSWORD", "from-the-process-env")
+    (project / "pipelines" / "x.yaml").write_text("from-the-process-env\n")
+    secrets = {**secret_values(), "process": "from-the-process-env"}
+
+    result = await file_tool(project, "read_file", secrets, path="pipelines/x.yaml")
+
+    assert result.structuredContent["text"] == "***\n"
+
+
+@pytest.mark.parametrize("relative", [".env", ".ENV", "pipelines/.env", "../.env"])
+async def test_read_file_refuses_dotenv_without_its_text(project, seams, locks, relative):
+    (project / "pipelines" / ".env").write_text((project / ".env").read_text())
+    before = project_tree(project)
+
+    result = await file_tool(project, "read_file", secret_values(), path=relative)
+
+    assert error_text(result) == f"Error executing tool read_file: {OUTSIDE_PROJECT_FILES}"
+    assert_nothing_touched(seams, locks)
+    assert project_tree(project) == before
+
+
+async def test_read_file_refuses_a_symlink_to_dotenv(project, seams, locks):
+    (project / "pipelines" / "env.yaml").symlink_to(project / ".env")
+
+    result = await file_tool(project, "read_file", secret_values(), path="pipelines/env.yaml")
+
+    assert error_text(result) == f"Error executing tool read_file: {OUTSIDE_PROJECT_FILES}"
+
+
+async def test_read_file_names_a_missing_file(project, seams, locks):
+    result = await file_tool(project, "read_file", secret_values(), path="pipelines/nope.yaml")
+
+    assert error_text(result) == (
+        "Error executing tool read_file: pipelines/nope.yaml: file not found"
+    )
+    assert_nothing_touched(seams, locks)
+
+
+async def test_read_file_with_broken_adops_yaml_returns_its_problem_lines(project, seams, locks):
+    (project / "adops.yaml").write_text("environments: [dev\n")
+
+    result = await file_tool(project, "read_file", secret_values(), path="pipelines/shop_sync.yaml")
+
+    assert error_text(result) == (
+        "Error executing tool read_file: (root): not valid YAML (line 2, column 1)"
+    )
+
+
+async def test_read_file_reduces_an_unexpected_error_to_its_type(project, monkeypatch):
+    secret = secret_values()["ADOPS_MCP_PROD_WAREHOUSE_PASSWORD"]
+
+    def explode(*_):
+        raise RuntimeError(f"password {secret}")
+
+    monkeypatch.setattr(mcp_server, "read_project_file", explode)
+
+    result = await file_tool(project, "read_file", secret_values(), path="adops.yaml")
+
+    assert error_text(result) == "Error executing tool read_file: unexpected RuntimeError"
+
+
+async def test_list_files_lists_only_allowed_paths(project, seams, locks):
+    (project / "pipelines" / ".env").write_text("X=1")
+    (project / ".adops").mkdir()
+    (project / ".adops" / "state.json").write_text("{}")
+    (project / "dbt" / "models").mkdir(parents=True)
+    (project / "dbt" / "models" / "m.sql").write_text("select 1")
+    before = project_tree(project)
+
+    result = await file_tool(project, "list_files", secret_values())
+
+    assert result.structuredContent == {
+        "files": ["adops.yaml", "dbt/models/m.sql", "pipelines/shop_sync.yaml"]
+    }
+    assert_nothing_touched(seams, locks)
+    assert project_tree(project) == before
+
+
+async def test_list_files_in_one_directory(project, seams, locks):
+    result = await file_tool(project, "list_files", secret_values(), directory="pipelines")
+
+    assert result.structuredContent == {"files": ["pipelines/shop_sync.yaml"]}
+
+
+async def test_list_files_refuses_a_directory_outside_the_project_files(project, seams, locks):
+    result = await file_tool(project, "list_files", secret_values(), directory=".github")
+
+    assert error_text(result) == f"Error executing tool list_files: {OUTSIDE_PROJECT_FILES}"
+
+
+async def edit_tool(project: Path, path: str, content: str) -> CallToolResult:
+    return await file_tool(project, "edit_file", secret_values(), path=path, content=content)
+
+
+SECOND_PIPELINE = """
+name: second
+steps:
+  - name: sync_shop
+    source: shop
+    tables:
+      - name: orders
+        mode: full_refresh
+        primary_key: id
+"""
+
+
+async def test_edit_file_takes_a_path_and_the_whole_content(tmp_path):
+    schema = (await list_tools(tmp_path))["edit_file"]
+
+    assert set(schema["properties"]) == {"path", "content"}
+    assert sorted(schema["required"]) == ["content", "path"]
+
+
+async def test_edit_file_creates_a_pipeline_that_validate_then_accepts(project, seams, locks):
+    result = await edit_tool(project, "pipelines/second.yaml", SECOND_PIPELINE)
+
+    assert not result.isError
+    assert result.structuredContent == {
+        "path": "pipelines/second.yaml",
+        "bytes_written": len(SECOND_PIPELINE.encode()),
+        "created": True,
+    }
+    assert (project / "pipelines" / "second.yaml").read_text() == SECOND_PIPELINE
+    validated = await file_tool(project, "validate", secret_values(), pipeline="second")
+    assert validated.structuredContent["valid"] is True
+    assert_nothing_touched(seams, locks)
+
+
+async def test_edit_file_overwrites_and_validate_reports_the_new_problem(project, seams, locks):
+    result = await edit_tool(project, "pipelines/shop_sync.yaml", "name: shop_sync\nsteps: []\n")
+
+    assert result.structuredContent["created"] is False
+    validated = await file_tool(project, "validate", secret_values(), pipeline="shop_sync")
+    assert validated.structuredContent["valid"] is False
+    assert validated.structuredContent["problems"] != []
+    assert_nothing_touched(seams, locks)
+
+
+async def test_edit_file_never_echoes_the_content(project):
+    secret = secret_values()["ADOPS_MCP_PROD_WAREHOUSE_PASSWORD"]
+    content = f"# token: {secret}\n{SECOND_PIPELINE}"
+
+    result = await edit_tool(project, "pipelines/second.yaml", content)
+
+    assert not result.isError
+    assert set(result.structuredContent) == {"path", "bytes_written", "created"}
+    assert "token" not in result.model_dump_json()
+    assert (project / "pipelines" / "second.yaml").read_text() == content
+
+
+@pytest.mark.parametrize(
+    ("relative", "message"),
+    [
+        ("adops.yaml", WRITES_ONLY_UNDER_ROOTS),
+        (".env", OUTSIDE_PROJECT_FILES),
+        (".ENV", OUTSIDE_PROJECT_FILES),
+        ("pipelines/.env", OUTSIDE_PROJECT_FILES),
+        ("../adops.yaml", OUTSIDE_PROJECT_FILES),
+        (".github/workflows/ci.yml", OUTSIDE_PROJECT_FILES),
+    ],
+)
+async def test_edit_file_refuses_settings_and_dotenv_leaving_every_file_unchanged(
+    project, seams, locks, relative, message
+):
+    before = project_tree(project)
+
+    result = await edit_tool(project, relative, "environments: {}\n")
+
+    assert error_text(result) == f"Error executing tool edit_file: {message}"
+    assert project_tree(project) == before
+    assert_nothing_touched(seams, locks)
+
+
+async def test_edit_file_refuses_a_symlink_to_adops_yaml(project):
+    (project / "pipelines" / "settings.yaml").symlink_to(project / "adops.yaml")
+    before = (project / "adops.yaml").read_bytes()
+
+    result = await edit_tool(project, "pipelines/settings.yaml", "environments: {}\n")
+
+    assert error_text(result) == f"Error executing tool edit_file: {WRITES_ONLY_UNDER_ROOTS}"
+    assert (project / "adops.yaml").read_bytes() == before
+
+
+async def test_edit_file_refuses_oversized_content_before_writing(project):
+    before = project_tree(project)
+
+    result = await edit_tool(project, "pipelines/big.yaml", "x" * (MAX_WRITE_BYTES + 1))
+
+    assert error_text(result) == f"Error executing tool edit_file: {NOT_WRITABLE_TEXT}"
+    assert project_tree(project) == before
+
+
+async def test_edit_file_refuses_a_directory(project):
+    before = project_tree(project)
+
+    result = await edit_tool(project, "pipelines", "x")
+
+    assert error_text(result) == f"Error executing tool edit_file: {WRITES_ONLY_UNDER_ROOTS}"
+    (project / "pipelines" / "folder").mkdir()
+    result = await edit_tool(project, "pipelines/folder", "x")
+    assert error_text(result) == f"Error executing tool edit_file: {NOT_A_FILE_TARGET}"
+    assert project_tree(project) == before
+
+
+async def test_edit_file_names_only_the_path_when_the_write_fails(project, monkeypatch):
+    secret = secret_values()["ADOPS_MCP_PROD_WAREHOUSE_PASSWORD"]
+
+    def deny(*_):
+        raise PermissionError(f"denied {secret}")
+
+    monkeypatch.setattr(Path, "write_bytes", deny)
+
+    result = await edit_tool(project, "pipelines/shop_sync.yaml", "x")
+
+    assert error_text(result) == (
+        "Error executing tool edit_file: pipelines/shop_sync.yaml: could not be written"
+    )
+
+
+async def test_edit_file_reduces_an_unexpected_error_to_its_type(project, monkeypatch):
+    secret = secret_values()["ADOPS_MCP_PROD_WAREHOUSE_PASSWORD"]
+
+    def explode(*_):
+        raise RuntimeError(f"password {secret}")
+
+    monkeypatch.setattr(mcp_server, "write_project_file", explode)
+
+    result = await edit_tool(project, "pipelines/a.yaml", "x")
+
+    assert error_text(result) == "Error executing tool edit_file: unexpected RuntimeError"
+
+
+def test_project_secret_values_are_the_set_secret_references(view_project, monkeypatch):
+    secrets = secret_values(VIEW_SETTINGS)
+    monkeypatch.setenv("ADOPS_MCP_LOCAL_SHOP_PASSWORD", "")
+    (view_project / ".env").write_text(
+        "".join(
+            f"{name}={value}\n"
+            for name, value in secrets.items()
+            if name != "ADOPS_MCP_LOCAL_SHOP_PASSWORD"
+        )
+    )
+    expected = {v for n, v in secrets.items() if n != "ADOPS_MCP_LOCAL_SHOP_PASSWORD"}
+
+    assert set(mcp_server.project_secret_values(view_project)) == expected
+
+
+def test_project_secret_values_without_an_alert_webhook(tmp_path, monkeypatch):
+    settings = SETTINGS.replace("alert_webhook_env: ADOPS_MCP_ALERT_WEBHOOK\n", "")
+    secrets = write_project(tmp_path, settings)
+    for name in secrets:
+        monkeypatch.delenv(name, raising=False)
+
+    assert set(mcp_server.project_secret_values(tmp_path)) == set(secrets.values())
+    assert "ADOPS_MCP_ALERT_WEBHOOK" not in secrets

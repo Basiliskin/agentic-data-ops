@@ -245,3 +245,5 @@
 - 2026-11-21 | horizon 9 | stdio serving | FastMCP.run_stdio_async takes no custom stdout, so mcp_server.serve_streams calls stdio_server(stdin, stdout) on server._mcp_server. Tests import `from mcp_harness import ...`.
 - 2026-11-21 | horizon 9 | e2e stage state | The e2e stage Warehouse is shared by every test in the module and syncs incrementally, so an extra stage run leaks edited rows into later tests. dev E2E no longer shows an update diff.
 - 2026-11-21 | horizon 9 | demo prod block | The commented prod block in the demo adops.yaml reuses dev's Warehouse (localhost:15433/warehouse); uncommented as shipped, the shared-connection rule refuses dev until prod is repointed.
+- 2026-11-21 | horizon 10 | a self-referencing symlink under pipelines/ or dbt/ makes Path.resolve raise RuntimeError; resolve_project_file lets it escape, so one loop fails all of list_files — edit-file-tool reuses this path
+- 2026-11-21 | horizon 10 | resolve_project_file now refuses a symlink loop (RuntimeError/OSError from Path.resolve), so one loop no longer fails list_files; edit_file shares the check

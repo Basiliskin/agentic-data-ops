@@ -1,0 +1,759 @@
+{
+  "task": "Add the drop-branch, dev-only accept-schema, project-view and list/read/edit file MCP tools to the Assistant MCP server (plan --like 9)",
+  "analysis": {
+    "objective": "Add four more tools to the `adops mcp` Assistant server (drop-branch, dev-only accept-schema, a read-only project view, and list/read/edit file tools), each behind the same dev/Branch allow-list guard, sanitized error mapping and secret-leak tests, and require plain Pipeline names in every tool that takes one; the second slice of vision item 7.",
+    "successDefinition": "Done when ALL hold: (1) the server lists exactly run, preview, validate, drop_branch, accept_schema, project_view, list_files, read_file and edit_file. (2) drop_branch removes only br_<branch>__ schemas through drop_project_branch, fails at once with a sanitized 'busy' reply when stage's Warehouse lock is held (ASSISTANT_LOCK_TIMEOUT), and the CLI keeps its 30-minute wait (asserted). (3) accept_schema acts only on the Environment named exactly dev (stage, prod, qa, Dev, 'dev ', custom names, and any branch are refused before anything is touched), takes no Warehouse lock, and is refused when dev shares a database with stage or prod. (4) Every tool taking a pipeline argument (run, preview, validate, accept_schema) refuses names that are empty or contain '/', '\\\\' or '..' before any file is read. (5) project_view returns Pipelines with Steps, Environments, Schedules and, per Secret Reference, only 'set' or 'missing', never a value or host/user/database. (6) read_file and list_files stay inside pipelines/, dbt/ and adops.yaml after resolve (no '..', no symlink escape), refuse .env and .env.* in any case, and replace every resolved Secret Reference value with *** in file text; edit_file writes only under pipelines/ and dbt/ and never adops.yaml or .env. (7) Every new tool's responses, on success and on each failure path, pass assert_no_secret. (8) CI stays green: uv sync --locked, ruff, 100% line+branch coverage, no new pragma, no mcp/typer imports in domain/application, no new template files and no new E2E case.",
+    "assumptions": [
+      "Planned from horizon-09-assistant-mcp-server-roadmap.json as a template (plan --like)",
+      "User decision: drop_branch fails fast on a held stage Warehouse lock with the same ASSISTANT_LOCK_TIMEOUT as run/preview; drop_project_branch gains a lock_timeout parameter defaulting to the CLI's DEFAULT_LOCK_TIMEOUT (30 minutes), so the CLI is unchanged.",
+      "User decision: accept_schema is dev only and takes no Warehouse lock, because it only writes dev's recorded schema shape.",
+      "User decision: project_view is read-only and shows, per Secret Reference, only its status (set or missing), through a new secret_reference_status helper in application/secrets.py; it never shows a value.",
+      "User decision: read_file refuses .env and .env.* outright (any letter case, checked again after resolve) and in every other file replaces any value of a resolved Secret Reference with ***; list/read resolve the path and re-check it is inside the Project, with no symlink escape and no '..'.",
+      "User decision: edit_file may write only under pipelines/ and dbt/; adops.yaml and everything else is read-only for the Assistant.",
+      "Confirmed: every MCP tool taking a pipeline argument requires a plain Pipeline name (no '/', '\\\\', '..'); this closes the open blocker that run's pipeline argument reads pipelines/<name>.yaml unchecked. Planned in the accept-schema phase because that phase adds the next pipeline-taking tool.",
+      "Planner assumption (to keep the binding 2026-11-21 decision intact): read and list use the allow-list pipelines/, dbt/ and adops.yaml, so .adops/, .github/ and server/ stay refused; the user's .env and redaction rules apply on top. If the user wants read to cover the whole Project folder, only the read roots in allowed_project_path change.",
+      "Repo fact: dbt runs with a temporary --profiles-dir (dbt_transform.py:139), so editing dbt/profiles.yml cannot redirect a connection; no extra guard for that.",
+      "The pure path rule allowed_project_path lives in domain/assistant_access.py and works on strings only (the domain purity test bans pathlib); the filesystem resolve-and-recheck lives in a new interface module assistant_files.py.",
+      "Branch Environments are allowed for drop_branch because a Branch Environment lives in stage's Warehouse by design (ADR-0006); the tool still refuses every Environment argument other than a branch name and never drops a non-br_<branch>__ schema.",
+      "Tool replies stay TypedDicts, tools stay synchronous, and exceptions are mapped by the existing _sanitized_errors; WarehouseUnreachable and StepError are added to it where a new tool can raise them (they are not in RUN_ERRORS).",
+      "New MCP behaviour is tested with the in-memory client/server session and assert_no_secret from tests/unit/interface/mcp_harness.py; no stdio or E2E test is added.",
+      "adops.yaml, pipeline and dbt text are never trusted to be secret-free, so file text is redacted using the values resolved from the Project's .env merged with the process environment at call time."
+    ],
+    "risks": [
+      "Path checks are easy to get subtly wrong: symlinked parents, a symlink inside pipelines/ pointing at .env, case-insensitive macOS names (.ENV, Pipelines/), and '..' after resolve. The pure rule must be applied to the requested path and again to the resolved path.",
+      "Redaction by value replacement can miss a value embedded in a larger secret, or break on an empty or very short value; an empty value must never be replaced, and longer values must be replaced before shorter ones.",
+      "drop_project_branch is the only existing use case that takes a Warehouse lock without a timeout path; changing its signature can break existing stubs (the horizon-9 run phase broke test_run_command and conftest the same way).",
+      "accept_schema connects to dev's Source and Warehouse, so a dev that shares a database with stage could overwrite stage's recorded shape unless the shared-connection guard runs first.",
+      "Secret leaks can come through new channels: project_view (connection details), read_file (literal passwords in allowed files), edit_file echoing content back, and error text built from exceptions.",
+      "Tool calls run one at a time, but edit_file writes files while run reads them; whole-file writes are not atomic, so a crash can leave a half-written Pipeline file."
+    ],
+    "outOfScope": [
+      "Run logs and the read-logs tool: they need a new log writer and a new adapter, so they get their own horizon.",
+      "The test-connection tool: it needs new ports and adapters that open every Source, Warehouse and target.",
+      "accept-schema --branch: branch baselines start fresh (known gap, horizon 6).",
+      "ADR-0015 accepted-change records and Git-based Breaking Change acceptance: the record format is undecided.",
+      "Hardening Promotion, clearing runs left STARTED after a Server crash: Server concerns, deferred with the Promotion blockers.",
+      "Any non-stdio MCP transport or MCP authentication: v1 is local stdio only.",
+      "Claude Code's real MCP tool-call timeout against long runs: needs real use first.",
+      "Editing adops.yaml, .env, .adops/, .github/ or server/ through the Assistant: deliberately read-only or refused.",
+      "Git operations from the MCP server: the skills do Git (ADR-0009, ADR-0011)."
+    ],
+    "domainShape": "business",
+    "domainShapeReason": "The work enforces DataOps rules a domain expert recognizes: the Assistant acts only in dev and Branch Environments, a Secret Reference never reveals its value, and only some Project files are editable; MCP is only the transport.",
+    "ubiquitousLanguage": [
+      {
+        "term": "Assistant",
+        "meaning": "The user's own AI coding tool (for example Claude Code) that operates the product through the MCP server."
+      },
+      {
+        "term": "MCP tool",
+        "meaning": "One operation the server exposes to the Assistant (run, preview, validate, drop_branch, accept_schema, project_view, list_files, read_file, edit_file)."
+      },
+      {
+        "term": "Branch Environment",
+        "meaning": "A disposable Environment for one Git branch, built from stage's settings in br_<branch>__ Branch Schemas in stage's Warehouse."
+      },
+      {
+        "term": "Refusal",
+        "meaning": "A sanitized error returned by server code, before anything is touched, when a request names a disallowed Environment, Pipeline name or path."
+      },
+      {
+        "term": "Secret Reference",
+        "meaning": "The name of a secret used in configuration in place of its value; the Assistant may see the name and whether it is set, never the value."
+      },
+      {
+        "term": "Warehouse lock",
+        "meaning": "The per-Warehouse lock a run takes; the Assistant's tools try it once and reply 'busy' instead of waiting."
+      },
+      {
+        "term": "Breaking Change",
+        "meaning": "A Source shape change a run stops on until the user accepts the new shape; accept-schema records the accepted shape for dev."
+      }
+    ]
+  },
+  "discoveryFindings": [
+    {
+      "area": "MCP server template",
+      "finding": "build_server(project) registers synchronous tools; guarded_run_arguments re-reads adops.yaml per call and applies assistant_target then refuse_shared_dev_connection; _sanitized_errors maps WarehouseLocked, AssistantRefusal and RUN_ERRORS to fixed text and anything else to 'unexpected <Type>'; ASSISTANT_LOCK_TIMEOUT = 0.",
+      "filePath": "src/adops/interface/mcp_server.py",
+      "implication": "Each new tool is a few lines on top of these helpers; WarehouseUnreachable and StepError are not in RUN_ERRORS and must be added to the mapping."
+    },
+    {
+      "area": "secret-leak harness",
+      "finding": "mcp_harness provides write_project (writes a .env with a distinctive value for every Secret Reference incl. alert_webhook_env), call_tool, error_text and assert_no_secret(result, secrets).",
+      "filePath": "tests/unit/interface/mcp_harness.py",
+      "implication": "All new tool tests use these; the horizon-9 ledger shows a grade lost points for a call_tool without assert_no_secret."
+    },
+    {
+      "area": "drop-branch reuse",
+      "finding": "drop_project_branch(project, branch) takes build_warehouse_lock(warehouse, project, STAGE) with the default timeout (30 minutes); the CLI maps PipelineValidationError, ProjectFileError, MissingSecretError, WarehouseLocked and WarehouseUnreachable to fixed text.",
+      "filePath": "src/adops/interface/drop_branch_command.py",
+      "implication": "Add a lock_timeout keyword defaulting to DEFAULT_LOCK_TIMEOUT; the MCP tool passes ASSISTANT_LOCK_TIMEOUT; WarehouseUnreachable needs its own mapping in _sanitized_errors."
+    },
+    {
+      "area": "accept-schema reuse",
+      "finding": "accept_project_schema(project, pipeline, table, environment) reads adops.yaml and pipelines/<pipeline>.yaml, builds the Sync and snapshot store, takes no Warehouse lock, and returns AcceptedSchema; the CLI maps StepError and WarehouseUnreachable.",
+      "filePath": "src/adops/interface/accept_schema_command.py",
+      "implication": "The tool passes 'dev' only, after guarded_run_arguments; StepError joins _sanitized_errors; no lock is added (user decision)."
+    },
+    {
+      "area": "pipeline argument unchecked",
+      "finding": "run_command.read_project_files and validate_command._pipeline_files build pipelines/<name>.yaml from the raw name with no check.",
+      "filePath": "src/adops/interface/validate_command.py",
+      "implication": "plain_pipeline_name must run before the guard in run, preview, validate and accept_schema."
+    },
+    {
+      "area": "secret resolution",
+      "finding": "resolve_secret_references treats an empty value as missing; secret_references(warehouse, sources, targets) lists password references; alert_webhook_env is a separate reference; project_env merges .env under the process environment.",
+      "filePath": "src/adops/application/secrets.py",
+      "implication": "secret_reference_status and the redaction values follow the same rule and the same merged environment."
+    },
+    {
+      "area": "domain purity",
+      "finding": "test_domain_purity bans os, sys, io, pathlib, random, time, subprocess, socket and sqlite3 in src/adops/domain; test_application_purity guards application/.",
+      "filePath": "tests/unit/domain/test_domain_purity.py",
+      "implication": "allowed_project_path and plain_pipeline_name are string-only; resolve and file I/O live in interface/assistant_files.py."
+    },
+    {
+      "area": "stub signatures",
+      "finding": "In horizon 9 adding lock_timeout to run_project broke stubs in tests/unit/interface/conftest.py and test_run_command.py (unplannedFiles); FakeLocks.build already records timeouts.",
+      "filePath": "tests/unit/interface/conftest.py",
+      "implication": "Plan updates to stubs of drop_project_branch / build_warehouse_lock in the drop-branch phase instead of finding them at the gate."
+    }
+  ],
+  "repoGuards": [
+    {
+      "id": "g1",
+      "mechanism": "ci-gate",
+      "source": ".github/workflows/ci.yml",
+      "trigger": "on pull request / push to main",
+      "effect": "requires",
+      "enforces": "uv sync --locked must succeed, so a new runtime dependency (e.g. the MCP SDK) must be added to pyproject.toml and uv.lock together",
+      "paths": [],
+      "command": "uv sync --locked"
+    },
+    {
+      "id": "g2",
+      "mechanism": "ci-gate",
+      "source": ".github/workflows/ci.yml",
+      "trigger": "on pull request / push to main",
+      "effect": "blocks",
+      "enforces": "ruff check (rules E,F,W,I,B,UP; line length 100) must pass",
+      "paths": [],
+      "command": "uv run ruff check"
+    },
+    {
+      "id": "g3",
+      "mechanism": "ci-gate",
+      "source": "pyproject.toml [tool.coverage] + .github/workflows/ci.yml",
+      "trigger": "on pull request / push to main",
+      "effect": "requires",
+      "enforces": "unit tests must cover 100% of lines and branches of the adops package; only 'if TYPE_CHECKING:' is excluded",
+      "paths": [
+        "src/adops/**"
+      ],
+      "command": "uv run pytest tests/unit --cov --cov-report=term-missing"
+    },
+    {
+      "id": "g4",
+      "mechanism": "ci-gate",
+      "source": ".github/workflows/ci.yml",
+      "trigger": "on pull request / push to main",
+      "effect": "requires",
+      "enforces": "the built wheel must contain a hard-coded list of template files; a new shipped template (e.g. .mcp.json) must be added to that list in ci.yml",
+      "paths": [
+        "src/adops/templates/**",
+        ".github/workflows/ci.yml"
+      ],
+      "command": "uv build --wheel && unzip -l dist/*.whl | grep ..."
+    },
+    {
+      "id": "g5",
+      "mechanism": "ci-gate",
+      "source": ".github/workflows/ci.yml",
+      "trigger": "on pull request / push to main",
+      "effect": "blocks",
+      "enforces": "the Docker E2E job has a 20-minute timeout, so new E2E cases must fit in the remaining budget",
+      "paths": [
+        "tests/e2e/**"
+      ],
+      "command": "uv run pytest tests/e2e -m e2e"
+    },
+    {
+      "id": "g6",
+      "mechanism": "written-rule",
+      "source": "docs/roadmaps/agentic-dataops/decisions.md (horizon 1)",
+      "trigger": "on review",
+      "effect": "blocks",
+      "enforces": "domain and application layers import no framework (dlt, dagster, typer, mcp, os.environ), and no 'pragma: no cover' is allowed except for TYPE_CHECKING",
+      "paths": [
+        "src/adops/domain/**",
+        "src/adops/application/**"
+      ]
+    }
+  ],
+  "requiredMaterials": [],
+  "phases": [
+    {
+      "id": "drop-branch-tool",
+      "order": 0,
+      "name": "Add the drop-branch MCP tool",
+      "goal": "The Assistant can drop a Branch Environment through a drop_branch MCP tool that calls drop_project_branch, fails at once with a sanitized busy reply when stage's Warehouse lock is held, and never touches stage's own schemas. The CLI keeps its 30-minute lock wait.",
+      "rationale": "This is one small slice across layers (rule, use case, adapter, MCP entry point and tests) built on the pattern horizon 9 already settled, instead of spreading it over several phases. It also gives drop_project_branch the lock_timeout path that run_project already has, so the Assistant never hangs on a held lock while the CLI behaviour stays the same.",
+      "filesAffected": [
+        "src/adops/interface/drop_branch_command.py",
+        "src/adops/interface/mcp_server.py",
+        "tests/unit/interface/test_mcp_server.py",
+        "tests/unit/interface/test_drop_branch_command.py",
+        "tests/unit/interface/conftest.py (only if the FakeLocks or stub signatures need the new keyword)"
+      ],
+      "changes": [
+        "Add `lock_timeout: float = DEFAULT_LOCK_TIMEOUT` to drop_project_branch in drop_branch_command.py and pass it to run_command.build_warehouse_lock(warehouse, project, STAGE, lock_timeout). The `drop_branch` CLI command passes nothing, so it keeps the 30-minute wait.",
+        "Add a synchronous `drop_branch(branch: str)` tool in build_server. It calls assistant_target(None, branch) first, then drop_project_branch(project, branch, lock_timeout=ASSISTANT_LOCK_TIMEOUT), inside `_sanitized_errors()`. It never calls the CLI function and never takes an Environment argument.",
+        "Add a DroppedBranchReply TypedDict (environment, dropped schema names) and a small serializer from DroppedBranch.",
+        "Extend _sanitized_errors with WarehouseUnreachable ('stage's Warehouse is unreachable or locked by another process' style fixed text, naming no host or DSN), because it is not in RUN_ERRORS and would otherwise reply 'unexpected WarehouseUnreachable'.",
+        "Tests in test_mcp_server.py: a branch drop returns the dropped schema names; an empty branch name is refused; a held lock gives the busy reply with FakeLocks.timeouts == [ASSISTANT_LOCK_TIMEOUT]; a missing stage Warehouse Secret Reference names only the variable; an unreachable Warehouse gives the fixed text; an unexpected error names only its type; stage's own schemas are untouched (fake WarehouseSchemas records only br_ names). Every call_tool is followed by assert_no_secret.",
+        "Tests in test_drop_branch_command.py: the CLI drop_branch passes DEFAULT_LOCK_TIMEOUT to the lock (FakeLocks.timeouts == [DEFAULT_LOCK_TIMEOUT]); update any stub of drop_project_branch or build_warehouse_lock that rejects the new keyword (the horizon-9 run phase broke conftest.py and test_run_command.py the same way)."
+      ],
+      "boundedContext": "Assistant access",
+      "layer": "cross-cutting",
+      "blastRadius": "small",
+      "inputs": [
+        "src/adops/interface/drop_branch_command.py (drop_project_branch)",
+        "src/adops/application/drop_branch.py (drop_branch, DroppedBranch)",
+        "src/adops/interface/mcp_server.py (build_server, _sanitized_errors, ASSISTANT_LOCK_TIMEOUT)",
+        "tests/unit/interface/mcp_harness.py (call_tool, assert_no_secret, write_project)",
+        "tests/unit/interface/conftest.py (FakeLocks)"
+      ],
+      "expectedResult": "A drop_branch MCP tool that fails fast on a held stage lock, with the CLI default unchanged, covered by in-memory tests with secret-leak assertions.",
+      "dependsOn": [],
+      "guardNotes": [
+        "g3: every new branch (busy, unreachable, missing secret, unexpected) has a unit test; no pragma.",
+        "g6: mcp imported only in interface/; no application change.",
+        "g2: ruff line length 100 on the new reply TypedDict and messages."
+      ],
+      "compensation": "Remove the drop_branch tool and the lock_timeout parameter; the CLI path is unchanged by default.",
+      "rubric": [
+        {
+          "id": "lock-fails-fast-cli-keeps-wait",
+          "label": "The MCP drop fails fast while the CLI still waits 30 minutes",
+          "ruleStatement": "The drop_branch tool passes ASSISTANT_LOCK_TIMEOUT to drop_project_branch and gets an immediate busy reply on a held stage lock; the CLI command passes no timeout and so uses DEFAULT_LOCK_TIMEOUT. 10 = both timeouts are asserted through FakeLocks.timeouts and the busy reply text is asserted. 8 = the MCP busy reply is asserted but the CLI default is not. Below 8 = the default was changed for the CLI or the MCP tool can wait.",
+          "passCriteria": [
+            "A test holds the lock via FakeLocks(error=WarehouseLocked('stage', 0)) and asserts the exact busy reply text and FakeLocks.timeouts == [ASSISTANT_LOCK_TIMEOUT].",
+            "A test of the CLI drop_branch command asserts FakeLocks.timeouts == [DEFAULT_LOCK_TIMEOUT].",
+            "`grep -n 'lock_timeout' src/adops/interface/drop_branch_command.py` shows a keyword with the default DEFAULT_LOCK_TIMEOUT, not a literal 0 or 1800."
+          ],
+          "failureExamples": [
+            "The new keyword defaults to 0, so the CLI drop no longer waits for a running stage run and fails in CI.",
+            "The tool is tested only with a lock that is free, so the busy path is never exercised."
+          ],
+          "minScore": 9
+        },
+        {
+          "id": "only-branch-schemas-dropped",
+          "label": "The tool can only drop br_<branch>__ schemas and refuses a bad branch name",
+          "ruleStatement": "The tool accepts only a branch name (no Environment argument), refuses an empty name through assistant_target, and relies on the existing exact-prefix drop so stage's own schemas are never dropped. 10 = tests show the fake WarehouseSchemas received drop calls only for br_ names while stage's schemas are listed, and an empty name is refused before any lock or Warehouse call. 8 = prefix behaviour is shown but the empty-name refusal is not asserted before side effects. Below 8 = the tool takes an Environment or builds the prefix itself.",
+          "passCriteria": [
+            "A test lists stage schemas plus br_<branch>__ schemas in the fake and asserts only the br_ ones were dropped.",
+            "A test with branch '' asserts the refusal text and zero lock, schema and state calls.",
+            "The tool signature in the in-memory tool list has only a `branch` property."
+          ],
+          "failureExamples": [
+            "The tool builds `f'br_{branch}__'` itself and a branch named like a stage schema prefix drops the wrong schemas.",
+            "An empty branch reaches drop_project_branch and the refusal comes from deep inside as 'unexpected ...'."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "no-secret-and-sanitized-errors",
+          "label": "Every response and error is sanitized and scanned for secrets",
+          "ruleStatement": "Every call of the drop_branch tool, on success and on each failure path (missing stage Warehouse Secret Reference, unreachable Warehouse, held lock, unexpected error, empty branch), passes assert_no_secret with distinctive values for every Secret Reference, and each exception the use case can raise maps to a fixed sanitized message, never 'unexpected <Type>' for a known error and never raw exception text. 10 = every call_tool in the new tests is followed by assert_no_secret and each mapped exception has its own test. 8 = all success and refusal paths scanned but one mapped exception is untested. Below 8 = a failure path returns raw exception text or is never scanned.",
+          "passCriteria": [
+            "`grep -c 'call_tool(' tests/unit/interface/test_mcp_server.py` is not larger than `grep -c 'assert_no_secret(' tests/unit/interface/test_mcp_server.py` for the new tests (every call is scanned).",
+            "Each exception type the tool can raise has a test asserting the exact reply text, not just isError.",
+            "A test whose use-case stub raises an unexpected exception shows the reply names only the type."
+          ],
+          "failureExamples": [
+            "A refusal test calls call_tool and checks isError but skips assert_no_secret, the exact gap the horizon-9 run-tool grade found (7/9).",
+            "A known error such as WarehouseUnreachable falls into the generic branch and replies 'unexpected WarehouseUnreachable' because _sanitized_errors was not extended."
+          ],
+          "minScore": 9
+        },
+        {
+          "id": "layers-and-sdk-boundary",
+          "label": "Rules live in domain/application, the entry point only wires",
+          "ruleStatement": "The drop_branch tool in mcp_server.py only calls the guard, one existing or new use-case function and a reply serializer; every rule it applies sits in domain/assistant_access.py, application/ or a named interface helper, and no domain or application module does I/O or imports mcp/typer/os.environ.  10 = purity tests pass, the tool body is a few lines, and every rule has its own unit test. 8 = rules are in the right layer but one lives in a long tool body. Below 8 = a path, name or Environment rule is written inline in the tool, or domain code touches the filesystem.",
+          "passCriteria": [
+            "`uv run pytest tests/unit/domain/test_domain_purity.py tests/unit/application/test_application_purity.py` passes.",
+            "`grep -n 'import mcp\\|from mcp' -r src/adops` lists only src/adops/interface/mcp_server.py.",
+            "The drop_branch tool body contains no string comparison of an Environment name, path or Pipeline name; those calls sit in named helpers with their own unit tests."
+          ],
+          "failureExamples": [
+            "The tool checks `'/' in pipeline` or `name.startswith('.env')` inline, so the rule has no domain-level test and the next tool copies it differently.",
+            "A domain helper calls Path.resolve() or reads a file, which the purity test only catches if pathlib is imported."
+          ],
+          "minScore": 8
+        }
+      ],
+      "healerHint": "The likeliest failure is a stub or FakeLocks signature that rejects the new lock_timeout keyword; accept it in the stub and assert the CLI default, as horizon 9 did."
+    },
+    {
+      "id": "accept-schema-tool",
+      "order": 1,
+      "name": "Add the dev-only accept-schema MCP tool",
+      "goal": "The Assistant can accept an intended Breaking Change for dev through an accept_schema MCP tool that is refused for every Environment but dev, takes no Warehouse lock, and replies without any secret; run, preview, validate and accept_schema all require a plain Pipeline name.",
+      "rationale": "This is one small slice across layers (rule, use case, adapter, MCP entry point and tests) built on the pattern horizon 9 already settled, instead of spreading it over several phases. The plain-Pipeline-name rule is planned here because accept_schema is the next tool with a pipeline argument, and it closes the open blocker that run's pipeline argument reads pipelines/<name>.yaml unchecked.",
+      "filesAffected": [
+        "src/adops/domain/assistant_access.py",
+        "tests/unit/domain/test_assistant_access.py",
+        "src/adops/interface/mcp_server.py",
+        "tests/unit/interface/test_mcp_server.py",
+        "tests/unit/interface/mcp_harness.py (only if the shared Project needs a Source table fixture)"
+      ],
+      "changes": [
+        "Add `plain_pipeline_name(name: str) -> str` to domain/assistant_access.py (strings only, no pathlib). It returns the name or raises AssistantRefusal with a fixed message when the name is empty, or contains '/', '\\\\', '..' or a NUL character. The message does not echo the supplied name.",
+        "In mcp_server.py call plain_pipeline_name first in run, preview, validate (when pipeline is given) and the new tool, before the guard reads adops.yaml and before any file is read.",
+        "Add a synchronous `accept_schema(pipeline, table, environment=None, branch=None)` tool. After plain_pipeline_name it calls guarded_run_arguments(project, environment, branch), and refuses when a branch was given (accept-schema is dev only), then calls accept_project_schema(project, pipeline, table, DEV). It takes no Warehouse lock and never passes a timeout.",
+        "Add an AcceptedSchemaReply TypedDict (pipeline, table, step, environment, column count, nullable column names) and a serializer from AcceptedSchema; no column types or values beyond names already in the Warehouse shape.",
+        "Extend _sanitized_errors with StepError (its message is already free of secrets) so a failing Source or Step has a fixed reply; keep unexpected errors as the type name only.",
+        "Domain tests: one test per refused name ('', '..', 'a/b', 'a\\\\b', '../x', 'x..y', a NUL name) and accepted names ('shop_sync', 'a-b', 'v2'), and the refusal text does not contain the supplied name.",
+        "MCP tests: accept_schema in dev succeeds and records the shape; stage, prod, qa, production, Dev, 'dev ', a custom name and any branch each get a refusal with zero build_* calls; a dev sharing a database with stage is refused; FakeLocks records no lock call (documenting the no-lock decision); Source unreachable, a missing Secret Reference and a StepError map to fixed text; run, preview, validate and accept_schema each refuse '../adops' and 'a/b' with no file read. Every call_tool is followed by assert_no_secret."
+      ],
+      "boundedContext": "Assistant access",
+      "layer": "cross-cutting",
+      "blastRadius": "small",
+      "inputs": [
+        "src/adops/interface/accept_schema_command.py (accept_project_schema)",
+        "src/adops/application/accept_schema.py (AcceptedSchema)",
+        "src/adops/domain/assistant_access.py (assistant_target, refuse_shared_dev_connection)",
+        "src/adops/interface/mcp_server.py (guarded_run_arguments, _sanitized_errors)",
+        "src/adops/interface/validate_command.py (validate_project reads pipelines/<name>.yaml)"
+      ],
+      "expectedResult": "An accept_schema MCP tool for dev only, a plain_pipeline_name rule applied to every pipeline-taking tool, and tests with refusals and secret-leak assertions.",
+      "dependsOn": [],
+      "guardNotes": [
+        "g3: every refusal branch of plain_pipeline_name and the branch-given refusal is tested; no pragma.",
+        "g6: domain/assistant_access.py stays free of pathlib, os and mcp (test_domain_purity bans them).",
+        "g2: ruff passes on the new TypedDict and messages."
+      ],
+      "compensation": "Remove the accept_schema tool and the plain_pipeline_name calls; the existing tools return to their earlier behaviour.",
+      "rubric": [
+        {
+          "id": "same-guard-as-run",
+          "label": "The tool refuses with the shared dev/Branch guard before any side effect",
+          "ruleStatement": "The accept_schema tool goes through the same assistant_target / guarded_run_arguments path as run and preview, reading adops.yaml at call time, and is refused for stage, prod, qa, production, Dev, 'dev ' and a custom name before any Warehouse, Source or file is touched. It also refuses any `branch` argument, because accept-schema --branch is a known gap, and refuses dev when dev shares a database with stage or prod. 10 = each refused name has a test with zero seam calls. 8 = the main names are tested but the dev shared-connection refusal is not. Below 8 = the tool has its own copy of the Environment check or accepts a name the allow-list refuses.",
+          "passCriteria": [
+            "Tests call the tool with 'stage', 'prod', 'qa', 'production', 'Dev' and 'dev ' and each is a sanitized refusal.",
+            "In those tests the build_* spies and FakeLocks record no calls.",
+            "`grep -n 'assistant_target\\|guarded_run_arguments' src/adops/interface/mcp_server.py` shows the new tool using the shared helper, not a new comparison."
+          ],
+          "failureExamples": [
+            "The tool compares `environment == 'dev'` itself and so accepts 'dev' while dev shares a database with stage, because it skipped refuse_shared_dev_connection.",
+            "The guard is called after the Source is opened, so a refused request has already connected."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "plain-pipeline-name-everywhere",
+          "label": "Every pipeline-taking tool refuses a non-plain name before any file is read",
+          "ruleStatement": "plain_pipeline_name refuses empty names and names containing '/', '\\\\', '..' or NUL, with a message that does not echo the name, and run, preview, validate and accept_schema each call it before adops.yaml or pipelines/<name>.yaml is read. 10 = a domain test per bad name plus an MCP test per tool proving zero file reads. 8 = all four tools are covered but 'a\\\\b' or NUL is not. Below 8 = one of the four tools still reads pipelines/<name>.yaml with an unchecked name.",
+          "passCriteria": [
+            "`grep -n 'plain_pipeline_name' src/adops/interface/mcp_server.py` shows a call in run, preview, validate and accept_schema.",
+            "A test per tool passes '../adops' and 'a/b' and asserts a refusal and that read_settings and read_project_files were never called.",
+            "Domain tests include '', '..', 'a/b', 'a\\\\b', 'x..y' and an accepted plain name."
+          ],
+          "failureExamples": [
+            "validate was forgotten because its pipeline argument is optional, so `validate('../secrets')` still reads outside pipelines/.",
+            "The check runs after guarded_run_arguments, so a bad name still triggers an adops.yaml read first."
+          ],
+          "minScore": 9
+        },
+        {
+          "id": "accept-schema-no-lock-and-dev-only",
+          "label": "accept_schema writes only dev's recorded shape and takes no lock",
+          "ruleStatement": "The tool acts on dev only (a branch argument is refused), calls accept_project_schema with environment 'dev', and takes no Warehouse lock, as decided. 10 = tests assert the call receives 'dev', FakeLocks records zero lock calls, a branch argument is refused with zero seam calls, and the reply carries only names and counts. 8 = the no-lock fact is asserted but the branch refusal has no zero-seam check. Below 8 = the tool passes the caller's Environment through or takes a lock.",
+          "passCriteria": [
+            "A test asserts accept_project_schema (spied) was called with environment 'dev' exactly.",
+            "A test asserts FakeLocks.events == [] and FakeLocks.timeouts == [] after a successful accept.",
+            "A test with branch='feature' asserts the refusal text and zero build_* calls."
+          ],
+          "failureExamples": [
+            "The tool forwards the caller's `environment` string to accept_project_schema after only a truthiness check, so 'stage' reaches the use case.",
+            "The tool takes the stage Warehouse lock out of habit, so accept fails while stage runs."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "no-secret-and-sanitized-errors",
+          "label": "Every response and error is sanitized and scanned for secrets",
+          "ruleStatement": "Every call of the accept_schema tool, on success and on each failure path (Source unreachable, missing Secret Reference, StepError, refusals, unexpected error), passes assert_no_secret with distinctive values for every Secret Reference, and each exception the use case can raise maps to a fixed sanitized message, never 'unexpected <Type>' for a known error and never raw exception text. 10 = every call_tool in the new tests is followed by assert_no_secret and each mapped exception has its own test. 8 = all success and refusal paths scanned but one mapped exception is untested. Below 8 = a failure path returns raw exception text or is never scanned.",
+          "passCriteria": [
+            "`grep -c 'call_tool(' tests/unit/interface/test_mcp_server.py` is not larger than `grep -c 'assert_no_secret(' tests/unit/interface/test_mcp_server.py` for the new tests (every call is scanned).",
+            "Each exception type the tool can raise has a test asserting the exact reply text, not just isError.",
+            "A test whose use-case stub raises an unexpected exception shows the reply names only the type."
+          ],
+          "failureExamples": [
+            "A refusal test calls call_tool and checks isError but skips assert_no_secret, the exact gap the horizon-9 run-tool grade found (7/9).",
+            "A known error such as WarehouseUnreachable falls into the generic branch and replies 'unexpected WarehouseUnreachable' because _sanitized_errors was not extended."
+          ],
+          "minScore": 9
+        },
+        {
+          "id": "layers-and-sdk-boundary",
+          "label": "Rules live in domain/application, the entry point only wires",
+          "ruleStatement": "The accept_schema tool in mcp_server.py only calls the guard, one existing or new use-case function and a reply serializer; every rule it applies sits in domain/assistant_access.py, application/ or a named interface helper, and no domain or application module does I/O or imports mcp/typer/os.environ. plain_pipeline_name is pure domain code. 10 = purity tests pass, the tool body is a few lines, and every rule has its own unit test. 8 = rules are in the right layer but one lives in a long tool body. Below 8 = a path, name or Environment rule is written inline in the tool, or domain code touches the filesystem.",
+          "passCriteria": [
+            "`uv run pytest tests/unit/domain/test_domain_purity.py tests/unit/application/test_application_purity.py` passes.",
+            "`grep -n 'import mcp\\|from mcp' -r src/adops` lists only src/adops/interface/mcp_server.py.",
+            "The accept_schema tool body contains no string comparison of an Environment name, path or Pipeline name; those calls sit in named helpers with their own unit tests."
+          ],
+          "failureExamples": [
+            "The tool checks `'/' in pipeline` or `name.startswith('.env')` inline, so the rule has no domain-level test and the next tool copies it differently.",
+            "A domain helper calls Path.resolve() or reads a file, which the purity test only catches if pathlib is imported."
+          ],
+          "minScore": 8
+        }
+      ],
+      "healerHint": "The likeliest failure is a missed call site for plain_pipeline_name (validate's optional pipeline); grep the four tools and add a refusal test for the missing one."
+    },
+    {
+      "id": "project-view-tool",
+      "order": 2,
+      "name": "Add the read-only project-view MCP tool",
+      "goal": "The Assistant can read a Project overview through a project_view MCP tool: Pipelines with their Steps, Environments, Schedules when present, and for each Secret Reference only whether it is set or missing, never a value.",
+      "rationale": "This is one small slice across layers (rule, use case, adapter, MCP entry point and tests) built on the pattern horizon 9 already settled, instead of spreading it over several phases. Knowing the Project's shape and which Secret References are missing saves the Assistant from reading raw files, and the status helper gives later tools one place that decides 'set' or 'missing'.",
+      "filesAffected": [
+        "src/adops/application/secrets.py",
+        "tests/unit/application/test_secrets.py",
+        "src/adops/interface/mcp_server.py",
+        "tests/unit/interface/test_mcp_server.py",
+        "src/adops/interface/validate_command.py (only if the schedule summary helper _schedule_line must be made public)"
+      ],
+      "changes": [
+        "Add `secret_reference_status(env: Mapping[str, str], refs: Iterable[SecretReference]) -> dict[str, str]` to application/secrets.py. It maps each reference name to 'set' or 'missing' using the same rule as resolve_secret_references (an empty value is missing) and never returns a value. env is passed in; the module reads no os.environ.",
+        "Add a synchronous `project_view()` tool. It reads adops.yaml with load_project_settings and every pipelines/*.yaml with load_pipeline (through the existing run_command read helpers or a small loop), and builds a ProjectViewReply: per Pipeline its name, Schedule text (or None) and Steps (name and kind); per Environment its name, Warehouse type, Source and target names and its Secret References with status from secret_reference_status(run_command.project_env(project), ...), plus alert_webhook_env's status when configured.",
+        "The reply carries no host, port, database, user, path or password; Environment names are listed but no connection detail.",
+        "Reuse the schedule text already built for validate (validate_command._schedule_line, made public if needed) instead of rewriting it.",
+        "Invalid adops.yaml or Pipeline YAML maps to the existing sanitized problem lines (PipelineValidationError is in RUN_ERRORS); no new exception mapping is needed.",
+        "Tests: secret_reference_status for set, unset and empty-string values and for a name used twice; project_view on the harness Project with a distinctive value for every Secret Reference returns the structure and passes assert_no_secret; a Project with some references unset shows 'missing' for exactly those; a Pipeline with and without a Schedule; no Pipelines folder; invalid YAML returns the problem lines; the reply contains none of the connection hosts or users from SETTINGS."
+      ],
+      "boundedContext": "Assistant access",
+      "layer": "cross-cutting",
+      "blastRadius": "small",
+      "inputs": [
+        "src/adops/application/secrets.py (resolve_secret_references, secret_references)",
+        "src/adops/domain/loader.py (load_project_settings, load_pipeline)",
+        "src/adops/interface/run_command.py (read_settings, project_env, pipeline_files)",
+        "src/adops/interface/validate_command.py (_schedule_line)",
+        "tests/unit/interface/mcp_harness.py (SETTINGS, secret_references, assert_no_secret)"
+      ],
+      "expectedResult": "A project_view MCP tool and a secret_reference_status helper, with tests proving no value and no connection detail ever reaches the reply.",
+      "dependsOn": [],
+      "guardNotes": [
+        "g3: set, missing, empty-string, no-Pipelines and invalid-YAML branches all tested; no pragma.",
+        "g6: secret_reference_status takes env as an argument; application/ imports no os.environ, mcp or typer."
+      ],
+      "compensation": "Remove the project_view tool and secret_reference_status; nothing else depends on them.",
+      "rubric": [
+        {
+          "id": "status-only-never-value",
+          "label": "Secret References show only 'set' or 'missing'",
+          "ruleStatement": "secret_reference_status returns only the strings 'set' or 'missing' per name and treats an empty value as missing, and project_view never includes a value, host, user, database or path. 10 = a test gives every reference a distinctive value, scans the full reply with assert_no_secret and also asserts the connection hosts, users and database names from SETTINGS are absent. 8 = values are scanned but connection details are not asserted absent. Below 8 = a value, host or user is present in the reply.",
+          "passCriteria": [
+            "Unit tests of secret_reference_status cover set, unset, empty-string and a name referenced twice.",
+            "A project_view test with all references set asserts every status is 'set' and assert_no_secret passes.",
+            "The same test asserts 'db.internal', 'w_prod' and the user names from SETTINGS are absent from the serialized reply."
+          ],
+          "failureExamples": [
+            "The reply copies Environment.warehouse via model_dump, which carries host, user and database.",
+            "An empty-string variable is reported 'set' because the helper checks `name in env` instead of truthiness, so it disagrees with resolve_secret_references."
+          ],
+          "minScore": 9
+        },
+        {
+          "id": "overview-complete-and-accurate",
+          "label": "The overview lists Pipelines, Steps, Environments and Schedules",
+          "ruleStatement": "project_view lists every Pipeline in name order with its Steps in YAML order and its Schedule text or None, and every Environment with its Warehouse type, Source names and target names. 10 = tests cover Pipelines with and without a Schedule, all three Step kinds present in the harness or a custom Project, an Environment with no targets, no pipelines folder, and invalid YAML. 8 = main cases covered but one Step kind or the invalid YAML case is not. Below 8 = Steps or Schedules are missing or reordered.",
+          "passCriteria": [
+            "A test asserts the exact Step names and kinds in YAML order for a Pipeline with Sync, Transform and Reverse Sync Steps.",
+            "A test asserts a Pipeline without a Schedule shows None and one with a Schedule shows the same text `adops validate` prints.",
+            "A test with invalid adops.yaml asserts the sanitized problem lines, not 'unexpected ...'."
+          ],
+          "failureExamples": [
+            "The tool lists Pipelines in directory order, which differs between machines, so the test passes locally and fails in CI.",
+            "A Pipeline that fails validation aborts the whole overview instead of returning the problem lines."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "failure-paths-asserted",
+          "label": "Each refusal and failure is asserted, and the tests can fail",
+          "ruleStatement": "Tests for the project_view tool assert the exact outcome of every refusal and failure (missing pipelines folder, invalid YAML, unset Secret References), assert that the side effect did not happen (spies and FakeLocks record zero calls or the file is unchanged), and include one case that proves the assertion can fail. 10 = every refusal asserts reply text plus a zero-side-effect check, and symmetric rules are tested in both directions. 8 = refusals assert the reply, but side-effect absence is checked for only some. Below 8 = a test only runs the path (isError true) with no check of what was or was not touched.",
+          "passCriteria": [
+            "Each refusal test asserts the sanitized message text and that build_* spies, FakeLocks and the file tree are untouched.",
+            "`uv run pytest tests/unit --cov --cov-report=term-missing` shows 100% line and branch coverage with no new pragma.",
+            "A mutation by hand (removing the guard call from the tool) makes at least one named test fail."
+          ],
+          "failureExamples": [
+            "A test of the refused path passes because the refusal is raised by an earlier, unrelated check (for example a missing pipeline file), so the new rule is never really exercised.",
+            "A symmetric rule such as dev Warehouse versus stage target is tested one way only, as the horizon-9 domain grade noted."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "layers-and-sdk-boundary",
+          "label": "Rules live in domain/application, the entry point only wires",
+          "ruleStatement": "The project_view tool in mcp_server.py only calls the guard, one existing or new use-case function and a reply serializer; every rule it applies sits in domain/assistant_access.py, application/ or a named interface helper, and no domain or application module does I/O or imports mcp/typer/os.environ. secret_reference_status sits in application/secrets.py and takes the environment mapping as an argument. 10 = purity tests pass, the tool body is a few lines, and every rule has its own unit test. 8 = rules are in the right layer but one lives in a long tool body. Below 8 = a path, name or Environment rule is written inline in the tool, or domain code touches the filesystem.",
+          "passCriteria": [
+            "`uv run pytest tests/unit/domain/test_domain_purity.py tests/unit/application/test_application_purity.py` passes.",
+            "`grep -n 'import mcp\\|from mcp' -r src/adops` lists only src/adops/interface/mcp_server.py.",
+            "The project_view tool body contains no string comparison of an Environment name, path or Pipeline name; those calls sit in named helpers with their own unit tests."
+          ],
+          "failureExamples": [
+            "The tool checks `'/' in pipeline` or `name.startswith('.env')` inline, so the rule has no domain-level test and the next tool copies it differently.",
+            "A domain helper calls Path.resolve() or reads a file, which the purity test only catches if pathlib is imported."
+          ],
+          "minScore": 8
+        }
+      ],
+      "healerHint": "The likeliest failure is leaking connection details by serializing a model wholesale; build the reply from explicit fields and add a test that scans for hosts and users."
+    },
+    {
+      "id": "list-read-file-tools",
+      "order": 3,
+      "name": "Add the list-files and read-file MCP tools",
+      "goal": "The Assistant can list and read Project files through list_files and read_file MCP tools that stay inside pipelines/, dbt/ and adops.yaml after resolve, refuse .env and .env.* in any case, and replace every resolved Secret Reference value in file text with ***.",
+      "rationale": "This is one small slice across layers (rule, use case, adapter, MCP entry point and tests) built on the pattern horizon 9 already settled, instead of spreading it over several phases. Reading is split from editing because the path rule, the resolve check and the redaction are the risky parts, and the edit tool then reuses them.",
+      "filesAffected": [
+        "src/adops/domain/assistant_access.py",
+        "tests/unit/domain/test_assistant_access.py",
+        "src/adops/application/secrets.py",
+        "tests/unit/application/test_secrets.py",
+        "src/adops/interface/assistant_files.py (new)",
+        "tests/unit/interface/test_assistant_files.py (new)",
+        "src/adops/interface/mcp_server.py",
+        "tests/unit/interface/test_mcp_server.py"
+      ],
+      "changes": [
+        "Add `allowed_project_path(relative: str) -> str` to domain/assistant_access.py. It works on strings only (no pathlib), normalizes separators, and returns the Project-relative path when it is adops.yaml or lies under pipelines/ or dbt/; it raises AssistantRefusal for an empty path, an absolute path, any '..' part, any part that is .env or starts with .env. (compared in lower case, so .ENV and .Env.local are refused), and anything else including .adops/, .github/ and server/. The refusal never echoes more than the supplied relative path.",
+        "Add `redact_secret_values(text: str, values: Iterable[str]) -> str` to application/secrets.py: replaces each non-empty value with *** (longest value first, empty values skipped). Pure function, env passed in by the caller.",
+        "Create interface/assistant_files.py with `resolve_project_file(project, relative) -> Path`: apply allowed_project_path to the request, resolve the path, require it to be inside project.resolve(), and apply allowed_project_path again to the resolved path relative to the Project, so a symlink pointing at .env or outside the Project is refused. Add `list_project_files(project, directory) -> list[str]` (sorted relative paths of regular files under the allowed roots, skipping any entry that fails resolve_project_file) and `read_project_file(project, relative, secret_values) -> str` (UTF-8 text, size capped, redacted; a non-text or oversized file gets a fixed refusal).",
+        "Add synchronous `list_files(directory: str = \"\")` and `read_file(path: str)` tools. read_file computes the secret values from adops.yaml's Secret References resolved against run_command.project_env(project) (reading adops.yaml itself goes through the same redaction). Both run inside _sanitized_errors; a missing file is a fixed 'file not found' reply naming the supplied relative path.",
+        "Domain tests per accepted and refused case: adops.yaml, pipelines/a.yaml, dbt/models/x.sql, '', '/etc/passwd', '../x', 'pipelines/../adops.yaml', '.env', '.ENV', '.env.local', 'pipelines/.env', 'dbt/.Env.prod', '.adops/dlt/x', '.github/workflows/ci.yml', 'server/x', 'Pipelines/a.yaml'.",
+        "Secrets tests: redaction of one value, two values, overlapping values (a shorter value inside a longer one), a value repeated, an empty value (text unchanged), and no values.",
+        "Interface tests (tmp_path): a symlink in pipelines/ pointing at .env, at a file outside the Project and at a directory outside are each refused; a symlink to an allowed file inside the Project works; a resolved path that lands in .adops/ is refused.",
+        "MCP tests: read_file returns an allowed file with a distinctive secret value typed into it replaced by ***, and the same value typed into adops.yaml is replaced; .env and .ENV refused and the .env text is absent from every response; list_files lists only allowed paths and omits .env; every call_tool is followed by assert_no_secret."
+      ],
+      "boundedContext": "Assistant access",
+      "layer": "cross-cutting",
+      "blastRadius": "small",
+      "inputs": [
+        "src/adops/domain/assistant_access.py (AssistantRefusal)",
+        "src/adops/application/secrets.py (resolve_secret_references, secret_references)",
+        "src/adops/interface/run_command.py (project_env, read_settings, ProjectFileError)",
+        "tests/unit/domain/test_domain_purity.py (bans pathlib in domain)",
+        "tests/unit/interface/mcp_harness.py (write_project writes a .env with every secret)"
+      ],
+      "expectedResult": "list_files and read_file MCP tools whose path rule, resolve check and redaction are each unit-tested, with the .env refusal and the no-symlink-escape rule proven on real files.",
+      "dependsOn": [],
+      "guardNotes": [
+        "g3: every refusal branch of allowed_project_path, redact_secret_values and assistant_files has a test; no pragma.",
+        "g6: allowed_project_path uses only strings (test_domain_purity bans pathlib in domain); redact_secret_values takes values as an argument, so application/ reads no os.environ.",
+        "g2: ruff passes; the new interface module stays under line length 100."
+      ],
+      "compensation": "Remove the two tools, assistant_files.py, allowed_project_path and redact_secret_values; nothing else depends on them yet.",
+      "rubric": [
+        {
+          "id": "path-rule-and-symlink-escape",
+          "label": "Paths stay inside the allowed Project files after resolve",
+          "ruleStatement": "allowed_project_path accepts only adops.yaml and paths under pipelines/ and dbt/, refuses '..', absolute paths, .env and .env.* in any letter case in any path part, .adops/, .github/ and server/; resolve_project_file applies it to the request and again to the resolved path, so a symlink to .env, to a path outside the Project or into .adops/ is refused. 10 = domain tests for every listed case and interface tests with real symlinks (to .env, outside file, outside directory, allowed inside file). 8 = symlinks to .env and outside files are tested but a symlinked directory or the resolved-path re-check into .adops/ is not. Below 8 = only the requested string is checked.",
+          "passCriteria": [
+            "Domain tests include '.ENV', '.Env.local', 'pipelines/.env', 'Pipelines/a.yaml', 'pipelines/../adops.yaml' and an absolute path, each refused with a fixed message.",
+            "Interface tests create real symlinks under tmp_path and assert each escaping one is refused and the allowed in-Project one is read.",
+            "`grep -n 'resolve' src/adops/interface/assistant_files.py` shows resolve followed by a second allowed_project_path check on the resolved relative path."
+          ],
+          "failureExamples": [
+            "The tool checks the requested path string but reads `project / path` unresolved, so pipelines/link -> ../.env is read.",
+            "The .env test uses lower-case '.env' only, so '.ENV' or 'pipelines/.Env.prod' passes on macOS.",
+            "Path.resolve() on a missing file makes the check raise 'file not found' before the refusal, so an escape probe reveals which files exist."
+          ],
+          "minScore": 9
+        },
+        {
+          "id": "redaction-replaces-resolved-values",
+          "label": "Every resolved Secret Reference value in file text becomes ***",
+          "ruleStatement": "read_file replaces each non-empty resolved Secret Reference value (from the Project's .env merged under the process environment) with ***, longest value first, in every file it returns including adops.yaml, and never replaces an empty value. 10 = tests cover one value, several, overlapping values, a repeated value, an empty value and the value typed into adops.yaml and into a dbt file, with the final reply scanned by assert_no_secret. 8 = main cases covered but overlap or empty value is not. Below 8 = a value survives in some file or an empty value turns the text into ***.",
+          "passCriteria": [
+            "A test writes a distinctive value into pipelines/x.yaml, dbt/models/m.sql and adops.yaml and asserts each reply holds *** and not the value.",
+            "A unit test for overlapping values (one inside another) asserts neither remains.",
+            "A unit test with an empty value asserts the text is unchanged."
+          ],
+          "failureExamples": [
+            "Values are replaced in file order, so 'abc' is replaced before 'abcdef' and leaves 'def' in the reply.",
+            "An empty SECRET variable in the environment makes str.replace('', '***') insert *** between every character."
+          ],
+          "minScore": 9
+        },
+        {
+          "id": "failure-paths-asserted",
+          "label": "Each refusal and failure is asserted, and the tests can fail",
+          "ruleStatement": "Tests for the read_file and list_files tool assert the exact outcome of every refusal and failure (refused paths, symlink escapes, .env in every case, missing file, non-text file, oversized file), assert that the side effect did not happen (spies and FakeLocks record zero calls or the file is unchanged), and include one case that proves the assertion can fail. 10 = every refusal asserts reply text plus a zero-side-effect check, and symmetric rules are tested in both directions. 8 = refusals assert the reply, but side-effect absence is checked for only some. Below 8 = a test only runs the path (isError true) with no check of what was or was not touched.",
+          "passCriteria": [
+            "Each refusal test asserts the sanitized message text and that build_* spies, FakeLocks and the file tree are untouched.",
+            "`uv run pytest tests/unit --cov --cov-report=term-missing` shows 100% line and branch coverage with no new pragma.",
+            "A mutation by hand (removing the guard call from the tool) makes at least one named test fail."
+          ],
+          "failureExamples": [
+            "A test of the refused path passes because the refusal is raised by an earlier, unrelated check (for example a missing pipeline file), so the new rule is never really exercised.",
+            "A symmetric rule such as dev Warehouse versus stage target is tested one way only, as the horizon-9 domain grade noted."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "layers-and-sdk-boundary",
+          "label": "Rules live in domain/application, the entry point only wires",
+          "ruleStatement": "The read_file and list_files tool in mcp_server.py only calls the guard, one existing or new use-case function and a reply serializer; every rule it applies sits in domain/assistant_access.py, application/ or a named interface helper, and no domain or application module does I/O or imports mcp/typer/os.environ. The path rule is pure domain code; resolve and file reads sit in interface/assistant_files.py. 10 = purity tests pass, the tool body is a few lines, and every rule has its own unit test. 8 = rules are in the right layer but one lives in a long tool body. Below 8 = a path, name or Environment rule is written inline in the tool, or domain code touches the filesystem.",
+          "passCriteria": [
+            "`uv run pytest tests/unit/domain/test_domain_purity.py tests/unit/application/test_application_purity.py` passes.",
+            "`grep -n 'import mcp\\|from mcp' -r src/adops` lists only src/adops/interface/mcp_server.py.",
+            "The read_file and list_files tool body contains no string comparison of an Environment name, path or Pipeline name; those calls sit in named helpers with their own unit tests."
+          ],
+          "failureExamples": [
+            "The tool checks `'/' in pipeline` or `name.startswith('.env')` inline, so the rule has no domain-level test and the next tool copies it differently.",
+            "A domain helper calls Path.resolve() or reads a file, which the purity test only catches if pathlib is imported."
+          ],
+          "minScore": 8
+        }
+      ],
+      "healerHint": "The likeliest failure is a path check applied only to the requested string; re-apply allowed_project_path to the resolved path and add a real-symlink test."
+    },
+    {
+      "id": "edit-file-tool",
+      "order": 4,
+      "name": "Add the edit-file MCP tool",
+      "goal": "The Assistant can write or create a whole file through an edit_file MCP tool that writes only under pipelines/ and dbt/, refuses adops.yaml, .env and everything else, and never follows a symlink out of those folders.",
+      "rationale": "This is one small slice across layers (rule, use case, adapter, MCP entry point and tests) built on the pattern horizon 9 already settled, instead of spreading it over several phases. It reuses the path rule and resolve check from the read phase, adding only the narrower write allow-list and the write step.",
+      "filesAffected": [
+        "src/adops/domain/assistant_access.py",
+        "tests/unit/domain/test_assistant_access.py",
+        "src/adops/interface/assistant_files.py",
+        "tests/unit/interface/test_assistant_files.py",
+        "src/adops/interface/mcp_server.py",
+        "tests/unit/interface/test_mcp_server.py"
+      ],
+      "changes": [
+        "Extend allowed_project_path with a keyword `write: bool = False`. When write is True only paths under pipelines/ and dbt/ are accepted; adops.yaml is refused with a fixed message saying it is read-only for the Assistant. Every other refusal of the read rule (including .env in any case) still applies.",
+        "Add `write_project_file(project, relative, content) -> bool` to interface/assistant_files.py. It applies allowed_project_path(write=True) to the request, resolves the deepest existing ancestor and requires it inside project.resolve() and allowed_project_path(write=True) again on the resolved target, refuses a target that is an existing directory or a symlink leaving the allowed folders, creates missing parent folders inside the allowed root, writes the UTF-8 text, and returns whether the file was created.",
+        "Add a synchronous `edit_file(path: str, content: str)` tool and an EditFileReply TypedDict (path, bytes written, created). The reply never echoes the content. A content larger than a fixed size cap gets a fixed refusal before any write. The tool does not run validate; the Assistant calls validate itself.",
+        "Domain tests: write accepted for pipelines/a.yaml, dbt/models/x.sql and dbt/profiles.yml; refused for adops.yaml, .env, .ENV, '.env.local', pipelines/.env, .adops/x, .github/workflows/ci.yml, server/x, '../x' and an absolute path; read acceptance of adops.yaml is unchanged (tested in the same file).",
+        "Interface tests (tmp_path): create a new file with a new subfolder; overwrite an existing file; a symlink in pipelines/ to a file outside the Project is not written through; a symlinked parent folder pointing outside is refused; a symlink to adops.yaml is refused; a target that is a directory is refused; no file is changed after any refusal (compare bytes before and after).",
+        "MCP tests: a successful edit then validate round trip on the harness Project; adops.yaml and .env refused with the file bytes unchanged; the reply holds no content (a distinctive secret-looking string in the content does not appear in the reply); oversized content refused; every call_tool is followed by assert_no_secret."
+      ],
+      "boundedContext": "Assistant access",
+      "layer": "cross-cutting",
+      "blastRadius": "small",
+      "inputs": [
+        "src/adops/domain/assistant_access.py (allowed_project_path from the read phase)",
+        "src/adops/interface/assistant_files.py (resolve_project_file)",
+        "src/adops/interface/mcp_server.py (_sanitized_errors, build_server)",
+        "src/adops/infrastructure/dbt_transform.py:139 (temporary --profiles-dir, so dbt/profiles.yml cannot redirect a connection)"
+      ],
+      "expectedResult": "An edit_file MCP tool limited to pipelines/ and dbt/, with real-filesystem tests that every refusal leaves files unchanged.",
+      "dependsOn": [
+        "list-read-file-tools"
+      ],
+      "guardNotes": [
+        "g3: write refusals, symlink cases, created and overwritten branches and the size cap are all tested; no pragma.",
+        "g6: the write rule stays string-only in domain; file writes are in interface/assistant_files.py."
+      ],
+      "compensation": "Remove the edit_file tool, write_project_file and the write keyword; read and list tools are unaffected.",
+      "rubric": [
+        {
+          "id": "write-allow-list-and-escape",
+          "label": "Writes land only under pipelines/ and dbt/ and never through a symlink out",
+          "ruleStatement": "allowed_project_path(write=True) accepts only pipelines/ and dbt/ paths and refuses adops.yaml, .env and .env.* in any case, .adops/, .github/, server/, '..' and absolute paths; write_project_file resolves the target (or its deepest existing ancestor) and re-checks it, so a symlinked file or folder pointing outside the allowed folders is never written through. 10 = domain tests for every listed case plus real-symlink tests (file out, folder out, file to adops.yaml) asserting the outside file is unchanged. 8 = symlink file case tested but the symlinked parent folder is not. Below 8 = a symlinked parent can be written through, or adops.yaml is writable.",
+          "passCriteria": [
+            "Domain tests include adops.yaml (refused for write, accepted for read), .ENV, 'pipelines/.env', 'dbt/../adops.yaml' and an absolute path.",
+            "Interface tests create a symlinked parent folder and a symlinked file pointing outside the Project and assert the target file bytes are unchanged and the call is refused.",
+            "A test asserts a symlink in dbt/ to adops.yaml is refused for write."
+          ],
+          "failureExamples": [
+            "The tool resolves only the final file name, so pipelines/linkdir/new.yaml (linkdir -> /tmp) writes outside the Project because the parent was never resolved.",
+            "adops.yaml is blocked by string equality but 'pipelines/../adops.yaml' normalizes to it and passes because the check ran before normalization."
+          ],
+          "minScore": 9
+        },
+        {
+          "id": "refusal-leaves-files-unchanged",
+          "label": "A refused or failed edit changes nothing on disk",
+          "ruleStatement": "Every refusal (path, size cap, directory target, symlink) happens before any write or folder creation, and tests compare the file bytes and the folder listing before and after. 10 = each refusal test snapshots the Project tree and asserts it is identical. 8 = bytes of the targeted file are compared but not created folders. Below 8 = a refused edit can leave an empty folder or a half-written file.",
+          "passCriteria": [
+            "Each refusal test asserts the Project tree (paths and bytes) is identical before and after.",
+            "A test with content above the size cap asserts the refusal and that no file was created.",
+            "A test that targets an existing directory asserts the refusal and that the directory is unchanged."
+          ],
+          "failureExamples": [
+            "Parent folders are created with mkdir(parents=True) before the escape check, so a refused edit leaves a new empty folder behind.",
+            "The size cap is checked after the file is opened for writing, truncating the existing file."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "no-secret-and-sanitized-errors",
+          "label": "Every response and error is sanitized and scanned for secrets",
+          "ruleStatement": "Every call of the edit_file tool, on success and on each failure path (refused paths, oversized content, directory target, unexpected error, and content that looks like a secret), passes assert_no_secret with distinctive values for every Secret Reference, and each exception the use case can raise maps to a fixed sanitized message, never 'unexpected <Type>' for a known error and never raw exception text. 10 = every call_tool in the new tests is followed by assert_no_secret and each mapped exception has its own test. 8 = all success and refusal paths scanned but one mapped exception is untested. Below 8 = a failure path returns raw exception text or is never scanned.",
+          "passCriteria": [
+            "`grep -c 'call_tool(' tests/unit/interface/test_mcp_server.py` is not larger than `grep -c 'assert_no_secret(' tests/unit/interface/test_mcp_server.py` for the new tests (every call is scanned).",
+            "Each exception type the tool can raise has a test asserting the exact reply text, not just isError.",
+            "A test whose use-case stub raises an unexpected exception shows the reply names only the type."
+          ],
+          "failureExamples": [
+            "A refusal test calls call_tool and checks isError but skips assert_no_secret, the exact gap the horizon-9 run-tool grade found (7/9).",
+            "A known error such as WarehouseUnreachable falls into the generic branch and replies 'unexpected WarehouseUnreachable' because _sanitized_errors was not extended."
+          ],
+          "minScore": 9
+        },
+        {
+          "id": "layers-and-sdk-boundary",
+          "label": "Rules live in domain/application, the entry point only wires",
+          "ruleStatement": "The edit_file tool in mcp_server.py only calls the guard, one existing or new use-case function and a reply serializer; every rule it applies sits in domain/assistant_access.py, application/ or a named interface helper, and no domain or application module does I/O or imports mcp/typer/os.environ. The write rule is pure domain code; resolve and file writes sit in interface/assistant_files.py. 10 = purity tests pass, the tool body is a few lines, and every rule has its own unit test. 8 = rules are in the right layer but one lives in a long tool body. Below 8 = a path, name or Environment rule is written inline in the tool, or domain code touches the filesystem.",
+          "passCriteria": [
+            "`uv run pytest tests/unit/domain/test_domain_purity.py tests/unit/application/test_application_purity.py` passes.",
+            "`grep -n 'import mcp\\|from mcp' -r src/adops` lists only src/adops/interface/mcp_server.py.",
+            "The edit_file tool body contains no string comparison of an Environment name, path or Pipeline name; those calls sit in named helpers with their own unit tests."
+          ],
+          "failureExamples": [
+            "The tool checks `'/' in pipeline` or `name.startswith('.env')` inline, so the rule has no domain-level test and the next tool copies it differently.",
+            "A domain helper calls Path.resolve() or reads a file, which the purity test only catches if pathlib is imported."
+          ],
+          "minScore": 8
+        }
+      ],
+      "healerHint": "The likeliest failure is resolving only the final path part; resolve the deepest existing ancestor and re-check it before creating folders, then snapshot the tree in refusal tests."
+    }
+  ],
+  "successCriteria": [
+    "Done when ALL hold: (1) the server lists exactly run, preview, validate, drop_branch, accept_schema, project_view, list_files, read_file and edit_file. (2) drop_branch removes only br_<branch>__ schemas through drop_project_branch, fails at once with a sanitized 'busy' reply when stage's Warehouse lock is held (ASSISTANT_LOCK_TIMEOUT), and the CLI keeps its 30-minute wait (asserted). (3) accept_schema acts only on the Environment named exactly dev (stage, prod, qa, Dev, 'dev ', custom names, and any branch are refused before anything is touched), takes no Warehouse lock, and is refused when dev shares a database with stage or prod. (4) Every tool taking a pipeline argument (run, preview, validate, accept_schema) refuses names that are empty or contain '/', '\\\\' or '..' before any file is read. (5) project_view returns Pipelines with Steps, Environments, Schedules and, per Secret Reference, only 'set' or 'missing', never a value or host/user/database. (6) read_file and list_files stay inside pipelines/, dbt/ and adops.yaml after resolve (no '..', no symlink escape), refuse .env and .env.* in any case, and replace every resolved Secret Reference value with *** in file text; edit_file writes only under pipelines/ and dbt/ and never adops.yaml or .env. (7) Every new tool's responses, on success and on each failure path, pass assert_no_secret. (8) CI stays green: uv sync --locked, ruff, 100% line+branch coverage, no new pragma, no mcp/typer imports in domain/application, no new template files and no new E2E case.",
+    "Add the drop-branch MCP tool: A drop_branch MCP tool that fails fast on a held stage lock, with the CLI default unchanged, covered by in-memory tests with secret-leak assertions.",
+    "Add the dev-only accept-schema MCP tool: An accept_schema MCP tool for dev only, a plain_pipeline_name rule applied to every pipeline-taking tool, and tests with refusals and secret-leak assertions.",
+    "Add the read-only project-view MCP tool: A project_view MCP tool and a secret_reference_status helper, with tests proving no value and no connection detail ever reaches the reply.",
+    "Add the list-files and read-file MCP tools: list_files and read_file MCP tools whose path rule, resolve check and redaction are each unit-tested, with the .env refusal and the no-symlink-escape rule proven on real files.",
+    "Add the edit-file MCP tool: An edit_file MCP tool limited to pipelines/ and dbt/, with real-filesystem tests that every refusal leaves files unchanged."
+  ],
+  "deferred": [
+    "Run logs and the read-logs tool: they need a new log writer and a new adapter, so they get their own horizon.",
+    "The test-connection tool: it needs new ports and adapters that open every Source, Warehouse and target.",
+    "accept-schema --branch: branch baselines start fresh (known gap, horizon 6).",
+    "ADR-0015 accepted-change records and Git-based Breaking Change acceptance: the record format is undecided.",
+    "Hardening Promotion, clearing runs left STARTED after a Server crash: Server concerns, deferred with the Promotion blockers.",
+    "Any non-stdio MCP transport or MCP authentication: v1 is local stdio only.",
+    "Claude Code's real MCP tool-call timeout against long runs: needs real use first.",
+    "Editing adops.yaml, .env, .adops/, .github/ or server/ through the Assistant: deliberately read-only or refused.",
+    "Git operations from the MCP server: the skills do Git (ADR-0009, ADR-0011).",
+    "read-logs tool and run logs — need a new log writer and a new adapter (new ports), so they are a separate horizon",
+    "test-connection tool — needs new ports and adapters that open every Source, Warehouse and target",
+    "accept-schema --branch — known gap, branch baselines start fresh (horizon 6)",
+    "ADR-0015 accepted-change records, Promotion hardening, STARTED-run cleanup and non-stdio transport — outside this batch by the user's scoping"
+  ],
+  "revision": 0
+}

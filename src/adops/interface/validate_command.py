@@ -116,9 +116,13 @@ def _check_dbt_projects(project: Path, relative: Path, pipeline: Pipeline, repor
 
 
 def _schedule_line(pipeline: Pipeline, timezone: str) -> str:
+    return f"{pipeline.name}: {schedule_text(pipeline, timezone) or 'no schedule'}"
+
+
+def schedule_text(pipeline: Pipeline, timezone: str) -> str | None:
     if pipeline.schedule is None:
-        return f"{pipeline.name}: no schedule"
-    return f"{pipeline.name}: {pipeline.schedule.text} (cron {pipeline.schedule.cron}, {timezone})"
+        return None
+    return f"{pipeline.schedule.text} (cron {pipeline.schedule.cron}, {timezone})"
 
 
 def _skipped_checks(pipeline: Pipeline) -> list[str]:

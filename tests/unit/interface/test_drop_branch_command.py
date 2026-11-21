@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 
 from adops.application.drop_branch import BranchState, WarehouseSchemas
 from adops.application.ports import ResolvedConnection, ResolvedWarehouse, WarehouseLocked
+from adops.infrastructure.warehouse_lock import DEFAULT_LOCK_TIMEOUT
 from adops.infrastructure.warehouse_schemas import LocalBranchState, WarehouseSchemaAdmin
 from adops.interface import cli, drop_branch_command
 
@@ -237,6 +238,13 @@ def test_the_drop_holds_stages_warehouse_lock(tmp_path, stage_postgres, locks):
         ("exit", "stage"),
     ]
     assert locks.warehouses == [STAGE_WAREHOUSE]
+
+
+def test_the_cli_drop_waits_the_default_lock_timeout(tmp_path, stage_postgres, locks):
+    result = invoke(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    assert locks.timeouts == [DEFAULT_LOCK_TIMEOUT]
 
 
 def test_nothing_to_drop_still_takes_the_lock(tmp_path, stage_postgres, locks):

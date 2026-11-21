@@ -1,0 +1,236 @@
+{
+  "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-10-assistant-mcp-project-and-file-tools-roadmap.json",
+  "roadmapRevision": 0,
+  "roadmapTask": "Add the drop-branch, dev-only accept-schema, project-view and list/read/edit file MCP tools to the Assistant MCP server (plan --like 9)",
+  "createdAt": "2026-11-21T15:32:57Z",
+  "updatedAt": "2026-11-21T16:32:05Z",
+  "phases": [
+    {
+      "phaseId": "drop-branch-tool",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-21T15:32:57Z",
+      "baseRef": "e8cb04e5f47b67d701377d4eb26330e8ba52ea7b",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/state.md,docs/roadmaps/agentic-dataops/horizons/horizon-10-assistant-mcp-project-and-file-tools-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-10-assistant-mcp-project-and-file-tools-roadmap.md | changed: src/adops/interface/drop_branch_command.py, src/adops/interface/mcp_server.py, tests/unit/interface/test_mcp_server.py, tests/unit/interface/test_drop_branch_command.py — drop_project_branch gains lock_timeout (default DEFAULT_LOCK_TIMEOUT); new drop_branch MCP tool calls assistant_target(None, branch) then drop_project_branch with ASSISTANT_LOCK_TIMEOUT, replies DroppedBranchReply; _sanitized_errors maps WarehouseUnreachable to fixed env-neutral text (shared with run). conftest.py unchanged (FakeLocks already accepted timeout). | compensation known: remove drop_branch tool + lock_timeout keyword; not invoked.",
+      "unplannedFiles": [],
+      "gateRun": "uv sync --locked: pass; uv run ruff check: pass; uv run pytest tests/unit --cov --cov-report=term-missing (ADOPS_TEST_POSTGRES_DSN -> local adops-test-pg :55432): pass, 1424 tests, 100% line+branch. g4/g5 not touched.",
+      "failures": [
+        {
+          "at": "2026-11-21T15:36:21Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run ruff check / pytest tests/unit/interface",
+          "detail": "I001 import order in mcp_server.py; tool-list tests and the /// branch reply text expected the old values",
+          "resolvedBy": "gate-fix",
+          "resolution": "ruff --fix on imports; updated tool-list assertions to include drop_branch and the real branch-name problem text"
+        }
+      ],
+      "completedAt": "2026-11-21T15:37:34Z",
+      "gradeResult": {
+        "phaseId": "drop-branch-tool",
+        "dimensionScores": [
+          {
+            "dimensionId": "lock-fails-fast-cli-keeps-wait",
+            "score": 10,
+            "pass": true,
+            "evidence": "Both timeouts asserted (MCP ASSISTANT_LOCK_TIMEOUT on busy and success paths, CLI DEFAULT_LOCK_TIMEOUT); beyond 9: busy test also asserts zero list/drop/state calls."
+          },
+          {
+            "dimensionId": "only-branch-schemas-dropped",
+            "score": 10,
+            "pass": true,
+            "evidence": "Only br_feat__ dropped with stage schemas listed; empty branch refused before any lock/schema/state call; schema has only branch. Beyond 9: br_feat2__ near-miss decoy proves exact-prefix safety."
+          },
+          {
+            "dimensionId": "no-secret-and-sanitized-errors",
+            "score": 9,
+            "pass": true,
+            "evidence": "Every call scanned by assert_no_secret; exact text for busy, unreachable, missing adops.yaml, ///, empty; unexpected KeyError with secret reduced to type. Gap: missing-secret test checks substring, not exact reply."
+          },
+          {
+            "dimensionId": "layers-and-sdk-boundary",
+            "score": 9,
+            "pass": true,
+            "evidence": "Tool body is guard + use case + serializer; purity tests pass; mcp imported only in mcp_server.py. dropped_branch_reply tested only through the tool."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "accept-schema-tool",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-21T15:52:12Z",
+      "baseRef": "e8cb04e5f47b67d701377d4eb26330e8ba52ea7b",
+      "baseDirty": true,
+      "notes": "already dirty at start (incl. uncommitted drop-branch-tool phase): docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/state.md,src/adops/interface/drop_branch_command.py,src/adops/interface/mcp_server.py,tests/unit/interface/test_drop_branch_command.py,tests/unit/interface/test_mcp_server.py,docs/roadmaps/agentic-dataops/horizons/horizon-10-assistant-mcp-project-and-file-tools-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-10-assistant-mcp-project-and-file-tools-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-10-assistant-mcp-project-and-file-tools-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-10-assistant-mcp-project-and-file-tools-roadmap.status.last_good.json | phase-local base snapshot (git stash create): 951e6851c37e75a875edb739c17bb3fd32cc8ca5 | changed (vs snapshot 951e685): src/adops/domain/assistant_access.py, src/adops/interface/mcp_server.py, tests/unit/domain/test_assistant_access.py, tests/unit/interface/test_mcp_server.py — domain gains plain_pipeline_name (refuses empty, /, \\\\, .., NUL; message never echoes the name) and refuse_branch_schema_acceptance; run/preview/validate/accept_schema call plain_pipeline_name first; new accept_schema MCP tool = plain name -> guarded_run_arguments -> branch refusal -> accept_project_schema(project, name, table, DEV), no lock, AcceptedSchemaReply (names + column count); _sanitized_errors maps SourceUnreachable (table name only) and StepError to fixed text. mcp_harness.py unchanged (fakes live in test_mcp_server Seams). | compensation known: remove accept_schema tool and plain_pipeline_name calls; not invoked.",
+      "unplannedFiles": [],
+      "gateRun": "uv sync --locked: pass; uv run ruff check: pass; uv run pytest tests/unit --cov --cov-report=term-missing (ADOPS_TEST_POSTGRES_DSN -> local adops-test-pg :55432): pass, 1474 tests, 100% line+branch (includes domain/application purity tests). g4/g5 not touched.",
+      "completedAt": "2026-11-21T15:57:46Z",
+      "gradeResult": {
+        "phaseId": "accept-schema-tool",
+        "dimensionScores": [
+          {
+            "dimensionId": "same-guard-as-run",
+            "score": 10,
+            "pass": true,
+            "evidence": "mcp_server.py:214 uses the shared guarded_run_arguments helper. A parametrized test refuses stage/prod/qa/production/Dev/'dev '/development/no env with zero seam, lock or spy calls. Beyond a 9: test_accept_schema_refuses_dev_sharing_stages_warehouse covers the shared-connection refusal, scanning the distinct secret values."
+          },
+          {
+            "dimensionId": "plain-pipeline-name-everywhere",
+            "score": 9,
+            "pass": true,
+            "evidence": "plain_pipeline_name is called first in run/preview/validate/accept_schema (lines 162,175,182,213). Domain tests cover '',..,a/b,a\\b,x..y,NUL and accepted names. The 4x4 MCP matrix asserts no read_settings/read_project_files/validate_project call. NUL and '' are not tested at tool level."
+          },
+          {
+            "dimensionId": "accept-schema-no-lock-and-dev-only",
+            "score": 9,
+            "pass": true,
+            "evidence": "The spy asserts args == (project,'shop_sync','customers','dev'). locks.events and locks.timeouts are both [] after a successful accept. branch='feature' gets the exact refusal text and assert_nothing_accepted. The reply holds only names and counts. Gap: the branch refusal runs after the adops.yaml read in guarded_run_arguments."
+          },
+          {
+            "dimensionId": "no-secret-and-sanitized-errors",
+            "score": 9,
+            "pass": true,
+            "evidence": "The accept_schema_tool helper calls assert_no_secret on every call, and the shared-dev and plain-name tests scan too. Exact-text tests cover SourceUnreachable, WarehouseUnreachable, MissingSecret, StepError, PipelineValidationError and RuntimeError (with a secret) -> 'unexpected RuntimeError'. ProjectFileError for accept_schema is tested only via run."
+          },
+          {
+            "dimensionId": "layers-and-sdk-boundary",
+            "score": 9,
+            "pass": true,
+            "evidence": "The tool body is 4 lines: name rule, guard, branch refusal, use case plus reply. plain_pipeline_name and refuse_branch_schema_acceptance are pure domain code with unit tests. Purity tests pass (141 passed locally). mcp is imported only in interface/cli.py and mcp_server.py (both interface/). The tool has no inline string comparisons."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "project-view-tool",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-21T15:59:14Z",
+      "baseRef": "e8cb04e5f47b67d701377d4eb26330e8ba52ea7b",
+      "baseDirty": true,
+      "notes": "already dirty at start (phases 1-2 of this horizon, uncommitted): docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/state.md,src/adops/domain/assistant_access.py,src/adops/interface/drop_branch_command.py,src/adops/interface/mcp_server.py,tests/unit/domain/test_assistant_access.py,tests/unit/interface/test_drop_branch_command.py,tests/unit/interface/test_mcp_server.py,docs/roadmaps/agentic-dataops/horizons/horizon-10-assistant-mcp-project-and-file-tools-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-10-assistant-mcp-project-and-file-tools-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-10-assistant-mcp-project-and-file-tools-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-10-assistant-mcp-project-and-file-tools-roadmap.status.last_good.json || changed: src/adops/application/secrets.py, tests/unit/application/test_secrets.py, src/adops/interface/validate_command.py, src/adops/interface/mcp_server.py, tests/unit/interface/test_mcp_server.py. Adds secret_reference_status (set/missing, empty=missing) and a read-only project_view MCP tool: Pipelines by name with Steps and Schedule text, Environments with warehouse type, source/target names and Secret Reference status, alert_webhook status, per-file Pipeline problems; invalid or missing adops.yaml gives a sanitized ToolError. validate_command gains public schedule_text, reused by _schedule_line. No unplanned files. || compensation: remove project_view tool, its reply TypedDicts/helpers and secret_reference_status; inline schedule_text back if wanted.",
+      "unplannedFiles": [],
+      "completedAt": "2026-11-21T16:05:42Z",
+      "gradeResult": {
+        "phaseId": "project-view-tool",
+        "dimensionScores": [
+          {
+            "dimensionId": "status-only-never-value",
+            "score": 10,
+            "minScore": 9,
+            "passed": true,
+            "evidence": "set/missing by truthiness, env passed in; reply built field by field; test scans CONNECTION_DETAILS with distinctive logins and a meta-test proves the scan catches a model_dump leak"
+          },
+          {
+            "dimensionId": "overview-complete-and-accurate",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "name-ordered Pipelines, all 3 Step kinds in YAML order, no-targets Environment, no pipelines folder, invalid YAML; schedule text equals validate_project output under Europe/Berlin"
+          },
+          {
+            "dimensionId": "failure-paths-asserted",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "refusals assert exact text plus assert_nothing_touched and unchanged tree; some tests (no-pipelines, unset refs, unexpected error) lack the tree check"
+          },
+          {
+            "dimensionId": "layers-and-sdk-boundary",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "4-line tool body, helper in application takes env, purity tests pass, mcp SDK only in mcp_server.py; load_pipelines has no direct unit test"
+          }
+        ],
+        "overallPass": true,
+        "summary": "Thin read-only tool backed by named helpers; minor gaps in side-effect checks and a direct load_pipelines test."
+      },
+      "gateRun": [
+        "uv run ruff check: pass",
+        "uv run pytest tests/unit --cov --cov-report=term-missing: pass (1492, 100%)",
+        "uv sync --locked: pass"
+      ]
+    },
+    {
+      "phaseId": "list-read-file-tools",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-21T16:08:49Z",
+      "baseRef": "e8cb04e5f47b67d701377d4eb26330e8ba52ea7b",
+      "baseDirty": true,
+      "notes": "already dirty at start (earlier horizon-10 phases, uncommitted): docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/secrets.py,src/adops/domain/assistant_access.py,src/adops/interface/drop_branch_command.py,src/adops/interface/mcp_server.py,src/adops/interface/validate_command.py,tests/unit/application/test_secrets.py,tests/unit/domain/test_assistant_access.py,tests/unit/interface/test_drop_branch_command.py,tests/unit/interface/test_mcp_server.py,docs/roadmaps/agentic-dataops/horizons/horizon-10-assistant-mcp-project-and-file-tools-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-10-assistant-mcp-project-and-file-tools-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-10-assistant-mcp-project-and-file-tools-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-10-assistant-mcp-project-and-file-tools-roadmap.status.last_good.json | changed: src/adops/domain/assistant_access.py, src/adops/application/secrets.py, src/adops/interface/assistant_files.py (new), src/adops/interface/mcp_server.py, tests/unit/domain/test_assistant_access.py, tests/unit/application/test_secrets.py, tests/unit/interface/test_assistant_files.py (new), tests/unit/interface/test_mcp_server.py — adds allowed_project_path (string-only path rule), redact_secret_values, resolve/list/read helpers with a second check on the resolved path, and list_files/read_file MCP tools that redact resolved Secret Reference values. | compensation (not invoked): remove list_files/read_file tools, assistant_files.py, allowed_project_path and redact_secret_values. Grader found: a symlink loop under pipelines/ or dbt/ makes resolve() raise RuntimeError and fails all of list_files.",
+      "unplannedFiles": [],
+      "gateRun": "uv sync --locked: pass; uv run ruff check: pass; uv run pytest tests/unit --cov --cov-report=term-missing (ADOPS_TEST_POSTGRES_DSN -> local pg :55432): pass, 1560 tests, 100% line+branch (includes domain/application purity tests); g4 uv build --wheel + template list: pass; g5 uv run pytest tests/e2e -m e2e: pass, 8 tests (390s).",
+      "completedAt": "2026-11-21T16:22:55Z",
+      "gradeResult": {
+        "phaseId": "list-read-file-tools",
+        "dimensionScores": [
+          {
+            "dimensionId": "path-rule-and-symlink-escape",
+            "score": 9,
+            "pass": true,
+            "evidence": "Every listed case refused with OUTSIDE_PROJECT_FILES; assistant_files.py:27-31 re-checks the resolved relative path; real-symlink tests for .env, outside file/dir, .adops and an allowed alias. Not 10: a self-referencing symlink makes Path.resolve raise RuntimeError, which breaks list_files (untested)."
+          },
+          {
+            "dimensionId": "redaction-replaces-resolved-values",
+            "score": 10,
+            "pass": true,
+            "evidence": "Unit tests cover one/two/overlapping/repeated/empty/no values; MCP read_file test parametrized over pipelines, dbt and adops.yaml with assert_no_secret. Above a 9: proves the winning process-env value is redacted and empty env values are left out of the redaction set."
+          },
+          {
+            "dimensionId": "failure-paths-asserted",
+            "score": 8,
+            "pass": true,
+            "evidence": "dotenv refusal test asserts exact message, nothing touched and unchanged tree; interface tests cover binary, oversized, missing, directory and the cap boundary. Gaps: symlink-to-.env and refused-directory MCP tests assert only the message; binary/oversized not tested through the tool."
+          },
+          {
+            "dimensionId": "layers-and-sdk-boundary",
+            "score": 9,
+            "pass": true,
+            "evidence": "Path rule is pure string code in domain; redaction in application; filesystem in interface; tool bodies are 1-2 lines. Purity tests pass; MCP SDK imported only in mcp_server.py (cli.py:9 imports the CLI function). Not 10: project_secret_values sits in mcp_server.py, not application/."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "edit-file-tool",
+      "status": "awaiting-verification",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-21T16:24:32Z",
+      "baseRef": "e8cb04e5f47b67d701377d4eb26330e8ba52ea7b",
+      "baseDirty": true,
+      "notes": "baseDirty: phases 1-4 of this horizon were uncommitted at start and touch the same files, so git cannot separate this phase's paths; files changed this phase: src/adops/domain/assistant_access.py, tests/unit/domain/test_assistant_access.py, src/adops/interface/assistant_files.py, tests/unit/interface/test_assistant_files.py, src/adops/interface/mcp_server.py, tests/unit/interface/test_mcp_server.py (all in filesAffected). Change: allowed_project_path(write=True) narrows to files under pipelines/ and dbt/ (adops.yaml -> WRITES_ONLY_UNDER_ROOTS); write_project_file encodes+size-caps, resolves the whole path (incl. dangling links) via resolve_project_file(write=True), refuses directory targets and a file in place of a parent folder, then mkdirs and writes; OSError -> ProjectFileError '<path>: could not be written'; resolve_project_file now turns a symlink loop (RuntimeError/OSError) into a refusal, fixing the horizon-10 discovery for list/read too; edit_file MCP tool replies path/bytes_written/created, never the content. Gates run locally: uv sync --locked, ruff check, pytest tests/unit --cov 100% (1629 passed, Postgres DSN set), purity tests.",
+      "unplannedFiles": [],
+      "gateRun": [
+        "uv sync --locked: pass",
+        "uv run ruff check: pass",
+        "ADOPS_TEST_POSTGRES_DSN=… uv run pytest tests/unit --cov --cov-report=term-missing: pass (1629 passed, 100% lines+branches)",
+        "uv run pytest tests/unit/domain/test_domain_purity.py tests/unit/application/test_application_purity.py: pass",
+        "grep mcp imports: only interface/mcp_server.py imports the SDK (cli.py imports adops.interface.mcp_server)"
+      ],
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-21T16:32:05Z",
+          "gate": "uv run pytest tests/unit --cov",
+          "detail": "41 setup errors: ADOPS_TEST_POSTGRES_DSN is not set; coverage 98% (postgres_reverse_sync.py, warehouse_lock.py)",
+          "resolvedBy": "gate-fix",
+          "resolution": "environment only: set ADOPS_TEST_POSTGRES_DSN to the running adops-test-pg container; no code change"
+        }
+      ]
+    }
+  ]
+}

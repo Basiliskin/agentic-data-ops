@@ -68,3 +68,7 @@
 - 2026-11-21 | horizon 9 | MCP Branch runs from a laptop are allowed when stage's Warehouse Secret Reference is set locally; otherwise a sanitized error names it — user choice
 - 2026-11-21 | horizon 9 | `adops mcp` serves the MCP server over stdio only; `adops init` writes .mcp.json for Claude Code — user choice; no HTTP transport or other Assistants' config in v1
 - 2026-11-21 | horizon 9 | MCP tools are synchronous functions (FastMCP runs them one at a time) and the SDK is imported only in interface/ — because run_project swaps os.environ and domain/application stay framework-free
+- 2026-11-21 | horizon 10 | MCP read_file refuses .env/.env.* and replaces any resolved Secret Reference value with *** in other files — user choice
+- 2026-11-21 | horizon 10 | MCP edit_file writes only under pipelines/ and dbt/; adops.yaml is read-only for the Assistant (narrows the horizon-9 edit allow-list) — user choice
+- 2026-11-21 | horizon 10 | MCP drop_branch fails fast on a held stage lock (CLI keeps 30 min); MCP accept_schema is dev only and takes no lock — user choice
+- 2026-11-21 | horizon 10 | MCP tools taking a pipeline argument require a plain Pipeline name (no /, \, ..) — user-confirmed assumption

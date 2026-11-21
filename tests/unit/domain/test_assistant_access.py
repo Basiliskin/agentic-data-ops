@@ -3,9 +3,14 @@ import dataclasses
 import pytest
 
 from adops.domain.assistant_access import (
+    OUTSIDE_PROJECT_FILES,
+    WRITES_ONLY_UNDER_ROOTS,
     AssistantRefusal,
     AssistantTarget,
+    allowed_project_path,
     assistant_target,
+    plain_pipeline_name,
+    refuse_branch_schema_acceptance,
     refuse_shared_dev_connection,
 )
 from adops.domain.environment import DuckDbConnection, Environment, PostgresConnection
@@ -244,3 +249,135 @@ def test_the_shared_connection_refusal_carries_no_connection_values():
     assert message is not None
     for value in ("leak-host-zz9", "leak-db-zz9", "leak-user-zz9"):
         assert value not in message
+
+
+@pytest.mark.parametrize("name", ["shop_sync", "a-b", "v2", "orders.v2"])
+def test_a_plain_pipeline_name_is_returned_unchanged(name):
+    assert plain_pipeline_name(name) == name
+
+
+@pytest.mark.parametrize(
+    "name", ["", "..", "a/b", "a\\b", "../x", "x..y", "/etc/passwd", "shop\0sync"]
+)
+def test_a_pipeline_name_that_could_leave_pipelines_is_refused_without_echoing_it(name):
+    with pytest.raises(AssistantRefusal) as caught:
+        plain_pipeline_name(name)
+
+    message = str(caught.value)
+    assert "plain Pipeline name" in message
+    if name:
+        assert name not in message
+
+
+def test_accepting_a_schema_in_a_branch_is_refused():
+    with pytest.raises(AssistantRefusal, match="only in `dev`"):
+        refuse_branch_schema_acceptance("feature")
+
+
+def test_accepting_a_schema_without_a_branch_is_allowed():
+    refuse_branch_schema_acceptance(None)
+
+
+@pytest.mark.parametrize(
+    ("relative", "expected"),
+    [
+        ("adops.yaml", "adops.yaml"),
+        ("pipelines/a.yaml", "pipelines/a.yaml"),
+        ("dbt/models/x.sql", "dbt/models/x.sql"),
+        ("pipelines\\a.yaml", "pipelines/a.yaml"),
+        ("./pipelines//a.yaml", "pipelines/a.yaml"),
+        ("pipelines", "pipelines"),
+    ],
+)
+def test_an_allowed_project_path_is_returned_normalized(relative, expected):
+    assert allowed_project_path(relative) == expected
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "",
+        ".",
+        "/etc/passwd",
+        "\\etc\\passwd",
+        "C:/Windows/x",
+        "../x",
+        "pipelines/../adops.yaml",
+        ".env",
+        ".ENV",
+        ".env.local",
+        ".Env.local",
+        "pipelines/.env",
+        "dbt/.Env.prod",
+        "pipelines/.env/x.yaml",
+        ".adops/dlt/x",
+        ".github/workflows/ci.yml",
+        "server/x",
+        "Pipelines/a.yaml",
+        "pipelines/a\0.yaml",
+    ],
+)
+def test_a_path_outside_the_project_files_is_refused_with_a_fixed_message(relative):
+    with pytest.raises(AssistantRefusal) as caught:
+        allowed_project_path(relative)
+
+    assert str(caught.value) == OUTSIDE_PROJECT_FILES
+
+
+def test_an_env_lookalike_that_is_not_dotenv_is_allowed():
+    assert allowed_project_path("pipelines/.environment.yaml") == "pipelines/.environment.yaml"
+
+
+@pytest.mark.parametrize(
+    ("relative", "expected"),
+    [
+        ("pipelines/a.yaml", "pipelines/a.yaml"),
+        ("dbt/models/x.sql", "dbt/models/x.sql"),
+        ("dbt/profiles.yml", "dbt/profiles.yml"),
+        ("pipelines\\new\\b.yaml", "pipelines/new/b.yaml"),
+    ],
+)
+def test_a_write_under_pipelines_or_dbt_is_allowed(relative, expected):
+    assert allowed_project_path(relative, write=True) == expected
+
+
+@pytest.mark.parametrize("relative", ["adops.yaml", "./adops.yaml", "pipelines", "dbt/"])
+def test_a_write_outside_a_pipelines_or_dbt_file_is_refused_as_read_only(relative):
+    with pytest.raises(AssistantRefusal) as caught:
+        allowed_project_path(relative, write=True)
+
+    assert str(caught.value) == WRITES_ONLY_UNDER_ROOTS
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        ".env",
+        ".ENV",
+        ".env.local",
+        "pipelines/.env",
+        "dbt/.Env.prod",
+        ".adops/x",
+        ".github/workflows/ci.yml",
+        "server/x",
+        "../x",
+        "dbt/../adops.yaml",
+        "pipelines/../adops.yaml",
+        "/etc/passwd",
+        "/abs/pipelines/a.yaml",
+        "C:/Windows/x",
+        "pipelines/a\0.yaml",
+    ],
+)
+def test_every_read_refusal_also_refuses_a_write(relative):
+    with pytest.raises(AssistantRefusal) as caught:
+        allowed_project_path(relative, write=True)
+
+    assert str(caught.value) == OUTSIDE_PROJECT_FILES
+
+
+def test_adops_yaml_stays_readable_while_it_is_not_writable():
+    assert allowed_project_path("adops.yaml") == "adops.yaml"
+    with pytest.raises(AssistantRefusal):
+        allowed_project_path("adops.yaml", write=True)
+

@@ -19,3 +19,5 @@
 - 2026-11-21 | horizon 8 | completed | 6 phases — run --all, Warehouse lock, PR/stage/prod workflows, Promotion setup guide + ADR-0016; 2 amendments, 0 overrides
 - 2026-11-21 | horizon 9 | planned | 5 phases (Assistant MCP server: dev/branch allow-list, shared-DB refusal, adops mcp with run/preview/validate, demo shop_dev target, .mcp.json); gate passed (0 blockers, 0 majors)
 - 2026-11-21 | horizon 9 | completed | 5 phases (run/preview/validate MCP tools for dev and Branch Environments only, shared-DB refusal, adops mcp over stdio, demo shop_dev, .mcp.json); 0 amendments, 0 overrides
+- 2026-11-21 | horizon 10 | planned | 5 phases (Assistant MCP: drop-branch, dev-only accept-schema, project view, list/read files, edit files) | template of horizon 9
+- 2026-11-21 | horizon 10 | completed | 5 phases (MCP drop_branch, accept_schema, project_view, list/read/edit file tools)

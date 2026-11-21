@@ -11,6 +11,30 @@ ONLY_DEV_OR_BRANCH = (
     "the Assistant works only in the Environment named exactly `dev` or in a Branch Environment"
 )
 
+NOT_A_PLAIN_PIPELINE_NAME = (
+    "the Assistant takes only a plain Pipeline name, the file name in pipelines/ without .yaml; "
+    "a name with a slash, a backslash, two dots in a row or a NUL character is refused"
+)
+NAME_UNSAFE_PARTS = ("/", "\\", "..", "\0")
+
+SETTINGS_FILE_NAME = "adops.yaml"
+PROJECT_FILE_ROOTS = ("pipelines", "dbt")
+DOTENV_NAME = ".env"
+OUTSIDE_PROJECT_FILES = (
+    "the Assistant works only with adops.yaml and the files under pipelines/ and dbt/, "
+    "given as a path relative to the Project; an absolute path, a '..' part "
+    "and any .env file are refused"
+)
+WRITES_ONLY_UNDER_ROOTS = (
+    "the Assistant writes only files under pipelines/ and dbt/; "
+    "adops.yaml is read-only for the Assistant"
+)
+
+ACCEPT_SCHEMA_DEV_ONLY = (
+    "the Assistant accepts a Breaking Change only in `dev`; "
+    "a Branch Environment records its accepted shapes afresh, so there is nothing to accept there"
+)
+
 
 class AssistantRefusal(Exception):
     """A refused Assistant request; its fixed message never carries connection values."""
@@ -33,6 +57,42 @@ def assistant_target(environment: str | None, branch: str | None) -> AssistantTa
     if environment != DEV:
         raise AssistantRefusal(f"{ONLY_DEV_OR_BRANCH}; {environment!r} is refused")
     return AssistantTarget()
+
+
+def plain_pipeline_name(name: str) -> str:
+    """The name, or a refusal that does not repeat it, so it cannot reach outside pipelines/."""
+    if not name or any(part in name for part in NAME_UNSAFE_PARTS):
+        raise AssistantRefusal(NOT_A_PLAIN_PIPELINE_NAME)
+    return name
+
+
+def allowed_project_path(relative: str, *, write: bool = False) -> str:
+    """The Project-relative path with `/` separators, or a refusal that does not repeat it.
+
+    With `write`, only a file under pipelines/ or dbt/ is allowed.
+    """
+    normalized = relative.replace("\\", "/")
+    if "\0" in normalized or normalized.startswith("/"):
+        raise AssistantRefusal(OUTSIDE_PROJECT_FILES)
+    parts = [part for part in normalized.split("/") if part not in ("", ".")]
+    if not parts or ".." in parts or any(_is_dotenv(part) for part in parts):
+        raise AssistantRefusal(OUTSIDE_PROJECT_FILES)
+    path = "/".join(parts)
+    if path != SETTINGS_FILE_NAME and parts[0] not in PROJECT_FILE_ROOTS:
+        raise AssistantRefusal(OUTSIDE_PROJECT_FILES)
+    if write and len(parts) < 2:
+        raise AssistantRefusal(WRITES_ONLY_UNDER_ROOTS)
+    return path
+
+
+def _is_dotenv(part: str) -> bool:
+    lowered = part.lower()
+    return lowered == DOTENV_NAME or lowered.startswith(DOTENV_NAME + ".")
+
+
+def refuse_branch_schema_acceptance(branch: str | None) -> None:
+    if branch is not None:
+        raise AssistantRefusal(ACCEPT_SCHEMA_DEV_ONLY)
 
 
 ConnectionKey = tuple[str, ...]

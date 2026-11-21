@@ -2,7 +2,9 @@ import pytest
 
 from adops.application.secrets import (
     MissingSecretError,
+    redact_secret_values,
     resolve_secret_references,
+    secret_reference_status,
     secret_references,
 )
 from adops.domain.environment import DuckDbConnection, PostgresConnection
@@ -92,3 +94,72 @@ def test_a_missing_target_password_is_named_and_its_value_never_shown():
 
     assert raised.value.names == ("TGT_PASSWORD",)
     assert "wh-secret-value" not in str(raised.value)
+
+
+def test_status_reports_set_for_a_reference_with_a_value():
+    env = {"A_PASSWORD": "a-value", "UNRELATED": "x"}
+
+    assert secret_reference_status(env, refs("A_PASSWORD")) == {"A_PASSWORD": "set"}
+
+
+def test_status_reports_missing_for_an_unset_or_empty_reference():
+    env = {"EMPTY_PASSWORD": ""}
+
+    assert secret_reference_status(env, refs("UNSET_PASSWORD", "EMPTY_PASSWORD")) == {
+        "UNSET_PASSWORD": "missing",
+        "EMPTY_PASSWORD": "missing",
+    }
+
+
+def test_status_agrees_with_resolution_on_an_empty_value():
+    env = {"EMPTY_PASSWORD": ""}
+
+    with pytest.raises(MissingSecretError):
+        resolve_secret_references(env, refs("EMPTY_PASSWORD"))
+    assert secret_reference_status(env, refs("EMPTY_PASSWORD")) == {"EMPTY_PASSWORD": "missing"}
+
+
+def test_status_lists_a_name_referenced_twice_once():
+    env = {"SHARED_PASSWORD": "shared-value"}
+
+    status = secret_reference_status(env, refs("SHARED_PASSWORD", "SHARED_PASSWORD"))
+
+    assert status == {"SHARED_PASSWORD": "set"}
+
+
+def test_status_never_carries_a_value():
+    env = {"A_PASSWORD": "a-distinctive-value"}
+
+    status = secret_reference_status(env, refs("A_PASSWORD", "B_PASSWORD"))
+
+    assert set(status.values()) <= {"set", "missing"}
+    assert "a-distinctive-value" not in repr(status)
+
+
+def test_redaction_replaces_one_value():
+    assert redact_secret_values("password: hunter2\n", ["hunter2"]) == "password: ***\n"
+
+
+def test_redaction_replaces_two_values():
+    assert redact_secret_values("a=one b=two", ["one", "two"]) == "a=*** b=***"
+
+
+def test_redaction_of_overlapping_values_leaves_neither():
+    text = "long=prefix-secret-suffix short=secret"
+
+    redacted = redact_secret_values(text, ["secret", "prefix-secret-suffix"])
+
+    assert redacted == "long=*** short=***"
+    assert "secret" not in redacted
+
+
+def test_redaction_replaces_a_repeated_value_everywhere():
+    assert redact_secret_values("x x x", ["x"]) == "*** *** ***"
+
+
+def test_redaction_skips_an_empty_value():
+    assert redact_secret_values("unchanged text", ["", ""]) == "unchanged text"
+
+
+def test_redaction_without_values_leaves_the_text():
+    assert redact_secret_values("unchanged text", []) == "unchanged text"

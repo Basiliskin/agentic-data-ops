@@ -11,6 +11,7 @@ from adops.application.secrets import MissingSecretError
 from adops.domain.branch_environment import STAGE
 from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import load_project_settings
+from adops.infrastructure.warehouse_lock import DEFAULT_LOCK_TIMEOUT
 from adops.infrastructure.warehouse_schemas import LocalBranchState, WarehouseSchemaAdmin
 from adops.interface import run_command
 from adops.interface.run_command import ProjectFileError, fail
@@ -44,12 +45,15 @@ def drop_branch(
         typer.echo(f"Branch Environment {dropped.environment} has no schemas left to drop.")
 
 
-def drop_project_branch(project: Path, branch: str) -> DroppedBranch:
+def drop_project_branch(
+    project: Path, branch: str, lock_timeout: float = DEFAULT_LOCK_TIMEOUT
+) -> DroppedBranch:
+    """Drop a Branch Environment, waiting up to `lock_timeout` seconds for stage's lock."""
     settings_text = run_command.read_settings(project)
     stage = stage_environment(load_project_settings(settings_text).environments)
     env = run_command.project_env(project)
     warehouse = run_command.resolve_environment_warehouse(stage, env)
-    with run_command.build_warehouse_lock(warehouse, project, STAGE):
+    with run_command.build_warehouse_lock(warehouse, project, STAGE, lock_timeout):
         return drop_branch_environment(
             settings_text,
             branch,

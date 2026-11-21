@@ -26,6 +26,27 @@ def resolve_secret_references(
     return {name: env[name] for name in names}
 
 
+SET = "set"
+MISSING = "missing"
+
+
+def secret_reference_status(
+    env: Mapping[str, str], refs: Iterable[SecretReference]
+) -> dict[str, str]:
+    """Whether each reference is set, by the rule resolve_secret_references applies; no values."""
+    return {ref.name: SET if env.get(ref.name) else MISSING for ref in refs}
+
+
+REDACTED = "***"
+
+
+def redact_secret_values(text: str, values: Iterable[str]) -> str:
+    """Replace every non-empty value with ***, longest first so no part of a longer one stays."""
+    for value in sorted({value for value in values if value}, key=len, reverse=True):
+        text = text.replace(value, REDACTED)
+    return text
+
+
 def secret_references(
     warehouse: PostgresConnection | DuckDbConnection,
     sources: Sequence[PostgresConnection],
