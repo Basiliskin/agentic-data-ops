@@ -76,8 +76,8 @@ SEED_CUSTOMER_STATS = [
 ]
 
 
-def customer_stats(env):
-    with connect(env, "SHOP", "shop", "shop") as conn:
+def customer_stats(env, database="shop"):
+    with connect(env, "SHOP", "shop", database) as conn:
         return conn.execute(
             "SELECT customer_id, order_count, total_amount, last_order_at"
             " FROM public.customer_stats ORDER BY customer_id"
@@ -161,6 +161,7 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
     assert "  Preview: would insert 20, would update 0, would delete 0" in lines
     assert "  sample insert keys: 1, 2, 3, 4, 5" in lines
     assert customer_stats(env) == []
+    assert customer_stats(env, "shop_dev") == []
 
     code, output = adops_run(project, *RUN, "--env", "stage")
 
@@ -195,8 +196,9 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
     assert counts(demo) == {"customers": 20, "orders": 101}
     assert analytics_rows(demo) == 101
     assert_reverse_sync_passed(output)
-    assert "  Preview: would insert 0, would update 2, would delete 0" in output.splitlines()
+    assert "  Preview: would insert 20, would update 0, would delete 0" in output.splitlines()
     assert customer_stats(env) == SEED_CUSTOMER_STATS
+    assert customer_stats(env, "shop_dev") == []
     [(amount,)] = warehouse(demo, "SELECT amount FROM raw_shop.orders WHERE id = 5")
     assert amount == Decimal("999.99")
     duplicates = "SELECT id FROM raw_shop.orders GROUP BY id HAVING count(*) > 1"

@@ -1,5 +1,6 @@
 # Passwords are never written here: each *_env names a variable set in .env.
-# Only an Environment named stage or prod writes to a target; dev prints a Preview instead.
+# Only an Environment named stage or prod writes to a target; dev prints a Preview instead,
+# against its own copy of the target table in the shop_dev database.
 # Server failure alerts go to the URL in ALERT_WEBHOOK_URL; an empty value turns them off.
 alert_webhook_env: ALERT_WEBHOOK_URL
 environments:
@@ -28,7 +29,7 @@ environments:
         type: postgres
         host: localhost
         port: 15432
-        database: shop
+        database: shop_dev
         user: shop
         password_env: SHOP_PASSWORD
   stage:

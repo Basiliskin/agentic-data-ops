@@ -12,6 +12,7 @@ from dotenv import dotenv_values
 from typer.testing import CliRunner
 
 import adops
+from adops.domain.assistant_access import refuse_shared_dev_connection
 from adops.domain.loader import (
     ensure_sources_defined,
     ensure_targets_defined,
@@ -42,6 +43,7 @@ SERVER_COMPOSE_RUN = (
 DEMO_FILES = SERVER_FILES | WORKFLOW_FILES | {
     ".env.example",
     ".gitignore",
+    ".mcp.json",
     "adops.yaml",
     "dagster.yaml",
     "dbt/dbt_project.yml",
@@ -54,6 +56,7 @@ DEMO_FILES = SERVER_FILES | WORKFLOW_FILES | {
     "docker-compose.yml",
     "pipelines/shop_sync.yaml",
     "seed/01_shop.sql",
+    "seed/02_shop_dev.sql",
     "warehouse_init/01_stage.sql",
 }
 
@@ -180,6 +183,33 @@ def test_demo_stage_keeps_its_own_warehouse(demo):
     assert "./warehouse_init:/docker-entrypoint-initdb.d:ro" in volumes
     init = (demo / "warehouse_init" / "01_stage.sql").read_text()
     assert "CREATE DATABASE warehouse_stage;" in init
+
+
+def test_demo_dev_previews_against_its_own_target_database(demo):
+    settings = load_project_settings((demo / "adops.yaml").read_text())
+    dev, stage = settings.environments["dev"], settings.environments["stage"]
+
+    assert dev.targets["shop"].database == "shop_dev"
+    assert dev.sources["shop"].database == "shop"
+    assert stage.targets["shop"].database == "shop"
+    assert stage.sources["shop"].database == "shop"
+    refuse_shared_dev_connection(settings.environments, str)
+
+
+def test_demo_seeds_shop_dev_with_the_same_target_table(demo):
+    table = re.compile(r"CREATE TABLE customer_stats \(.*?\);", re.DOTALL)
+    shop = (demo / "seed" / "01_shop.sql").read_text()
+    shop_dev = (demo / "seed" / "02_shop_dev.sql").read_text()
+
+    assert sorted(path.name for path in (demo / "seed").iterdir()) == [
+        "01_shop.sql",
+        "02_shop_dev.sql",
+    ]
+    assert shop_dev.index("CREATE DATABASE shop_dev OWNER shop;") < shop_dev.index(
+        "\\connect shop_dev"
+    )
+    assert shop_dev.index("\\connect shop_dev") < shop_dev.index("CREATE TABLE")
+    assert table.findall(shop_dev) == table.findall(shop)
 
 
 def test_demo_dbt_project_reads_raw_shop_and_ships_no_profile(demo):
@@ -385,6 +415,7 @@ def test_plain_init_writes_settings_server_files_and_an_empty_pipelines_folder(p
         ".env.example",
         ".github",
         ".github/workflows",
+        ".mcp.json",
         "adops.yaml",
         "docker-compose.yml",
         "pipelines",
@@ -392,6 +423,12 @@ def test_plain_init_writes_settings_server_files_and_an_empty_pipelines_folder(p
     }
     assert list((plain / "pipelines").iterdir()) == []
     load_project_settings((plain / "adops.yaml").read_text())
+
+
+def test_mcp_json_registers_the_adops_mcp_server_launched_from_the_project(project):
+    assert json.loads((project / ".mcp.json").read_text()) == {
+        "mcpServers": {"adops": {"command": "adops", "args": ["mcp"]}}
+    }
 
 
 def test_init_creates_missing_parent_folders(tmp_path):

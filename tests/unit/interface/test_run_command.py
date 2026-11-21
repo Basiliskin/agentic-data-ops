@@ -52,6 +52,7 @@ from adops.infrastructure.dlt_sync import DltSync
 from adops.infrastructure.postgres_reverse_sync import PostgresReverseSync
 from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
 from adops.infrastructure.step_fingerprint_store import ProjectTree, WarehouseFingerprintStore
+from adops.infrastructure.warehouse_lock import DEFAULT_LOCK_TIMEOUT
 from adops.interface import cli, run_command
 from adops.interface.run_command import ProjectFileError
 
@@ -436,14 +437,14 @@ def test_adops_run_goes_through_run_in_environment_with_the_built_orchestrator(
 ):
     calls: list[tuple[object, ...]] = []
 
-    def capture(*args: object) -> RunResult:
-        calls.append(args)
+    def capture(*args: object, lock_timeout: float) -> RunResult:
+        calls.append((*args, lock_timeout))
         return RunResult("shop_sync", "dev", ())
 
     monkeypatch.setattr(run_command, "run_in_environment", capture)
 
     assert invoke(project).exit_code == 0
-    assert calls == [(project.resolve(), "shop_sync", "dev", orchestrator)]
+    assert calls == [(project.resolve(), "shop_sync", "dev", orchestrator, DEFAULT_LOCK_TIMEOUT)]
 
 
 def test_run_passes_the_project_snapshot_store_to_the_pipeline(project, monkeypatch):

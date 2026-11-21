@@ -44,6 +44,15 @@
 - 2026-11-21 | horizon 8 | What is in an ADR-0015 accepted-change record: the full accepted TableShape from where accept-schema ran, or 'accept whatever the Source shows next run', given prod's Source can differ from dev's?
 - 2026-11-21 | horizon 8 | How does an Environment know it already applied an accepted-change record, and what happens if the Source has drifted again by the time the record is applied?
 - 2026-11-21 | horizon 8 | After a Server crash, how should runs left STARTED be cleared so the skip-overlap rule does not skip every later tick: Dagster run monitoring, a startup sweep, or both?
-- 2026-11-21 | horizon 8 | What does the Assistant need from the MCP server beyond edit/validate/test-connection/run/Preview/read-logs, and how does server code tell a dev/Branch request from stage/prod reliably?
+- 2026-11-21 | horizon 8 | What does the Assistant need from the MCP server beyond edit/validate/test-connection/run/Preview/read-logs, and how does server code tell a dev/Branch request from stage/prod reliably? — resolved by decision 2026-11-21
 - 2026-11-21 | horizon 8 | What did the first user feedback on Promotion say (runner setup, fork policy, 30-minute lock), and does any of it change horizon-8 choices?
 - 2026-11-21 | horizon 8 | Without GitHub Enterprise a private repo's prod has no required reviewers: is "only writers can publish releases" an acceptable prod gate, or should adops-prod.yml add its own approval step?
+- 2026-11-21 | horizon 9 | Does horizon 9 land as planned? The next horizon builds on mcp_server.py's guard helper, error mapping and mcp_harness.assert_no_secret. Check their real names and signatures before reusing them.
+- 2026-11-21 | horizon 9 | drop_project_branch takes stage's Warehouse lock but has no lock_timeout path. Can it fail fast like run/preview without changing the CLI's 30-minute wait?
+- 2026-11-21 | horizon 9 | accept_project_schema takes no Warehouse lock. Is it safe for the Assistant to accept a dev schema while a dev run is going on, or does the MCP tool need a lock?
+- 2026-11-21 | horizon 9 | Run-log identity is undefined: what <run> is (timestamp, run id, pipeline name), retention and pruning, and whether runs that fail before a RunResult exists (refusal, MissingSecretError) write a log at all.
+- 2026-11-21 | horizon 9 | read_file can return a literal password a user typed into adops.yaml or dbt/. Should read/list responses go through secret redaction, refuse the file, or return it as is?
+- 2026-11-21 | horizon 9 | Can dbt/ contain a profiles.yml or other connection config, so that edit under dbt/ redirects dev to stage/prod data and the adops.yaml shared-connection rule never sees it?
+- 2026-11-21 | horizon 9 | What does test-connection mean for a DuckDB Warehouse, and for a Branch Environment, which would open stage's Warehouse and stage's operational Reverse Sync targets?
+- 2026-11-21 | horizon 9 | Claude Code's real MCP tool-call timeout versus how long a dev or Branch run takes. Fail-fast covers the lock wait only, not long dlt/dbt runs.
+- 2026-11-21 | horizon 9 | The MCP run tool's pipeline argument is not path-checked: run_command reads pipelines/<name>.yaml, so '../x' reads a YAML outside pipelines/. Should MCP tools require a plain Pipeline name?

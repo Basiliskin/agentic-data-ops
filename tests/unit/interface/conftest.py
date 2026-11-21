@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from adops.application.ports import ResolvedWarehouse
+from adops.infrastructure.warehouse_lock import DEFAULT_LOCK_TIMEOUT
 from adops.interface import run_command
 
 
@@ -16,11 +17,17 @@ class FakeLocks:
     error: Exception | None = None
     events: list[tuple[str, ...]] = field(default_factory=list)
     warehouses: list[ResolvedWarehouse] = field(default_factory=list)
+    timeouts: list[float] = field(default_factory=list)
 
     @contextmanager
     def build(
-        self, warehouse: ResolvedWarehouse, project: Path, environment: str
+        self,
+        warehouse: ResolvedWarehouse,
+        project: Path,
+        environment: str,
+        timeout: float = DEFAULT_LOCK_TIMEOUT,
     ) -> Iterator[None]:
+        self.timeouts.append(timeout)
         if self.error is not None:
             raise self.error
         self.warehouses.append(warehouse)

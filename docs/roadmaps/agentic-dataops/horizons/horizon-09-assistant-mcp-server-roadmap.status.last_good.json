@@ -1,0 +1,274 @@
+{
+  "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-09-assistant-mcp-server-roadmap.json",
+  "roadmapTask": "Build the Assistant's MCP server: an MCP server the user's own Assistant connects to, exposing edit, validate, test-connection, run, Preview and read-logs tools for dev and Branch Environments only. Stage and prod requests are refused in the server's own code (ADR-0009), and tests assert that no MCP response contains a secret value. Settle first what the Assistant needs beyond those six tools, and how server code reliably tells a dev/Branch request from a stage/prod one.",
+  "createdAt": "2026-11-21T13:15:38Z",
+  "updatedAt": "2026-11-21T15:21:48Z",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "assistant-access-rules",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-21T13:15:38Z",
+      "baseRef": "83bc5dd7c524d363300a3ab3652f4bf3076ffb80",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/horizons/horizon-09-assistant-mcp-server-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-09-assistant-mcp-server-roadmap.md | changed: src/adops/domain/assistant_access.py, tests/unit/domain/test_assistant_access.py — pure rules: assistant_target allows exact dev or a non-empty branch only; refuse_shared_dev_connection compares dev Warehouse+targets against stage/prod by normalized (host,port,database) or injected DuckDB identity, with fixed refusal text.",
+      "unplannedFiles": [],
+      "gateRun": "uv sync --locked: pass; uv run ruff check: pass; uv run pytest tests/unit --cov --cov-report=term-missing (ADOPS_TEST_POSTGRES_DSN -> local adops-test-pg on :55432): pass, 1361 tests, 100% line+branch. g4/g5 not touched by this phase.",
+      "failures": [
+        {
+          "at": "2026-11-21T13:20:11Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run pytest tests/unit --cov",
+          "detail": "41 Postgres-backed infrastructure tests errored and coverage fell to 98%: ADOPS_TEST_POSTGRES_DSN was unset locally",
+          "resolvedBy": "gate-fix",
+          "resolution": "Re-ran with ADOPS_TEST_POSTGRES_DSN pointing at the local adops-test-pg container, as CI does with its postgres service; no code change"
+        }
+      ],
+      "completedAt": "2026-11-21T13:20:56Z",
+      "gradeResult": {
+        "phaseId": "assistant-access-rules",
+        "dimensionScores": [
+          {
+            "dimensionId": "exact-dev-or-branch-allowlist",
+            "score": 10,
+            "pass": true,
+            "evidence": "Every refused input has its own named test; refusal text asserted to name exactly `dev` and Branch Environment."
+          },
+          {
+            "dimensionId": "shared-connection-equivalence",
+            "score": 9,
+            "pass": true,
+            "evidence": "All passCriteria pairings tested; not 10 because cross pairing is tested one way only (dev target vs stage Warehouse), not dev Warehouse vs a stage/prod target."
+          },
+          {
+            "dimensionId": "sanitized-refusal-text",
+            "score": 10,
+            "pass": true,
+            "evidence": "Test with leak-host/db/user values asserts none appears in the refusal; f-strings interpolate only env names."
+          },
+          {
+            "dimensionId": "pure-domain-placement",
+            "score": 10,
+            "pass": true,
+            "evidence": "Purity test passes; only collections.abc, dataclasses, adops.domain imports; DuckDB resolution injected via duckdb_identity with the reason documented."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "mcp-server-run-tool",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-21T13:21:59Z",
+      "baseRef": "83bc5dd7c524d363300a3ab3652f4bf3076ffb80",
+      "baseDirty": true,
+      "notes": "Already dirty at start: docs/roadmaps/agentic-dataops/* memory+horizon-09 files, src/adops/domain/assistant_access.py, tests/unit/domain/test_assistant_access.py (phase assistant-access-rules, uncommitted). Changed: pyproject.toml, uv.lock, src/adops/interface/{mcp_server.py (new), cli.py, run_command.py}, tests/unit/interface/{mcp_harness.py (new), test_mcp_server.py (new), conftest.py, test_run_command.py}. Adds `adops mcp` (FastMCP over stdio, fd-1 redirected to stderr) with a `run` tool guarded by assistant_target + refuse_shared_dev_connection re-read per call; run_project gains lock_timeout (CLI default 30 min, MCP 0 -> busy reply); FakeLocks records timeouts; one test_run_command stub updated for the new keyword. Replies are TypedDicts so structuredContent is the reply itself. Gates local: uv sync --locked, ruff, unit+cov 100% (with ADOPS_TEST_POSTGRES_DSN); e2e not run. preHealRef=f5dd093d594bbf57ec84dd5c11c134d54108c94a Graded: no-secret-in-any-response re-graded after healer fix (7->10); the other five carried forward. Healer fix was a one-line test change, not the roadmap healerHint, because the gap was a missing scan.",
+      "unplannedFiles": [
+        "tests/unit/interface/conftest.py",
+        "tests/unit/interface/test_run_command.py"
+      ],
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-21T13:30:25Z",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "FAILED test_run_command.py::test_adops_run_goes_through_run_in_environment_with_the_built_orchestrator — stub rejected new lock_timeout keyword",
+          "resolvedBy": "gate-fix",
+          "resolution": "stub accepts lock_timeout and asserts the CLI passes DEFAULT_LOCK_TIMEOUT"
+        },
+        {
+          "kind": "grade",
+          "at": "2026-11-21T13:31:51Z",
+          "dimensionIds": [
+            "no-secret-in-any-response"
+          ],
+          "detail": "no-secret-in-any-response 7/9: test_dev_sharing_a_duckdb_file_with_stage_is_refused calls call_tool without assert_no_secret",
+          "resolvedBy": "healer-fix",
+          "resolution": "added assert_no_secret to test_dev_sharing_a_duckdb_file_with_stage_is_refused"
+        }
+      ],
+      "completedAt": "2026-11-21T13:38:29Z",
+      "gateRun": [
+        "uv sync --locked: pass",
+        "uv run ruff check: pass",
+        "uv run pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass, 1389 tests, 100%",
+        "uv run pytest tests/e2e -m e2e: pass, 8 tests, 7m44s",
+        "g4 wheel template list: not run, no template files changed"
+      ],
+      "gradeResult": {
+        "phaseId": "mcp-server-run-tool",
+        "overallPass": true,
+        "dimensions": [
+          {
+            "dimensionId": "refused-in-server-code-before-side-effects",
+            "score": 10,
+            "minScore": 9,
+            "passed": true,
+            "evidence": "Beyond the required refusals: a DuckDB path-normalisation case and the case variant Dev; adops.yaml re-read test."
+          },
+          {
+            "dimensionId": "no-secret-in-any-response",
+            "score": 10,
+            "minScore": 9,
+            "passed": true,
+            "evidence": "Re-graded after healer fix: every call_tool scanned; harness negative self-test (rubric 10 condition)."
+          },
+          {
+            "dimensionId": "warehouse-lock-fails-fast",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "Dev and branch busy replies tested with timeouts==[0]; CLI default asserted twice."
+          },
+          {
+            "dimensionId": "json-rpc-stream-protected",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "fd-level redirect; serve() wiring and real JSON-RPC over serve_streams tested end to end."
+          },
+          {
+            "dimensionId": "preview-only-and-sanitized-mapping",
+            "score": 8,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "written=True refused; invalid YAML equals error_lines; JobCompileError has no MCP test."
+          },
+          {
+            "dimensionId": "mcp-sdk-confined-to-interface",
+            "score": 10,
+            "minScore": 9,
+            "passed": true,
+            "evidence": "mcp imported only in mcp_server.py; sync tool; pyproject pins mcp>=1.30,<2."
+          }
+        ]
+      }
+    },
+    {
+      "phaseId": "demo-dev-own-target",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-21T13:41:48Z",
+      "baseRef": "83bc5dd7c524d363300a3ab3652f4bf3076ffb80",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,pyproject.toml,src/adops/interface/cli.py,src/adops/interface/run_command.py,tests/unit/interface/conftest.py,tests/unit/interface/test_run_command.py,uv.lock,docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/horizons/horizon-09-assistant-mcp-server-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-09-assistant-mcp-server-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-09-assistant-mcp-server-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-09-assistant-mcp-server-roadmap.status.last_good.json,src/adops/domain/assistant_access.py,src/adops/interface/mcp_server.py,tests/unit/domain/test_assistant_access.py,tests/unit/interface/mcp_harness.py,tests/unit/interface/test_mcp_server.py | changed: src/adops/templates/demo/adops.yaml, src/adops/templates/demo/seed/02_shop_dev.sql (new), .github/workflows/ci.yml, tests/unit/interface/test_init_command.py, tests/e2e/test_demo_sync.py — dev Reverse Sync target moves to shop_dev, created by a new seed; init pins + 2 unit tests (rule passes on shipped demo, seed table matches 01); E2E dev Preview after stage now expects insert 20 against empty shop_dev and asserts shop_dev untouched | compensation known: revert adops.yaml dev target database to shop and delete seed/02_shop_dev.sql; not needed",
+      "unplannedFiles": [],
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-21T13:47:51Z",
+          "gate": "uv run pytest tests/e2e -m e2e",
+          "detail": "test_branch_environment_defers_rebuilds_and_drops[postgres]: target_before != SEED_CUSTOMER_STATS",
+          "resolvedBy": "gate-fix",
+          "resolution": "removed an extra stage run added to the incremental test; the shared, incremental stage Warehouse leaked edited orders into the branch test"
+        }
+      ],
+      "gateRun": [
+        "uv sync --locked: pass",
+        "uv run ruff check: pass",
+        "uv run pytest tests/unit --cov: pass (1391, 100% line+branch)",
+        "uv build --wheel + unzip -l | grep 02_shop_dev.sql: pass (1 line)",
+        "adops init --demo writes seed/02_shop_dev.sql byte-identical: pass",
+        "uv run pytest tests/e2e -m e2e: pass (8 passed, 397s; first run failed, see failures)"
+      ],
+      "completedAt": "2026-11-21T13:55:23Z",
+      "gradeResult": {
+        "phaseId": "demo-dev-own-target",
+        "dimensionScores": [
+          {
+            "dimensionId": "demo-passes-shared-connection-rule",
+            "score": 10,
+            "pass": true,
+            "evidence": "Unit test loads the shipped template, asserts all four databases and calls refuse_shared_dev_connection; header comment updated."
+          },
+          {
+            "dimensionId": "seed-creates-matching-target",
+            "score": 10,
+            "pass": true,
+            "evidence": "DDL identical to 01; proven on the real stack by the E2E run (dev Preview insert 20, shop_dev readable and empty) plus a unit test on statement order and DDL."
+          },
+          {
+            "dimensionId": "seed-shipped-and-copied",
+            "score": 10,
+            "pass": true,
+            "evidence": "Both pins updated, init writes a byte-identical file, wheel check run locally; test pins the seed folder contents exactly."
+          },
+          {
+            "dimensionId": "e2e-expectations-follow-split",
+            "score": 10,
+            "pass": true,
+            "evidence": "dev checks query shop_dev, no new tests, suite passed on Docker; shop.customer_stats explicitly asserted untouched after a dev run."
+          },
+          {
+            "dimensionId": "rule-not-loosened-for-demo",
+            "score": 9,
+            "pass": true,
+            "evidence": "Only listed files plus two discoveries.md memory lines; no change to domain rule or server guard."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "init-writes-mcp-json",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-21T15:04:42Z",
+      "baseRef": "83bc5dd7c524d363300a3ab3652f4bf3076ffb80",
+      "baseDirty": true,
+      "notes": "Already dirty at start: .github/workflows/ci.yml,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,pyproject.toml,src/adops/interface/cli.py,src/adops/interface/run_command.py,src/adops/templates/demo/adops.yaml,tests/e2e/test_demo_sync.py,tests/unit/interface/conftest.py,tests/unit/interface/test_init_command.py,tests/unit/interface/test_run_command.py,uv.lock,docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/horizons/horizon-09-assistant-mcp-server-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-09-assistant-mcp-server-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-09-assistant-mcp-server-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-09-assistant-mcp-server-roadmap.status.last_good.json,src/adops/domain/assistant_access.py,src/adops/interface/mcp_server.py,src/adops/templates/demo/seed/02_shop_dev.sql,tests/unit/domain/test_assistant_access.py,tests/unit/interface/mcp_harness.py,tests/unit/interface/test_mcp_server.py | Changed: src/adops/templates/demo/.mcp.json (new), src/adops/templates/plain/.mcp.json (new), .github/workflows/ci.yml, tests/unit/interface/test_init_command.py. Both templates ship .mcp.json registering `adops mcp`; dotfiles already copy via _copy_tree (as .env.example), so init_command.py is unchanged.",
+      "unplannedFiles": [],
+      "completedAt": "2026-11-21T15:15:27Z",
+      "gradeResult": {
+        "phaseId": "init-writes-mcp-json",
+        "dimensionScores": [
+          {
+            "dimensionId": "mcp-json-registers-adops-server",
+            "score": 10,
+            "pass": true,
+            "evidence": "Both templates parse to exactly the required object; cmp exits 0; adops mcp --help exits 0. Above 9: test_init_command.py asserts full-object equality of the written file for demo and plain via the parametrized project fixture."
+          },
+          {
+            "dimensionId": "init-writes-file-in-both-modes",
+            "score": 10,
+            "pass": true,
+            "evidence": "In DEMO_FILES and the plain set; ci.yml demo loop has .mcp.json and plain loop plain/.mcp.json. Above 9: grader pip-installed the built wheel in a scratch venv and both init modes wrote .mcp.json."
+          },
+          {
+            "dimensionId": "template-data-not-code",
+            "score": 10,
+            "pass": true,
+            "evidence": "init_command.py diff empty; no mcpServers in Python; non-empty-folder refusal test passes in both modes, asserting nothing else is written."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": "uv sync --locked: pass; uv run ruff check: pass; uv run pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN=local adops-test-pg): pass, 1393 tests, 100%; ci.yml wheel template listing after uv build --wheel: pass; uv run pytest tests/e2e -m e2e: pass, 8 tests, 6m37s"
+    },
+    {
+      "phaseId": "preview-validate-tools",
+      "status": "awaiting-verification",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-21T15:16:57Z",
+      "baseRef": "83bc5dd7c524d363300a3ab3652f4bf3076ffb80",
+      "baseDirty": true,
+      "notes": "baseDirty: whole horizon is uncommitted (earlier phases); mcp_server.py and test_mcp_server.py snapshotted at start to isolate this phase diff | Changed: src/adops/interface/mcp_server.py, tests/unit/interface/test_mcp_server.py (diffed against start snapshot; no other files changed). Adds validate(pipeline) delegating to validate_project and preview(pipeline, environment, branch) sharing run via _guarded_run (guarded_run_arguments + lock_timeout=0 + written refusal) with a preview-only serializer; sample keys capped at PREVIEW_SAMPLE_SIZE in _preview_reply; stdio tools-list test now expects {run, preview, validate}.",
+      "unplannedFiles": [],
+      "gateRun": [
+        "uv sync --locked: pass",
+        "uv run ruff check: pass",
+        "ADOPS_TEST_POSTGRES_DSN=<local test pg> uv run pytest tests/unit --cov --cov-report=term-missing: pass (1413 passed, 100% line+branch)",
+        "g6 grep mcp imports only in interface: pass"
+      ]
+    }
+  ]
+}

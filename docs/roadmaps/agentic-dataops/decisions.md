@@ -58,3 +58,13 @@
 - 2026-11-21 | horizon 8 | Workflow jobs on a Server run adops inside the Server image via docker compose run --rm; only the fork validate job installs adops, from ADOPS_PACKAGE (default adops==<version>) — user choice
 - 2026-11-21 | horizon 8 | A Server must be a Linux host, because flock is not reliably shared through a Docker Desktop for macOS bind mount — needed for the DuckDB Warehouse lock
 - 2026-11-21 | horizon 8 | adops run --all takes the Warehouse lock once per Pipeline, not around the whole loop, so another run may take it between two Pipelines of a deploy — user choice
+- 2026-11-21 | horizon 9 | MCP tools accept only the Environment named exactly dev, or a Branch Environment by branch name; every other name is refused in server code — user choice, an allow-list because Environment names are free-form
+- 2026-11-21 | horizon 9 | MCP tools refuse dev when dev's Warehouse or any dev Reverse Sync target is the same database as stage's or prod's (normalized host/port/database, resolved DuckDB path) — user choice
+- 2026-11-21 | horizon 9 | The demo's dev Environment Previews against its own shop_dev target database, not stage's shop — user choice, so the strict shared-database rule refuses nothing in the demo
+- 2026-11-21 | horizon 9 | MCP runs try the Warehouse lock once and reply 'busy, try again later'; the CLI keeps its 30-minute wait — user choice, so the Assistant never hangs on a tool call
+- 2026-11-21 | horizon 9 | v1 MCP tools: run, preview, validate, edit, read/list files, project view, test-connection, read-logs, drop-branch, accept-schema (dev only); no Git operations in the server — user choice
+- 2026-11-21 | horizon 9 | The MCP edit/read/list tools may touch only pipelines/, dbt/ and adops.yaml, refusing .env, .adops/, .github/, server/ and any escape — user choice
+- 2026-11-21 | horizon 9 | Every run (CLI and MCP) will write a cleaned, secret-free log to .adops/logs/<env>/<run>.log, the only thing read-logs reads; Dagster internals are not exposed — user choice
+- 2026-11-21 | horizon 9 | MCP Branch runs from a laptop are allowed when stage's Warehouse Secret Reference is set locally; otherwise a sanitized error names it — user choice
+- 2026-11-21 | horizon 9 | `adops mcp` serves the MCP server over stdio only; `adops init` writes .mcp.json for Claude Code — user choice; no HTTP transport or other Assistants' config in v1
+- 2026-11-21 | horizon 9 | MCP tools are synchronous functions (FastMCP runs them one at a time) and the SDK is imported only in interface/ — because run_project swaps os.environ and domain/application stay framework-free

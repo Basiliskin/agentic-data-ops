@@ -17,3 +17,5 @@
 - 2026-11-21 | horizon 7 | completed | 7 phases — Schedules, run rules, Server profile, webhook alerts, Server E2E on both Warehouses
 - 2026-11-21 | horizon 8 | planned | 6 phases (GitHub Actions Promotion: run --all, Warehouse lock, PR/stage/prod workflows, setup guide + ADR-0016); gate passed after heal (0 blockers, 2 majors fixed)
 - 2026-11-21 | horizon 8 | completed | 6 phases — run --all, Warehouse lock, PR/stage/prod workflows, Promotion setup guide + ADR-0016; 2 amendments, 0 overrides
+- 2026-11-21 | horizon 9 | planned | 5 phases (Assistant MCP server: dev/branch allow-list, shared-DB refusal, adops mcp with run/preview/validate, demo shop_dev target, .mcp.json); gate passed (0 blockers, 0 majors)
+- 2026-11-21 | horizon 9 | completed | 5 phases (run/preview/validate MCP tools for dev and Branch Environments only, shared-DB refusal, adops mcp over stdio, demo shop_dev, .mcp.json); 0 amendments, 0 overrides

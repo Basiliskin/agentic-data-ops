@@ -62,7 +62,7 @@ from adops.infrastructure.dlt_sync import DltSync
 from adops.infrastructure.postgres_reverse_sync import PostgresReverseSync
 from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
 from adops.infrastructure.step_fingerprint_store import ProjectTree, WarehouseFingerprintStore
-from adops.infrastructure.warehouse_lock import warehouse_lock
+from adops.infrastructure.warehouse_lock import DEFAULT_LOCK_TIMEOUT, warehouse_lock
 
 SETTINGS_FILE = Path("adops.yaml")
 PIPELINES_DIR = Path("pipelines")
@@ -154,9 +154,12 @@ def build_project_files(project: Path) -> ProjectFiles:
 
 
 def build_warehouse_lock(
-    warehouse: ResolvedWarehouse, project: Path, environment: str
+    warehouse: ResolvedWarehouse,
+    project: Path,
+    environment: str,
+    timeout: float = DEFAULT_LOCK_TIMEOUT,
 ) -> AbstractContextManager[None]:
-    return warehouse_lock(warehouse, project, environment)
+    return warehouse_lock(warehouse, project, environment, timeout)
 
 
 @dataclass(frozen=True)
@@ -266,14 +269,28 @@ def _run_one(project: Path, pipeline: str, env: str, branch: str | None) -> None
 
 
 def run_project(
-    project: Path, pipeline: str, environment: str, branch: str | None = None
+    project: Path,
+    pipeline: str,
+    environment: str,
+    branch: str | None = None,
+    *,
+    lock_timeout: float = DEFAULT_LOCK_TIMEOUT,
 ) -> RunResult:
+    """Run a Pipeline, waiting up to `lock_timeout` seconds for its Warehouse lock."""
     with _scoped_environ(_dagster_environ(project)):
         if branch is None:
-            return run_in_environment(project, pipeline, environment, build_orchestrator())
+            return run_in_environment(
+                project, pipeline, environment, build_orchestrator(), lock_timeout=lock_timeout
+            )
         settings_text, pipeline_text = read_project_files(project, pipeline)
         return _run_branch(
-            project, pipeline, branch, settings_text, pipeline_text, project_env(project)
+            project,
+            pipeline,
+            branch,
+            settings_text,
+            pipeline_text,
+            project_env(project),
+            lock_timeout,
         )
 
 
@@ -285,7 +302,12 @@ def _dagster_environ(project: Path) -> dict[str, str]:
 
 
 def run_in_environment(
-    project: Path, pipeline: str, environment: str, orchestrator: Orchestrator
+    project: Path,
+    pipeline: str,
+    environment: str,
+    orchestrator: Orchestrator,
+    *,
+    lock_timeout: float = DEFAULT_LOCK_TIMEOUT,
 ) -> RunResult:
     """Run a Pipeline in a named Environment, holding its Warehouse lock for the whole run.
 
@@ -312,7 +334,9 @@ def run_in_environment(
             _fingerprinting(project, environment, kind, warehouse),
         )
 
-    return _holding_lock(project, environment, warehouse, pipeline_text, environment, run)
+    return _holding_lock(
+        project, environment, warehouse, pipeline_text, environment, run, lock_timeout
+    )
 
 
 def _run_branch(
@@ -322,6 +346,7 @@ def _run_branch(
     settings_text: str,
     pipeline_text: str,
     env: Mapping[str, str],
+    lock_timeout: float,
 ) -> RunResult:
     stage = stage_environment(load_project_settings(settings_text).environments)
     name = stage_branch_name(stage, branch)
@@ -333,7 +358,7 @@ def _run_branch(
         )
 
     # A Branch Environment lives in stage's Warehouse, so it shares stage's lock.
-    return _holding_lock(project, STAGE, warehouse, pipeline_text, name, run)
+    return _holding_lock(project, STAGE, warehouse, pipeline_text, name, run, lock_timeout)
 
 
 def _run_branch_locked(
@@ -388,10 +413,13 @@ def _holding_lock(
     pipeline_text: str,
     environment: str,
     run: Callable[[], RunResult],
+    lock_timeout: float,
 ) -> RunResult:
     with ExitStack() as stack:
         try:
-            stack.enter_context(build_warehouse_lock(warehouse, project, lock_environment))
+            stack.enter_context(
+                build_warehouse_lock(warehouse, project, lock_environment, lock_timeout)
+            )
         except WarehouseUnreachable:
             return _warehouse_unreachable(pipeline_text, environment)
         return run()
