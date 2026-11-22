@@ -331,6 +331,10 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
             " + (SELECT count(*) FROM runs WHERE run_body LIKE '%%' || %s || '%%')"
         )
         assert dagster_meta(env, leaks, env[name], env[name])[0][0] == 0
+    run_logs = [path.read_text() for path in (project / ".adops" / "logs" / "dev").iterdir()]
+    assert run_logs
+    for name in ("SHOP_PASSWORD", "WAREHOUSE_PASSWORD"):
+        assert all(env[name] not in text for text in run_logs)
 
 
 def stage_schemas(demo):

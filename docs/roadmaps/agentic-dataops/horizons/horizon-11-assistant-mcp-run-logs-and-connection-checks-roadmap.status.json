@@ -1,0 +1,267 @@
+{
+ "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-11-assistant-mcp-run-logs-and-connection-checks-roadmap.json",
+ "roadmapTask": "Finish the Assistant MCP tool set: every CLI and MCP run writes a cleaned, secret-free run log to .adops/logs/<env>/<run>.log; add a read-logs MCP tool that reads only those files; add a test-connection MCP tool that checks dev's or a Branch Environment's Warehouse, Sources and Reverse Sync targets and reports failures with the existing fixed unreachable messages",
+ "createdAt": "2026-11-22T06:55:03Z",
+ "updatedAt": "2026-11-22T08:08:34Z",
+ "roadmapRevision": 0,
+ "phases": [
+  {
+   "phaseId": "run-log-store",
+   "status": "done",
+   "attempts": 1,
+   "startedAt": "2026-11-22T06:55:03Z",
+   "baseRef": "d290bffbac93ed4d1b28235eb1fbb304fcac8c9a",
+   "baseDirty": true,
+   "notes": "Already dirty at start: docs/roadmaps/agentic-dataops/{MAP,blockers,decisions,discoveries,state}.md and horizon-11 roadmap .json/.md (planning output). Changed: src/adops/domain/run_log.py, src/adops/infrastructure/run_log_store.py, tests/unit/domain/test_run_log.py, tests/unit/infrastructure/test_run_log_store.py. Adds the Run Log name rule (domain: RUN_LOG_NAME, run_log_file_name, is_run_log_name, plus is_plain_name for env/pipeline) and write_run_log (exclusive create, +1s on collision, prune to newest 20 by name, OSError -> None).",
+   "unplannedFiles": [],
+   "gateRun": "uv sync --locked: pass; uv run ruff check: pass; ruff format --check (4 new files): pass; ADOPS_TEST_POSTGRES_DSN=<local adops-test-pg :55432> uv run pytest tests/unit --cov --cov-report=term-missing: pass, 1667 tests, 100% line+branch (includes domain purity tests). g3/g4/g7 not touched (no template, e2e or MCP change).",
+   "completedAt": "2026-11-22T06:59:33Z",
+   "gradeResult": {
+    "phaseId": "run-log-store",
+    "overallPass": true,
+    "dimensionScores": [
+     {
+      "dimensionId": "name-rule-layer-purity",
+      "score": 9,
+      "pass": true,
+      "evidence": "Domain imports only re/datetime, no clock; store imports the domain rule, no re.compile; purity test passes; unsafe-name test leaves tmp_path empty. Not 10: PLAIN_NAME restates IDENTIFIER from domain/names.py."
+     },
+     {
+      "dimensionId": "name-format-utc-and-rejection",
+      "score": 10,
+      "pass": true,
+      "evidence": "astimezone(UTC) + fullmatch; +02:00 check and reject list print as required. Beyond 9: also rejects empty pipeline, traversal in pipeline segment, wrong extension; formatter/pattern agreement tested."
+     },
+     {
+      "dimensionId": "no-overwrite-on-collision",
+      "score": 10,
+      "pass": true,
+      "evidence": "open(\"x\") with +1s retry, no write_text. Beyond 9: three same-second writes give 05/06/07 and earlier texts preserved."
+     },
+     {
+      "dimensionId": "prune-keeps-newest-20-only-run-logs",
+      "score": 10,
+      "pass": true,
+      "evidence": "Name-sorted prune of matching files only, FileNotFoundError tolerated, no mtime. Beyond 9: sibling Environment untouched, matching-name subdirectory survives, older-named run written last is pruned."
+     },
+     {
+      "dimensionId": "write-failure-returns-none",
+      "score": 10,
+      "pass": true,
+      "evidence": "One try/except OSError around mkdir/write/prune. Beyond 9: separate tests for mkdir, write (ENOSPC and chmod 0o500) and prune PermissionError failures; success Path asserted."
+     }
+    ]
+   }
+  },
+  {
+   "phaseId": "write-run-log-from-runs",
+   "status": "done",
+   "attempts": 1,
+   "startedAt": "2026-11-22T07:01:24Z",
+   "baseRef": "d290bffbac93ed4d1b28235eb1fbb304fcac8c9a",
+   "baseDirty": true,
+   "notes": "Already dirty at start: horizon-11 planning docs (MAP/blockers/decisions/discoveries/state.md, roadmap json/md/status) and phase run-log-store files (src/adops/domain/run_log.py, src/adops/infrastructure/run_log_store.py, tests/unit/domain/test_run_log.py, tests/unit/infrastructure/test_run_log_store.py). Changed: src/adops/interface/run_command.py, src/adops/interface/project_secrets.py (new), src/adops/interface/mcp_server.py, src/adops/templates/plain/gitignore (new), .github/workflows/ci.yml, tests/unit/interface/test_run_command.py, tests/unit/interface/test_mcp_server.py, tests/unit/interface/test_init_command.py, tests/e2e/test_demo_sync.py. run_project now wraps the run and writes one masked Run Log from result_lines (CLI output incl. summary line) or error_lines for RUN_ERRORS; project_secret_values moved to project_secrets.py; plain template ships .gitignore. Unexpected (non-RUN_ERRORS) exceptions write no Run Log, as the contract scopes logging to RUN_ERRORS.",
+   "unplannedFiles": [],
+   "gateRun": "uv run ruff check: pass; ruff format --check (changed files): pass except pre-existing unformatted hunk at test_init_command.py:43 (not this phase; format is not a CI gate); ADOPS_TEST_POSTGRES_DSN=<local adops-test-pg :55432> uv run pytest tests/unit --cov --cov-report=term-missing: pass, 1690 tests, 100% line+branch; g3 uv build --wheel: adops/templates/plain/gitignore present; g4 uv run pytest tests/e2e -m e2e: pass, 8 tests, 7m09s.",
+   "completedAt": "2026-11-22T07:19:01Z",
+   "gradeResult": {
+    "phaseId": "write-run-log-from-runs",
+    "overallPass": true,
+    "dimensionScores": [
+     {
+      "dimensionId": "log-text-equals-cli-output",
+      "score": 10,
+      "pass": true,
+      "evidence": "One result_lines derived from result_output, which the CLI prints. Log == CliRunner output asserted for success, failed Step, Preview and all four error_lines early failures; old expected strings unedited. Beyond 9: Branch and MCP run/preview logs pinned to exact CLI text."
+     },
+     {
+      "dimensionId": "one-log-per-accepted-run-none-for-refusals",
+      "score": 10,
+      "pass": true,
+      "evidence": "build_run_log_writer is in SEAMS; one file per early-failure kind; run --all gives N files; Branch logs only under br_feat; ../x pipeline/--env/--branch create no .adops. Beyond 9: failed Branch run, '///' branch and MCP held-lock Branch case also covered."
+     },
+     {
+      "dimensionId": "run-log-secret-free",
+      "score": 9,
+      "pass": true,
+      "evidence": "Every path is masked in _write_run_log, with a [] fallback; LeakingOrchestrator test shows ***; invalid YAML still logs; E2E asserts no SHOP/WAREHOUSE_PASSWORD in .adops/logs/dev. Not 10: mcp_harness secret sweep covers only success logs."
+     },
+     {
+      "dimensionId": "logging-never-changes-outcome",
+      "score": 10,
+      "pass": true,
+      "evidence": "suppress(Exception) plus bare raise; a None writer and a raising writer both keep the exit code and output, and the exception identity is asserted. Beyond 9: identity rather than type, plus a Clock-failure test."
+     },
+     {
+      "dimensionId": "interface-layer-boundaries",
+      "score": 9,
+      "pass": true,
+      "evidence": "run_command doesn't import mcp_server; project_secret_values is defined only in project_secrets.py; no store import in domain/application; mcp_server diff is the import move only. Not 10: project_secrets<->run_command import cycle, resolved at call time."
+     },
+     {
+      "dimensionId": "plain-project-ignores-adops",
+      "score": 10,
+      "pass": true,
+      "evidence": "plain/gitignore = .env, .adops/; ci.yml lists it; listing pin updated. Beyond 9: exact-content assertion plus git check-ignore in a git-initialised plain Project."
+     }
+    ]
+   }
+  },
+  {
+   "phaseId": "read-logs-mcp-tool",
+   "status": "done",
+   "attempts": 1,
+   "startedAt": "2026-11-22T07:26:12Z",
+   "baseRef": "d290bffbac93ed4d1b28235eb1fbb304fcac8c9a",
+   "baseDirty": true,
+   "notes": "dirty at start: .github/workflows/ci.yml docs/roadmaps/agentic-dataops/MAP.md docs/roadmaps/agentic-dataops/blockers.md docs/roadmaps/agentic-dataops/decisions.md docs/roadmaps/agentic-dataops/discoveries.md docs/roadmaps/agentic-dataops/state.md src/adops/interface/mcp_server.py src/adops/interface/run_command.py tests/e2e/test_demo_sync.py tests/unit/interface/test_init_command.py tests/unit/interface/test_mcp_server.py tests/unit/interface/test_run_command.py docs/roadmaps/agentic-dataops/horizons/horizon-11-assistant-mcp-run-logs-and-connection-checks-roadmap.json docs/roadmaps/agentic-dataops/horizons/horizon-11-assistant-mcp-run-logs-and-connection-checks-roadmap.md docs/roadmaps/agentic-dataops/horizons/horizon-11-assistant-mcp-run-logs-and-connection-checks-roadmap.status.json docs/roadmaps/agentic-dataops/horizons/horizon-11-assistant-mcp-run-logs-and-connection-checks-roadmap.status.last_good.json src/adops/domain/run_log.py src/adops/infrastructure/run_log_store.py src/adops/interface/project_secrets.py src/adops/templates/plain/gitignore tests/unit/domain/test_run_log.py tests/unit/infrastructure/test_run_log_store.py | changed: src/adops/interface/mcp_server.py, src/adops/interface/assistant_files.py, tests/unit/interface/test_mcp_server.py (mcp_server.py and test_mcp_server.py were already dirty from write-run-log-from-runs; this phase's own diff is against a pre-phase snapshot). Adds read_logs MCP tool + ReadLogsReply: dev/Branch allow-list only, branch -> stage_branch_name dir, lists is_run_log_name files newest first, reads one by name via read_capped_text (extracted from read_project_file) with redaction; refuses symlinked .adops, .adops/logs, env dir or file and any non-Run-Log name. | post-grade: fixed test helper link_logs_folder_to_stage so .adops/logs symlink really leads dev to stage's logs (grader gap); read_logs tests + ruff re-run green. 10s carried evidence beyond criteria; no 10->9 demotions.",
+   "unplannedFiles": [],
+   "completedAt": "2026-11-22T07:39:23Z",
+   "gateRun": [
+    "uv run ruff check: pass",
+    "uv run pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN on local :55432): pass, 1716 passed, 100% coverage",
+    "uv run pytest tests/e2e -m e2e: pass, 8 passed",
+    "g3 templates: n/a (no template change)"
+   ],
+   "gradeResult": {
+    "phaseId": "read-logs-mcp-tool",
+    "dimensions": [
+     {
+      "dimensionId": "reads-only-run-log-files",
+      "score": 9,
+      "minScore": 9,
+      "passed": true
+     },
+     {
+      "dimensionId": "environment-mapping-matches-runs",
+      "score": 10,
+      "minScore": 8,
+      "passed": true
+     },
+     {
+      "dimensionId": "list-and-read-reply-contract",
+      "score": 10,
+      "minScore": 8,
+      "passed": true
+     },
+     {
+      "dimensionId": "read-only-and-secret-free",
+      "score": 10,
+      "minScore": 9,
+      "passed": true
+     }
+    ],
+    "overallPass": true,
+    "summary": "All dimensions pass; grader noted link_logs_folder_to_stage did not build a real logs-dir->stage escape."
+   }
+  },
+  {
+   "phaseId": "environment-connection-check",
+   "status": "done",
+   "attempts": 1,
+   "startedAt": "2026-11-22T07:44:31Z",
+   "baseRef": "d290bffbac93ed4d1b28235eb1fbb304fcac8c9a",
+   "baseDirty": true,
+   "notes": "already dirty at start: .github/workflows/ci.yml,docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,src/adops/interface/assistant_files.py,src/adops/interface/mcp_server.py,src/adops/interface/run_command.py,tests/e2e/test_demo_sync.py,tests/unit/interface/test_init_command.py,tests/unit/interface/test_mcp_server.py,tests/unit/interface/test_run_command.py,docs/roadmaps/agentic-dataops/horizons/horizon-11-assistant-mcp-run-logs-and-connection-checks-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-11-assistant-mcp-run-logs-and-connection-checks-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-11-assistant-mcp-run-logs-and-connection-checks-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-11-assistant-mcp-run-logs-and-connection-checks-roadmap.status.last_good.json,src/adops/domain/run_log.py,src/adops/infrastructure/run_log_store.py,src/adops/interface/project_secrets.py,src/adops/templates/plain/gitignore,tests/unit/domain/test_run_log.py,tests/unit/infrastructure/test_run_log_store.py | changed: src/adops/application/connection_check.py (new), src/adops/infrastructure/connection_probe.py (new), pyproject.toml, uv.lock, tests/unit/application/test_connection_check.py (new), tests/unit/infrastructure/test_connection_probe.py (new). check_connections returns one fixed-message ConnectionResult per Warehouse, sorted Source, and Reverse Sync target via an injected ConnectionProbe; DriverConnectionProbe(project_dir) connects-only (psycopg.Error -> False, a broader catch than the contract OperationalError, matching warehouse_lock) and opens existing DuckDB files read_only. duckdb==1.5.6 declared direct.",
+   "completedAt": "2026-11-22T07:55:28Z",
+   "gradeResult": {
+    "phaseId": "environment-connection-check",
+    "dimensionScores": [
+     {
+      "dimensionId": "application-port-purity",
+      "score": 9,
+      "pass": true,
+      "evidence": "Purity greps clean, probe injected, purity test passes; typed assignment only, no type checker runs, so 9."
+     },
+     {
+      "dimensionId": "every-target-reported-in-order",
+      "score": 10,
+      "pass": true,
+      "evidence": "Order, continue-after-failure, undefined Source, per-connection secrets and zero targets tested; above 9: duplicate Source names deduped and probe call order asserted."
+     },
+     {
+      "dimensionId": "fixed-secret-free-messages",
+      "score": 9,
+      "pass": true,
+      "evidence": "Fixed messages asserted with ==, probes return bool, no secret/DSN/host in messages; no raising-probe test, so 9."
+     },
+     {
+      "dimensionId": "probe-never-writes",
+      "score": 10,
+      "pass": true,
+      "evidence": "All DuckDB branches on real files incl. holder fixture, file and .lock non-existence asserted, Postgres reachable/closed-port/wrong-password; above 9: read-only folder and non-DuckDB file branches plus schemas-unchanged assertion."
+     },
+     {
+      "dimensionId": "duckdb-direct-dependency-locked",
+      "score": 10,
+      "pass": true,
+      "evidence": "duckdb==1.5.6 equals locked version, uv sync --locked passes; above 9: uv.lock diff is exactly two metadata lines."
+     }
+    ],
+    "overallPass": true
+   },
+   "gateRun": "uv sync --locked: pass; uv run ruff check: pass; uv run pytest tests/unit --cov (1734 passed, 100% line+branch): pass; uv run pytest tests/e2e -m e2e (8 passed): pass"
+  },
+  {
+   "phaseId": "test-connection-mcp-tool",
+   "status": "done",
+   "attempts": 1,
+   "startedAt": "2026-11-22T07:56:44Z",
+   "baseRef": "d290bffbac93ed4d1b28235eb1fbb304fcac8c9a",
+   "baseDirty": true,
+   "notes": "already dirty at start (earlier horizon-11 phases): .github/workflows/ci.yml docs/roadmaps/agentic-dataops/MAP.md docs/roadmaps/agentic-dataops/blockers.md docs/roadmaps/agentic-dataops/decisions.md docs/roadmaps/agentic-dataops/discoveries.md docs/roadmaps/agentic-dataops/state.md pyproject.toml src/adops/interface/assistant_files.py src/adops/interface/mcp_server.py src/adops/interface/run_command.py tests/e2e/test_demo_sync.py tests/unit/interface/test_init_command.py tests/unit/interface/test_mcp_server.py tests/unit/interface/test_run_command.py uv.lock docs/roadmaps/agentic-dataops/horizons/horizon-11-assistant-mcp-run-logs-and-connection-checks-roadmap.json docs/roadmaps/agentic-dataops/horizons/horizon-11-assistant-mcp-run-logs-and-connection-checks-roadmap.md docs/roadmaps/agentic-dataops/horizons/horizon-11-assistant-mcp-run-logs-and-connection-checks-roadmap.status.json docs/roadmaps/agentic-dataops/horizons/horizon-11-assistant-mcp-run-logs-and-connection-checks-roadmap.status.last_good.json src/adops/application/connection_check.py src/adops/domain/run_log.py src/adops/infrastructure/connection_probe.py src/adops/infrastructure/run_log_store.py src/adops/interface/project_secrets.py src/adops/templates/plain/gitignore tests/unit/application/test_connection_check.py tests/unit/domain/test_run_log.py tests/unit/infrastructure/test_connection_probe.py tests/unit/infrastructure/test_run_log_store.py | changed: src/adops/interface/mcp_server.py, tests/unit/interface/test_mcp_server.py (both already dirty from read-logs phase, so git cannot separate; no other files touched). Adds build_connection_probe seam, ConnectionResultReply/TestConnectionReply, test_connection tool + environment_connection_check helper; SEAMS sweep now patches build_connection_probe on mcp_server via MCP_SEAMS; 15 test_connection tests with FakeProbe.",
+   "unplannedFiles": [],
+   "completedAt": "2026-11-22T08:08:34Z",
+   "gateRun": [
+    "uv run ruff check: pass",
+    "uv run pytest tests/unit --cov --cov-report=term-missing: pass (1753, 100%)",
+    "uv run pytest tests/e2e -m e2e: pass (8)"
+   ],
+   "gradeResult": {
+    "phaseId": "test-connection-mcp-tool",
+    "dimensions": [
+     {
+      "dimensionId": "thin-glue-over-use-case",
+      "score": 10,
+      "minScore": 8,
+      "pass": true,
+      "evidence": "no driver import / message literal for the tool; check_connections at mcp_server.py:413, seam at :392; _connection_result_reply copies ConnectionResult.message verbatim and tests match the application's fixed strings exactly"
+     },
+     {
+      "dimensionId": "guard-parity-with-run",
+      "score": 10,
+      "minScore": 8,
+      "pass": true,
+      "evidence": "guarded_run_arguments first (:399) before build_connection_probe (:414); seam in SEAMS/MCP_SEAMS; stage/prod/qa/both/neither + shared-dev-database refusals each assert_nothing_touched and project_tree unchanged"
+     },
+     {
+      "dimensionId": "branch-uses-stage-and-sources-from-pipelines",
+      "score": 9,
+      "minScore": 8,
+      "pass": true,
+      "evidence": "stage_environment for branch (:401-405), Sources = SyncStep.source over load_pipelines; branch/dev/shared-Source/broken-Pipeline/undefined-Source tests. Re-scored 10->9: grader noted the branch test checks only stage's Warehouse password, not the target's"
+     },
+     {
+      "dimensionId": "reply-secret-free-and-side-effect-free",
+      "score": 10,
+      "minScore": 9,
+      "pass": true,
+      "evidence": "every call via connection_tool -> assert_no_secret; secret planted in broken Pipeline and in an unexpected error never surfaces; project_tree unchanged on success, failure and refusal; locks.events == [] asserted"
+     }
+    ],
+    "overallPass": true,
+    "summary": "Thin guarded glue over check_connections; stage for branches, Sources from Sync Steps; secret-free, side-effect-free replies. 1 dimension re-scored 10->9 for an admitted gap."
+   },
+   "failures": [
+    {
+     "kind": "gate",
+     "at": "2026-11-22T08:08:34Z",
+     "gate": "uv run pytest tests/unit --cov",
+     "detail": "43 errors: ADOPS_TEST_POSTGRES_DSN is not set (coverage 98.36%)",
+     "resolvedBy": "gate-fix",
+     "resolution": "re-ran with ADOPS_TEST_POSTGRES_DSN pointing at the running adops-test-pg container; no code change"
+    }
+   ]
+  }
+ ]
+}

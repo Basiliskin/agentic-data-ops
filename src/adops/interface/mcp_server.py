@@ -14,6 +14,11 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.stdio import stdio_server
 
 from adops.application.accept_schema import AcceptedSchema
+from adops.application.connection_check import (
+    ConnectionProbe,
+    ConnectionResult,
+    check_connections,
+)
 from adops.application.drop_branch import DroppedBranch
 from adops.application.ports import (
     CheckResult,
@@ -24,8 +29,17 @@ from adops.application.ports import (
     WarehouseLocked,
     WarehouseUnreachable,
 )
-from adops.application.run_pipeline import StepError, pick_environment
-from adops.application.secrets import SET, secret_reference_status, secret_references
+from adops.application.run_pipeline import (
+    StepError,
+    pick_environment,
+    stage_branch_name,
+    stage_environment,
+)
+from adops.application.secrets import (
+    redact_secret_values,
+    secret_reference_status,
+    secret_references,
+)
 from adops.domain.assistant_access import (
     DEV,
     AssistantRefusal,
@@ -37,23 +51,32 @@ from adops.domain.assistant_access import (
 from adops.domain.environment import Environment, ProjectSettings
 from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import load_pipeline, load_project_settings
-from adops.domain.pipeline import Pipeline
+from adops.domain.pipeline import Pipeline, SyncStep
 from adops.domain.reverse_sync_diff import PREVIEW_SAMPLE_SIZE
+from adops.domain.run_log import is_run_log_name
+from adops.infrastructure.connection_probe import DriverConnectionProbe
 from adops.infrastructure.dlt_sync import duckdb_file
+from adops.infrastructure.run_log_store import run_log_dir
 from adops.interface import run_command
 from adops.interface.accept_schema_command import accept_project_schema
 from adops.interface.assistant_files import (
     list_project_files,
+    read_capped_text,
     read_project_file,
     write_project_file,
 )
 from adops.interface.drop_branch_command import drop_project_branch
+from adops.interface.project_secrets import project_secret_values
 from adops.interface.run_command import RUN_ERRORS, error_lines
 from adops.interface.validate_command import schedule_text, validate_project
 
 SERVER_NAME = "adops"
 # The Assistant gets an immediate "busy" reply instead of waiting on another run's lock.
 ASSISTANT_LOCK_TIMEOUT = 0
+ONLY_RUN_LOGS = (
+    "the Assistant reads only Run Log files (<timestamp>-<pipeline>.log) in dev's or a "
+    "Branch Environment's .adops/logs/ folder, never through a symlink"
+)
 
 
 class CheckReply(TypedDict):
@@ -173,6 +196,26 @@ class EditFileReply(TypedDict):
     path: str
     bytes_written: int
     created: bool
+
+
+class ReadLogsReply(TypedDict):
+    environment: str
+    logs: list[str]
+    name: str | None
+    text: str | None
+
+
+class ConnectionResultReply(TypedDict):
+    kind: str
+    name: str
+    ok: bool
+    message: str | None
+
+
+class TestConnectionReply(TypedDict):
+    environment: str
+    results: list[ConnectionResultReply]
+    problems: list[str]
 
 
 @dataclass(frozen=True)
@@ -311,27 +354,133 @@ def build_server(project: Path) -> FastMCP:
             created = write_project_file(project, path, content)
             return edit_file_reply(path, content, created)
 
+    @server.tool()
+    def read_logs(
+        environment: str | None = None, branch: str | None = None, name: str | None = None
+    ) -> ReadLogsReply:
+        """List the Run Logs of dev or a Git branch's Branch Environment, newest first.
+
+        Give `environment: "dev"` or a `branch`, not both; every other Environment is refused.
+        With a Run Log file `name` from that list, reply with its text instead, with any Secret
+        Reference value shown as ***.
+        """
+        with _sanitized_errors():
+            log_environment = run_log_environment(project, environment, branch)
+            if name is None:
+                logs = list_run_logs(project, log_environment)
+                return {"environment": log_environment, "logs": logs, "name": None, "text": None}
+            text = read_run_log(project, log_environment, name)
+            return {"environment": log_environment, "logs": [], "name": name, "text": text}
+
+    @server.tool()
+    def test_connection(
+        environment: str | None = None, branch: str | None = None
+    ) -> TestConnectionReply:
+        """Check whether dev's or a Branch Environment's Warehouse, Sources and targets answer.
+
+        Give `environment: "dev"` or a `branch`, not both; every other Environment is refused.
+        A Branch Environment checks stage's Warehouse and Reverse Sync targets. Each connection
+        is only opened and closed: nothing is read, written or locked. The Sources checked are
+        the ones the Pipelines Sync from; Pipeline files that fail to load are in `problems`.
+        """
+        with _sanitized_errors():
+            return environment_connection_check(project, environment, branch)
+
     return server
+
+
+def build_connection_probe(project: Path) -> ConnectionProbe:
+    return DriverConnectionProbe(project)
+
+
+def environment_connection_check(
+    project: Path, environment: str | None, branch: str | None
+) -> TestConnectionReply:
+    arguments = guarded_run_arguments(project, environment, branch)
+    environments = load_project_settings(run_command.read_settings(project)).environments
+    if arguments.branch is None:
+        name, checked = DEV, environments[DEV]
+    else:
+        checked = stage_environment(environments)
+        name = stage_branch_name(checked, arguments.branch)
+    pipelines, problems = load_pipelines(project)
+    sources = [
+        step.source
+        for pipeline in pipelines
+        for step in pipeline.steps
+        if isinstance(step, SyncStep)
+    ]
+    results = check_connections(
+        checked, sources, run_command.project_env(project), build_connection_probe(project)
+    )
+    return {
+        "environment": name,
+        "results": [_connection_result_reply(result) for result in results],
+        "problems": problems,
+    }
+
+
+def _connection_result_reply(result: ConnectionResult) -> ConnectionResultReply:
+    return {
+        "kind": str(result.kind),
+        "name": result.name,
+        "ok": result.ok,
+        "message": result.message,
+    }
+
+
+def run_log_environment(project: Path, environment: str | None, branch: str | None) -> str:
+    """The Environment whose Run Logs the Assistant asked for, named as a run names it.
+
+    Only the dev/Branch refusal applies: reading a local file never reaches a database, so a
+    dev that shares stage's database may still read its own Run Logs.
+    """
+    target = assistant_target(environment, branch)
+    if target.branch is None:
+        return DEV
+    environments = load_project_settings(run_command.read_settings(project)).environments
+    return stage_branch_name(stage_environment(environments), target.branch)
+
+
+def list_run_logs(project: Path, environment: str) -> list[str]:
+    directory = _run_log_directory(project, environment)
+    if not directory.is_dir():
+        return []
+    names = (
+        entry.name
+        for entry in directory.iterdir()
+        if is_run_log_name(entry.name) and not entry.is_symlink() and entry.is_file()
+    )
+    return sorted(names, reverse=True)
+
+
+def read_run_log(project: Path, environment: str, name: str) -> str:
+    if not is_run_log_name(name):
+        raise AssistantRefusal(ONLY_RUN_LOGS)
+    directory = _run_log_directory(project, environment)
+    path = directory / name
+    if path.is_symlink() or not path.resolve().is_relative_to(directory.resolve()):
+        raise AssistantRefusal(ONLY_RUN_LOGS)
+    if not path.is_file():
+        raise run_command.ProjectFileError(f"{name}: no such Run Log in {environment}")
+    return redact_secret_values(read_capped_text(path), project_secret_values(project))
+
+
+def _run_log_directory(project: Path, environment: str) -> Path:
+    """The Environment's Run Log folder, refused when a symlink on the way could lead elsewhere."""
+    root = project.resolve()
+    directory = run_log_dir(root, environment)
+    parts = (root / ".adops", directory.parent, directory)
+    if any(part.is_symlink() for part in parts) or not directory.resolve().is_relative_to(
+        directory.parent
+    ):
+        raise AssistantRefusal(ONLY_RUN_LOGS)
+    return directory
 
 
 def edit_file_reply(path: str, content: str, created: bool) -> EditFileReply:
     # The content is never echoed: it may hold a value the Assistant should not see again.
     return {"path": path, "bytes_written": len(content.encode("utf-8")), "created": created}
-
-
-def project_secret_values(project: Path) -> list[str]:
-    """The values adops.yaml's set Secret References resolve to, for redaction only."""
-    settings = load_project_settings(run_command.read_settings(project))
-    references = [settings.alert_webhook_env] if settings.alert_webhook_env else []
-    for environment in settings.environments.values():
-        references += secret_references(
-            environment.warehouse,
-            list(environment.sources.values()),
-            list(environment.targets.values()),
-        )
-    env = run_command.project_env(project)
-    status = secret_reference_status(env, references)
-    return [env[name] for name, state in status.items() if state == SET]
 
 
 def _guarded_run(

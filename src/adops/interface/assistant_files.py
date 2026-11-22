@@ -60,15 +60,18 @@ def read_project_file(project: Path, relative: str, secret_values: Iterable[str]
     path = resolve_project_file(project, relative)
     if not path.is_file():
         raise ProjectFileError(f"{relative}: file not found")
+    return redact_secret_values(read_capped_text(path), secret_values)
+
+
+def read_capped_text(path: Path) -> str:
     with path.open("rb") as file:
         data = file.read(MAX_READ_BYTES + 1)
     if len(data) > MAX_READ_BYTES:
         raise AssistantRefusal(NOT_READABLE_TEXT)
     try:
-        text = data.decode("utf-8")
+        return data.decode("utf-8")
     except UnicodeDecodeError:
         raise AssistantRefusal(NOT_READABLE_TEXT) from None
-    return redact_secret_values(text, secret_values)
 
 
 def write_project_file(project: Path, relative: str, content: str) -> bool:

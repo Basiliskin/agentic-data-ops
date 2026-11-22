@@ -4,6 +4,7 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NoReturn
 
 import duckdb
 import pytest
@@ -1376,9 +1377,7 @@ def test_run_all_uses_the_single_pipeline_default_environment(project, run_proje
 def test_run_all_with_a_pipeline_name_is_rejected(project, run_project_calls):
     calls, _ = run_project_calls
 
-    result = runner.invoke(
-        cli.app, ["run", "a_pipe", "--all", "--project", str(project)], env=WIDE
-    )
+    result = runner.invoke(cli.app, ["run", "a_pipe", "--all", "--project", str(project)], env=WIDE)
 
     assert result.exit_code != 0
     assert "--all" in result.output
@@ -1572,9 +1571,7 @@ def test_an_unreachable_warehouse_at_lock_time_fails_the_first_step_retryably(
     assert result.retryable
 
 
-def test_an_unreachable_stage_warehouse_fails_a_branch_run_retryably(
-    project, branch_project, lock
-):
+def test_an_unreachable_stage_warehouse_fails_a_branch_run_retryably(project, branch_project, lock):
     lock.error = WarehouseUnreachable()
 
     result = run_command.run_project(project, "shop_sync", "dev", "feat")
@@ -1589,3 +1586,203 @@ def test_the_real_warehouse_lock_is_built(tmp_path):
 
     with held:
         assert (tmp_path / "stage.duckdb.lock").is_file()
+
+
+def run_log_texts(project: Path, environment: str = "dev") -> list[str]:
+    directory = project / ".adops" / "logs" / environment
+    if not directory.exists():
+        return []
+    return [path.read_text(encoding="utf-8") for path in sorted(directory.iterdir())]
+
+
+def the_run_log(project: Path, environment: str = "dev") -> str:
+    texts = run_log_texts(project, environment)
+    assert len(texts) == 1, texts
+    return texts[0]
+
+
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_a_successful_run_logs_exactly_what_the_cli_printed(project):
+    result = invoke(project)
+
+    assert result.exit_code == 0, result.output
+    assert the_run_log(project) == result.output
+    assert result.output.splitlines()[-1] == "Pipeline shop_sync passed in Environment dev."
+
+
+@pytest.mark.usefixtures("orchestrator")
+def test_a_failed_step_logs_exactly_what_the_cli_printed(project, sync):
+    sync.sync_error = RuntimeError(f"connection refused for password {SENTINEL}")
+
+    result = invoke(project)
+
+    assert_clean_failure(result)
+    log = the_run_log(project)
+    assert log == result.output
+    assert "Step sync_shop: RuntimeError: connection refused for password ***" in log
+    assert log.endswith("Pipeline shop_sync failed in Environment dev.\n")
+
+
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_a_preview_logs_exactly_what_the_cli_printed(project, reverse_sync):
+    result = invoke(project)
+
+    reverse_lines(result)
+    log = the_run_log(project)
+    assert log == result.output
+    assert "  Preview: would insert 1, would update 1, kept 2 (absent from dbt result)\n" in log
+    assert TARGET_SENTINEL not in log
+
+
+@dataclass
+class LeakingOrchestrator:
+    def execute(self, plan: RunPlan, sync: Sync) -> RunResult:
+        error = f"Step sync_shop: password {SENTINEL} rejected"
+        failed = StepReport("sync_shop", StepStatus.FAILED, error=error)
+        return RunResult(plan.pipeline, plan.environment, (failed,))
+
+
+@pytest.mark.usefixtures("sync")
+def test_a_run_log_masks_every_project_secret_value(project, monkeypatch):
+    monkeypatch.setattr(run_command, "build_orchestrator", LeakingOrchestrator)
+
+    run_command.run_project(project, "shop_sync", "dev")
+
+    log = the_run_log(project)
+    assert SENTINEL not in log
+    assert "  Step sync_shop: password *** rejected\n" in log
+
+
+EARLY_FAILURES = {
+    "missing secret": "not set or are empty: ADOPS_TEST_SHOP_PASSWORD",
+    "invalid yaml": "(root): not valid YAML (line 2, column 1)",
+    "unreachable warehouse": "Pipeline shop_sync, Step sync_shop: Warehouse is unreachable",
+    "held lock": "Another run is using the dev Warehouse; gave up after 0 minutes.",
+}
+
+
+@pytest.mark.parametrize("failure", sorted(EARLY_FAILURES))
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_an_early_failure_writes_one_run_log_with_the_clean_message(
+    project, lock, monkeypatch, failure
+):
+    if failure == "missing secret":
+        monkeypatch.delenv("ADOPS_TEST_SHOP_PASSWORD")
+    elif failure == "invalid yaml":
+        (project / "adops.yaml").write_text("environments: [dev\n")
+    elif failure == "unreachable warehouse":
+        lock.error = WarehouseUnreachable()
+    else:
+        lock.error = WarehouseLocked("dev", 0)
+
+    result = invoke(project)
+
+    assert_clean_failure(result)
+    log = the_run_log(project)
+    assert log == result.output
+    assert EARLY_FAILURES[failure] in log
+    assert SENTINEL not in log
+
+
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_run_all_writes_one_run_log_per_pipeline(project):
+    (project / "pipelines" / "shop_sync.yaml").unlink()
+    for name in ALL_PIPELINES:
+        pipeline = PIPELINE.replace("name: shop_sync", f"name: {name}")
+        (project / "pipelines" / f"{name}.yaml").write_text(pipeline)
+
+    result = invoke_all(project)
+
+    assert result.exit_code == 0, result.output
+    names = sorted(path.name for path in (project / ".adops" / "logs" / "dev").iterdir())
+    assert [name.split("-", 1)[1] for name in names] == sorted(f"{n}.log" for n in ALL_PIPELINES)
+
+
+def test_a_branch_run_logs_under_its_branch_environment(project, branch_project, fingerprint_store):
+    stage_ran(project, fingerprint_store, BRANCH_PIPELINE)
+
+    result = invoke(project, "--branch", "feat")
+
+    assert result.exit_code == 0, result.output
+    assert the_run_log(project, "br_feat") == result.output
+    assert sorted(path.name for path in (project / ".adops" / "logs").iterdir()) == ["br_feat"]
+
+
+def test_a_failed_branch_run_logs_under_its_branch_environment(project, branch_project):
+    result = invoke(project, "--branch", "feat")
+
+    assert_clean_failure(result)
+    assert the_run_log(project, "br_feat") == result.output
+    assert sorted(path.name for path in (project / ".adops" / "logs").iterdir()) == ["br_feat"]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["run", "../x"],
+        ["run", "shop_sync", "--env", "../x"],
+        ["run", "shop_sync", "--branch", "///"],
+    ],
+)
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_a_run_with_an_unsafe_name_writes_no_run_log(project, arguments):
+    result = runner.invoke(cli.app, [*arguments, "--project", str(project)])
+
+    assert_clean_failure(result)
+    assert not (project / ".adops").exists()
+
+
+@pytest.mark.parametrize("option", ["--env", "--branch"])
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_a_run_whose_environment_cannot_be_named_writes_no_run_log(project, option):
+    (project / "adops.yaml").write_text("environments: [dev\n")
+
+    result = invoke(project, option, "../x")
+
+    assert_clean_failure(result)
+    assert not (project / ".adops").exists()
+
+
+def failing_writer(*args: object) -> None:
+    return None
+
+
+def raising_writer(*args: object) -> NoReturn:
+    raise OSError("disk full")
+
+
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_a_run_log_that_cannot_be_written_leaves_a_success_unchanged(project, monkeypatch):
+    baseline = invoke(project)
+    monkeypatch.setattr(run_command, "build_run_log_writer", lambda: failing_writer)
+
+    result = invoke(project)
+
+    assert result.exit_code == 0
+    assert result.output == baseline.output
+
+
+@pytest.mark.parametrize("writer", [failing_writer, raising_writer])
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_a_run_log_problem_keeps_the_original_error(project, lock, monkeypatch, writer):
+    lock.error = WarehouseLocked("dev", 0)
+    baseline = invoke(project)
+    monkeypatch.setattr(run_command, "build_run_log_writer", lambda: writer)
+
+    result = invoke(project)
+    with pytest.raises(WarehouseLocked) as raised:
+        run_command.run_project(project, "shop_sync", "dev")
+
+    assert raised.value is lock.error
+    assert (result.exit_code, result.output) == (1, baseline.output)
+
+
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_a_clock_failure_returns_the_run_result_unchanged(project, monkeypatch):
+    clocks = iter([SystemClock(), None])
+    monkeypatch.setattr(run_command, "build_clock", lambda: next(clocks))
+
+    result = run_command.run_project(project, "shop_sync", "dev")
+
+    assert result.succeeded
+    assert run_log_texts(project) == []

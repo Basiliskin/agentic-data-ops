@@ -289,6 +289,19 @@ def test_demo_gitignore_keeps_secrets_and_local_state_out(demo):
     assert {".env", ".adops/"} <= set(ignored)
 
 
+def test_plain_gitignore_keeps_secrets_and_run_logs_out(plain):
+    assert (plain / ".gitignore").read_text().splitlines() == [".env", ".adops/"]
+    subprocess.run(["git", "init", "--quiet", str(plain)], check=True)
+    ignored = subprocess.run(
+        ["git", "-C", str(plain), "check-ignore", ".env", ".adops/logs/dev/x.log"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert ignored.stdout.splitlines() == [".env", ".adops/logs/dev/x.log"]
+
+
 @pytest.mark.parametrize(
     ("mode", "databases"),
     [("demo", {"shop", "warehouse", "dagster_meta"}), ("plain", {"dagster_meta"})],
@@ -415,6 +428,7 @@ def test_plain_init_writes_settings_server_files_and_an_empty_pipelines_folder(p
         ".env.example",
         ".github",
         ".github/workflows",
+        ".gitignore",
         ".mcp.json",
         "adops.yaml",
         "docker-compose.yml",

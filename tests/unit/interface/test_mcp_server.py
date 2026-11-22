@@ -3,6 +3,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 import anyio
@@ -10,6 +11,7 @@ import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 from mcp.types import CallToolResult, TextContent
 from mcp_harness import (
+    PIPELINE,
     SETTINGS,
     assert_no_secret,
     call_tool,
@@ -32,15 +34,32 @@ from adops.application.ports import (
     WarehouseLocked,
     WarehouseUnreachable,
 )
-from adops.application.run_pipeline import WarehouseUnreachableError
-from adops.domain.assistant_access import OUTSIDE_PROJECT_FILES, WRITES_ONLY_UNDER_ROOTS
+from adops.application.run_pipeline import (
+    WarehouseUnreachableError,
+    stage_branch_name,
+    stage_environment,
+)
+from adops.domain.assistant_access import (
+    ONLY_DEV_OR_BRANCH,
+    OUTSIDE_PROJECT_FILES,
+    WRITES_ONLY_UNDER_ROOTS,
+)
 from adops.domain.checks import CheckResult, CheckStatus, SourceFacts
 from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import load_project_settings
 from adops.domain.schema_snapshot import TableShape
+from adops.infrastructure.connection_probe import DriverConnectionProbe
+from adops.infrastructure.run_log_store import write_run_log
 from adops.infrastructure.warehouse_lock import DEFAULT_LOCK_TIMEOUT
 from adops.interface import cli, drop_branch_command, mcp_server, run_command
-from adops.interface.assistant_files import MAX_WRITE_BYTES, NOT_A_FILE_TARGET, NOT_WRITABLE_TEXT
+from adops.interface.assistant_files import (
+    MAX_READ_BYTES,
+    MAX_WRITE_BYTES,
+    NOT_A_FILE_TARGET,
+    NOT_READABLE_TEXT,
+    NOT_WRITABLE_TEXT,
+)
+from adops.interface.mcp_server import ONLY_RUN_LOGS
 from adops.interface.run_command import error_lines
 from adops.interface.validate_command import validate_project
 
@@ -58,6 +77,8 @@ TOOLS = {
     "list_files",
     "read_file",
     "edit_file",
+    "read_logs",
+    "test_connection",
 }
 
 SEAMS = (
@@ -69,7 +90,12 @@ SEAMS = (
     "build_reverse_sync",
     "build_fingerprint_store",
     "build_project_files",
+    "build_run_log_writer",
+    "build_connection_probe",
 )
+MCP_SEAMS = {"build_connection_probe"}
+RUN_LOG_SEAMS = ["build_run_log_writer", "build_clock"]
+NOW = datetime(2026, 11, 22, 9, 30, tzinfo=UTC)
 
 DEV_SHARES_STAGE_WAREHOUSE = SETTINGS.replace(
     "host: localhost, port: 5433, database: w_dev", "host: 127.0.0.1, port: 5433, database: w_stage"
@@ -142,13 +168,49 @@ class InMemorySnapshots:
 
 
 @dataclass
+class FakeProbe:
+    unreachable: set[str] = field(default_factory=set)
+    postgres_calls: list[ResolvedConnection] = field(default_factory=list)
+    duckdb_calls: list[str] = field(default_factory=list)
+    error: Exception | None = None
+
+    def postgres(self, connection: ResolvedConnection) -> bool:
+        if self.error is not None:
+            raise self.error
+        self.postgres_calls.append(connection)
+        return connection.database not in self.unreachable
+
+    def duckdb(self, path: str) -> bool:
+        self.duckdb_calls.append(path)
+        return path not in self.unreachable
+
+    @property
+    def databases(self) -> list[str]:
+        return [connection.database for connection in self.postgres_calls]
+
+
+@dataclass
 class Seams:
     orchestrator: FakeOrchestrator = field(default_factory=FakeOrchestrator)
     fingerprints: StageFingerprints = field(default_factory=StageFingerprints)
     sync: AcceptSync = field(default_factory=AcceptSync)
     snapshots: InMemorySnapshots = field(default_factory=InMemorySnapshots)
+    probe: FakeProbe = field(default_factory=FakeProbe)
     calls: list[str] = field(default_factory=list)
     errors: dict[str, Exception] = field(default_factory=dict)
+    run_logs: list[tuple[str, str, str]] = field(default_factory=list)
+
+    def write_run_log(
+        self, project: Path, environment: str, pipeline: str, timestamp: datetime, text: str
+    ) -> Path:
+        self.run_logs.append((environment, pipeline, text))
+        return project / "run.log"
+
+
+@dataclass
+class FixedClock:
+    def now(self) -> datetime:
+        return NOW
 
 
 @pytest.fixture
@@ -161,6 +223,9 @@ def seams(monkeypatch):
         "build_sync": lambda *_: fake.sync,
         "build_snapshot_store": lambda *_: fake.snapshots,
         "build_project_files": real_project_files,
+        "build_run_log_writer": lambda *_: fake.write_run_log,
+        "build_clock": lambda *_: FixedClock(),
+        "build_connection_probe": lambda *_: fake.probe,
     }
 
     def spy(name):
@@ -173,7 +238,7 @@ def seams(monkeypatch):
         return build
 
     for name in SEAMS:
-        monkeypatch.setattr(run_command, name, spy(name))
+        monkeypatch.setattr(mcp_server if name in MCP_SEAMS else run_command, name, spy(name))
     return fake
 
 
@@ -356,7 +421,33 @@ async def test_a_held_stage_lock_replies_busy_for_a_branch_run(project, seams, l
 
     assert "The stage Warehouse is busy with another run; try again later." in error_text(result)
     assert locks.timeouts == [0]
-    assert seams.calls == []
+    assert seams.calls == RUN_LOG_SEAMS
+    assert seams.run_logs == [
+        (
+            "br_feat",
+            "shop_sync",
+            "Another run is using the stage Warehouse; gave up after 0 minutes.\n",
+        )
+    ]
+
+
+@pytest.mark.parametrize("tool", ["run", "preview"])
+async def test_an_mcp_run_writes_one_run_log_of_the_cli_output(project, seams, locks, tool):
+    result = await call_tool(project, tool, {"pipeline": "shop_sync", "environment": "dev"})
+
+    assert not result.isError
+    assert seams.run_logs == [
+        (
+            "dev",
+            "shop_sync",
+            "step sync_shop: passed — customers 20 rows\n"
+            "  check customers row_count_matches: pass\n"
+            "Pipeline shop_sync passed in Environment dev.\n",
+        )
+    ]
+    for _, _, text in seams.run_logs:
+        for value in secret_values().values():
+            assert value not in text
 
 
 def test_run_project_keeps_the_cli_wait_by_default(project, seams, locks):
@@ -1744,3 +1835,491 @@ def test_project_secret_values_without_an_alert_webhook(tmp_path, monkeypatch):
 
     assert set(mcp_server.project_secret_values(tmp_path)) == set(secrets.values())
     assert "ADOPS_MCP_ALERT_WEBHOOK" not in secrets
+
+
+OLDEST_LOG = "20261120T080000Z-shop_sync.log"
+MIDDLE_LOG = "20261121T080000Z-a_sync.log"
+NEWEST_LOG = "20261122T080000Z-shop_sync.log"
+
+
+async def logs_tool(project: Path, secrets: dict[str, str] | None = None, **arguments: object):
+    result = await call_tool(project, "read_logs", arguments)
+    assert_no_secret(result, secrets)
+    return result
+
+
+def plant_run_log(project: Path, environment: str, name: str, text: str = "ok\n") -> Path:
+    path = project / ".adops" / "logs" / environment / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def read_logs_refusal(result: CallToolResult, message: str = ONLY_RUN_LOGS) -> None:
+    assert error_text(result) == f"Error executing tool read_logs: {message}"
+
+
+async def test_read_logs_takes_an_environment_or_a_branch_and_an_optional_name(tmp_path):
+    tools = await list_tools(tmp_path)
+
+    assert set(tools["read_logs"]["properties"]) == {"environment", "branch", "name"}
+    assert tools["read_logs"].get("required", []) == []
+
+
+async def test_read_logs_lists_only_dev_run_logs_newest_first(project, seams, locks):
+    for name in (MIDDLE_LOG, OLDEST_LOG, NEWEST_LOG, "notes.txt", "20261122T080000Z-x.txt"):
+        plant_run_log(project, "dev", name)
+    (project / ".adops" / "logs" / "dev" / "20261123T080000Z-folder.log").mkdir()
+    plant_run_log(project, "stage", "20261124T080000Z-shop_sync.log")
+    before = project_tree(project)
+
+    result = await logs_tool(project, environment="dev")
+
+    assert result.structuredContent == {
+        "environment": "dev",
+        "logs": [NEWEST_LOG, MIDDLE_LOG, OLDEST_LOG],
+        "name": None,
+        "text": None,
+    }
+    assert_nothing_touched(seams, locks)
+    assert project_tree(project) == before
+
+
+async def test_read_logs_without_a_log_folder_lists_nothing_and_creates_nothing(
+    project, seams, locks
+):
+    before = project_tree(project)
+
+    result = await logs_tool(project, environment="dev")
+
+    assert not result.isError
+    assert result.structuredContent["logs"] == []
+    assert not (project / ".adops").exists()
+    assert project_tree(project) == before
+
+
+async def test_read_logs_reads_one_run_log_with_secret_values_masked(project, seams, locks):
+    secret = secret_values()["ADOPS_MCP_PROD_WAREHOUSE_PASSWORD"]
+    plant_run_log(project, "dev", NEWEST_LOG, f"Pipeline shop_sync failed: {secret}\n")
+    before = project_tree(project)
+
+    result = await logs_tool(project, environment="dev", name=NEWEST_LOG)
+
+    assert result.structuredContent == {
+        "environment": "dev",
+        "logs": [],
+        "name": NEWEST_LOG,
+        "text": "Pipeline shop_sync failed: ***\n",
+    }
+    assert_nothing_touched(seams, locks)
+    assert project_tree(project) == before
+
+
+async def test_read_logs_works_when_dev_shares_stages_database(tmp_path, seams, locks, monkeypatch):
+    secrets = write_project(tmp_path, DEV_SHARES_STAGE_WAREHOUSE)
+    for name in secrets:
+        monkeypatch.delenv(name, raising=False)
+    plant_run_log(tmp_path, "dev", NEWEST_LOG, "dev log\n")
+
+    listed = await logs_tool(tmp_path, secrets, environment="dev")
+    read = await logs_tool(tmp_path, secrets, environment="dev", name=NEWEST_LOG)
+
+    assert listed.structuredContent["logs"] == [NEWEST_LOG]
+    assert read.structuredContent["text"] == "dev log\n"
+    assert_nothing_touched(seams, locks)
+
+
+@pytest.mark.parametrize("environment", ["stage", "prod", "qa"])
+async def test_read_logs_refuses_every_environment_but_dev(project, seams, locks, environment):
+    plant_run_log(project, environment, NEWEST_LOG, "not for the Assistant\n")
+    before = project_tree(project)
+
+    listed = await logs_tool(project, environment=environment)
+    read = await logs_tool(project, environment=environment, name=NEWEST_LOG)
+
+    for result in (listed, read):
+        read_logs_refusal(result, f"{ONLY_DEV_OR_BRANCH}; {environment!r} is refused")
+    assert project_tree(project) == before
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "../x.log",
+        f"../stage/{NEWEST_LOG}",
+        "/etc/passwd",
+        "notes.txt",
+        f"{NEWEST_LOG}/../x.log",
+        "20261122T080000Z-Shop.log",
+    ],
+)
+async def test_read_logs_refuses_any_name_that_is_not_a_run_log(project, seams, locks, name):
+    plant_run_log(project, "dev", "notes.txt", "notes\n")
+    plant_run_log(project, "stage", NEWEST_LOG, "stage log\n")
+    before = project_tree(project)
+
+    result = await logs_tool(project, environment="dev", name=name)
+
+    read_logs_refusal(result)
+    assert project_tree(project) == before
+
+
+async def test_read_logs_refuses_an_absolute_path_to_a_run_log(project, seams, locks):
+    path = plant_run_log(project, "dev", NEWEST_LOG, "dev log\n")
+
+    result = await logs_tool(project, environment="dev", name=str(path))
+
+    read_logs_refusal(result)
+
+
+async def test_read_logs_refuses_a_symlinked_run_log_and_does_not_list_it(project, seams, locks):
+    secret = secret_values()["ADOPS_MCP_STAGE_WAREHOUSE_PASSWORD"]
+    stage_log = plant_run_log(project, "stage", OLDEST_LOG, f"stage {secret}\n")
+    plant_run_log(project, "dev", OLDEST_LOG).unlink()
+    (project / ".adops" / "logs" / "dev" / OLDEST_LOG).symlink_to(stage_log)
+    plant_run_log(project, "dev", NEWEST_LOG)
+
+    read = await logs_tool(project, environment="dev", name=OLDEST_LOG)
+    listed = await logs_tool(project, environment="dev")
+
+    read_logs_refusal(read)
+    assert listed.structuredContent["logs"] == [NEWEST_LOG]
+
+
+def link_dev_logs_to_stage(project: Path) -> None:
+    plant_run_log(project, "stage", NEWEST_LOG, "stage log\n")
+    (project / ".adops" / "logs" / "dev").symlink_to(project / ".adops" / "logs" / "stage")
+
+
+def link_logs_folder_to_stage(project: Path) -> None:
+    plant_run_log(project, "stage", NEWEST_LOG, "stage log\n")
+    logs = project / ".adops" / "logs"
+    logs.rename(project / "real_logs")
+    elsewhere = project / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "dev").symlink_to(project / "real_logs" / "stage")
+    logs.symlink_to(elsewhere)
+    assert (logs / "dev" / NEWEST_LOG).read_text() == "stage log\n"
+
+
+def link_adops_folder_elsewhere(project: Path) -> None:
+    other = project / "other_project"
+    plant_run_log(other, "dev", NEWEST_LOG, "another Project's log\n")
+    (project / ".adops").symlink_to(other / ".adops")
+
+
+@pytest.mark.parametrize(
+    "link", [link_dev_logs_to_stage, link_logs_folder_to_stage, link_adops_folder_elsewhere]
+)
+async def test_read_logs_refuses_a_symlinked_folder_on_the_way(project, seams, locks, link):
+    link(project)
+    before = project_tree(project)
+
+    listed = await logs_tool(project, environment="dev")
+    read = await logs_tool(project, environment="dev", name=NEWEST_LOG)
+
+    read_logs_refusal(listed)
+    read_logs_refusal(read)
+    assert project_tree(project) == before
+
+
+async def test_read_logs_names_a_run_log_that_does_not_exist(project, seams, locks):
+    result = await logs_tool(project, environment="dev", name=NEWEST_LOG)
+
+    assert error_text(result) == (
+        f"Error executing tool read_logs: {NEWEST_LOG}: no such Run Log in dev"
+    )
+    assert not (project / ".adops").exists()
+
+
+@pytest.mark.parametrize(
+    "content", [b"x" * (MAX_READ_BYTES + 1), b"\xff\xfe not utf-8\n"], ids=["large", "binary"]
+)
+async def test_read_logs_refuses_a_run_log_it_cannot_read_as_text(project, seams, locks, content):
+    plant_run_log(project, "dev", NEWEST_LOG).write_bytes(content)
+
+    result = await logs_tool(project, environment="dev", name=NEWEST_LOG)
+
+    read_logs_refusal(result, NOT_READABLE_TEXT)
+
+
+async def test_read_logs_reads_back_the_run_log_a_branch_run_wrote(project, seams, locks):
+    branch = "feature/" + "very-long-branch-name-" * 3
+    environments = load_project_settings(SETTINGS).environments
+    expected = stage_branch_name(stage_environment(environments), branch)
+    assert expected != "br_" + branch.replace("/", "_").replace("-", "_")
+    seams.write_run_log = write_run_log
+    await run_tool(project, pipeline="shop_sync", branch=branch)
+    seams.calls.clear()
+    locks.events.clear()
+    locks.timeouts.clear()
+    before = project_tree(project)
+
+    listed = await logs_tool(project, branch=branch)
+    [name] = listed.structuredContent["logs"]
+    read = await logs_tool(project, branch=branch, name=name)
+
+    assert listed.structuredContent["environment"] == expected
+    assert (project / ".adops" / "logs" / expected / name).is_file()
+    assert name == f"{NOW.strftime('%Y%m%dT%H%M%SZ')}-shop_sync.log"
+    summary = f"Pipeline shop_sync passed in Environment {expected}.\n"
+    assert summary in read.structuredContent["text"]
+    assert_nothing_touched(seams, locks)
+    assert project_tree(project) == before
+
+
+async def test_read_logs_for_a_branch_lists_its_branch_environment_folder(project, seams, locks):
+    plant_run_log(project, "br_feature_x", NEWEST_LOG)
+    plant_run_log(project, "dev", OLDEST_LOG)
+
+    result = await logs_tool(project, branch="feature/x")
+
+    assert result.structuredContent["environment"] == "br_feature_x"
+    assert result.structuredContent["logs"] == [NEWEST_LOG]
+
+
+async def test_read_logs_for_a_branch_needs_a_stage_environment(tmp_path, seams, locks):
+    settings = SETTINGS.split("  stage:")[0]
+    secrets = write_project(tmp_path, settings)
+
+    result = await logs_tool(tmp_path, secrets, branch="feat")
+
+    assert "a Branch run needs a stage Environment" in error_text(result)
+
+
+async def test_read_logs_reduces_an_unexpected_error_to_its_type(project, monkeypatch):
+    secret = secret_values()["ADOPS_MCP_PROD_WAREHOUSE_PASSWORD"]
+    plant_run_log(project, "dev", NEWEST_LOG)
+
+    def explode(*_):
+        raise RuntimeError(f"password {secret}")
+
+    monkeypatch.setattr(mcp_server, "read_capped_text", explode)
+
+    result = await logs_tool(project, environment="dev", name=NEWEST_LOG)
+
+    assert error_text(result) == "Error executing tool read_logs: unexpected RuntimeError"
+
+
+async def connection_tool(
+    project: Path, secrets: dict[str, str] | None = None, **arguments: object
+) -> CallToolResult:
+    result = await call_tool(project, "test_connection", arguments)
+    assert_no_secret(result, secrets)
+    return result
+
+
+def reachable(kind: str, name: str) -> dict[str, object]:
+    return {"kind": kind, "name": name, "ok": True, "message": None}
+
+
+def unreachable(kind: str, name: str, message: str) -> dict[str, object]:
+    return {"kind": kind, "name": name, "ok": False, "message": message}
+
+
+def add_pipeline(project: Path, file: str, source: str) -> None:
+    text = PIPELINE.replace("shop_sync", file).replace("source: shop", f"source: {source}")
+    (project / "pipelines" / f"{file}.yaml").write_text(text)
+
+
+async def test_test_connection_takes_an_environment_or_a_branch(tmp_path):
+    tools = await list_tools(tmp_path)
+
+    assert set(tools["test_connection"]["properties"]) == {"environment", "branch"}
+    assert tools["test_connection"].get("required", []) == []
+
+
+async def test_test_connection_reports_every_dev_connection_reachable(project, seams, locks):
+    before = project_tree(project)
+
+    result = await connection_tool(project, environment="dev")
+
+    assert result.structuredContent == {
+        "environment": "dev",
+        "results": [
+            reachable("warehouse", "warehouse"),
+            reachable("source", "shop"),
+            reachable("target", "crm"),
+        ],
+        "problems": [],
+    }
+    assert seams.probe.databases == ["w_dev", "shop", "crm_dev"]
+    passwords = [connection.password for connection in seams.probe.postgres_calls]
+    expected = ["DEV_WAREHOUSE", "DEV_SHOP", "DEV_CRM"]
+    assert passwords == [secret_values()[f"ADOPS_MCP_{name}_PASSWORD"] for name in expected]
+    assert seams.calls == ["build_connection_probe"]
+    assert locks.events == [] and locks.timeouts == []
+    assert project_tree(project) == before
+
+
+async def test_test_connection_for_a_branch_checks_stages_warehouse_and_targets(
+    project, seams, locks
+):
+    result = await connection_tool(project, branch="feature/x")
+
+    assert result.structuredContent["environment"] == "br_feature_x"
+    assert [r["ok"] for r in result.structuredContent["results"]] == [True, True, True]
+    assert seams.probe.databases == ["w_stage", "shop", "crm"]
+    assert (
+        seams.probe.postgres_calls[0].password
+        == secret_values()["ADOPS_MCP_STAGE_WAREHOUSE_PASSWORD"]
+    )
+    assert locks.events == []
+
+
+@pytest.mark.parametrize(
+    ("database", "expected"),
+    [
+        ("w_dev", unreachable("warehouse", "warehouse", "Warehouse is unreachable")),
+        ("shop", unreachable("source", "shop", "Source shop is unreachable")),
+        ("crm_dev", unreachable("target", "crm", "Target crm is unreachable")),
+    ],
+)
+async def test_test_connection_reports_an_unreachable_connection_and_checks_the_rest(
+    project, seams, locks, database, expected
+):
+    seams.probe.unreachable = {database}
+    before = project_tree(project)
+
+    result = await connection_tool(project, environment="dev")
+
+    assert not result.isError
+    results = result.structuredContent["results"]
+    assert expected in results
+    assert [r["ok"] for r in results].count(False) == 1
+    assert seams.probe.databases == ["w_dev", "shop", "crm_dev"]
+    assert locks.events == []
+    assert project_tree(project) == before
+
+
+async def test_test_connection_checks_a_duckdb_warehouse_by_its_path(
+    tmp_path, seams, locks, monkeypatch
+):
+    settings = SETTINGS.replace(
+        """warehouse: {type: postgres, host: localhost, port: 5433, database: w_dev, user: w,
+                password_env: ADOPS_MCP_DEV_WAREHOUSE_PASSWORD}""",
+        "warehouse: {type: duckdb, path: dev.duckdb}",
+    )
+    secrets = write_project(tmp_path, settings)
+    for name in secrets:
+        monkeypatch.delenv(name, raising=False)
+    seams.probe.unreachable = {"dev.duckdb"}
+
+    result = await connection_tool(tmp_path, secrets, environment="dev")
+
+    results = result.structuredContent["results"]
+    assert results[0] == unreachable("warehouse", "warehouse", "Warehouse is unreachable")
+    assert seams.probe.duckdb_calls == ["dev.duckdb"]
+    assert seams.probe.databases == ["shop", "crm_dev"]
+
+
+async def test_test_connection_names_a_missing_secret_reference_for_that_source_only(
+    project, seams, locks
+):
+    env_file = project / ".env"
+    lines = env_file.read_text().splitlines(keepends=True)
+    env_file.write_text("".join(line for line in lines if "DEV_SHOP" not in line))
+
+    result = await connection_tool(project, environment="dev")
+
+    results = result.structuredContent["results"]
+    assert results[1] == unreachable(
+        "source",
+        "shop",
+        "these environment variables are not set or are empty: ADOPS_MCP_DEV_SHOP_PASSWORD",
+    )
+    assert results[0]["ok"] and results[2]["ok"]
+    assert seams.probe.databases == ["w_dev", "crm_dev"]
+
+
+async def test_test_connection_reports_a_source_the_environment_does_not_define(
+    project, seams, locks
+):
+    add_pipeline(project, "billing_sync", "billing")
+
+    result = await connection_tool(project, environment="dev")
+
+    assert result.structuredContent["results"] == [
+        reachable("warehouse", "warehouse"),
+        unreachable("source", "billing", "Source billing is unreachable"),
+        reachable("source", "shop"),
+        reachable("target", "crm"),
+    ]
+    assert seams.probe.databases == ["w_dev", "shop", "crm_dev"]
+
+
+async def test_test_connection_checks_a_source_shared_by_pipelines_once(project, seams, locks):
+    add_pipeline(project, "orders_sync", "shop")
+
+    result = await connection_tool(project, environment="dev")
+
+    names = [r["name"] for r in result.structuredContent["results"]]
+    assert names == ["warehouse", "shop", "crm"]
+    assert seams.probe.databases.count("shop") == 1
+
+
+async def test_test_connection_lists_a_broken_pipeline_and_still_checks(project, seams, locks):
+    secret = secret_values()["ADOPS_MCP_DEV_WAREHOUSE_PASSWORD"]
+    (project / "pipelines" / "broken.yaml").write_text(f"name: broken\n{secret}: [\n")
+    before = project_tree(project)
+
+    result = await connection_tool(project, environment="dev")
+
+    reply = result.structuredContent
+    assert reply["problems"] and all(
+        p.startswith("pipelines/broken.yaml") for p in reply["problems"]
+    )
+    assert not any(secret in problem for problem in reply["problems"])
+    assert reply["results"][0] == reachable("warehouse", "warehouse")
+    assert project_tree(project) == before
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"environment": "stage"},
+        {"environment": "prod"},
+        {"environment": "qa"},
+        {"environment": "dev", "branch": "feat"},
+        {},
+    ],
+)
+async def test_test_connection_refuses_every_other_environment_before_probing(
+    project, seams, locks, arguments
+):
+    before = project_tree(project)
+
+    result = await connection_tool(project, **arguments)
+
+    assert "exactly `dev`" in error_text(result)
+    assert_nothing_touched(seams, locks)
+    assert project_tree(project) == before
+
+
+async def test_test_connection_refuses_a_dev_that_shares_stages_database(
+    tmp_path, seams, locks, monkeypatch
+):
+    secrets = write_project(tmp_path, DEV_SHARES_STAGE_WAREHOUSE)
+    for name in secrets:
+        monkeypatch.delenv(name, raising=False)
+    before = project_tree(tmp_path)
+
+    result = await connection_tool(tmp_path, secrets, environment="dev")
+
+    assert result.isError
+    assert "stage" in error_text(result)
+    assert_nothing_touched(seams, locks)
+    assert project_tree(tmp_path) == before
+
+
+async def test_test_connection_reduces_an_unexpected_error_to_its_type(project, seams, locks):
+    secret = secret_values()["ADOPS_MCP_DEV_WAREHOUSE_PASSWORD"]
+    seams.probe.error = RuntimeError(f"password {secret} rejected")
+
+    result = await connection_tool(project, environment="dev")
+
+    assert error_text(result) == "Error executing tool test_connection: unexpected RuntimeError"
+
+
+def test_the_connection_probe_seam_builds_the_driver_probe(tmp_path):
+    assert isinstance(mcp_server.build_connection_probe(tmp_path), DriverConnectionProbe)

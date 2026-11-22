@@ -1,9 +1,10 @@
 import os
-from collections.abc import Callable, Iterator, Mapping
-from contextlib import AbstractContextManager, ExitStack, contextmanager
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, ExitStack, contextmanager, suppress
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Annotated, NoReturn
+from typing import Annotated, NamedTuple, NoReturn
 
 import typer
 from dotenv import dotenv_values
@@ -40,6 +41,7 @@ from adops.application.run_pipeline import (
 )
 from adops.application.secrets import (
     MissingSecretError,
+    redact_secret_values,
     resolve_secret_references,
     resolve_warehouse,
     secret_references,
@@ -54,15 +56,18 @@ from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import load_pipeline, load_project_settings
 from adops.domain.reverse_sync import ReverseSyncStep
 from adops.domain.reverse_sync_diff import Diff
+from adops.domain.run_log import is_plain_name
 from adops.domain.transform import TransformStep
 from adops.infrastructure.clock import SystemClock
 from adops.infrastructure.dagster_orchestrator import DagsterOrchestrator, JobCompileError
 from adops.infrastructure.dbt_transform import DbtTransform
 from adops.infrastructure.dlt_sync import DltSync
 from adops.infrastructure.postgres_reverse_sync import PostgresReverseSync
+from adops.infrastructure.run_log_store import write_run_log
 from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
 from adops.infrastructure.step_fingerprint_store import ProjectTree, WarehouseFingerprintStore
 from adops.infrastructure.warehouse_lock import DEFAULT_LOCK_TIMEOUT, warehouse_lock
+from adops.interface import project_secrets
 
 SETTINGS_FILE = Path("adops.yaml")
 PIPELINES_DIR = Path("pipelines")
@@ -113,6 +118,13 @@ def build_snapshot_store(
 
 def build_clock() -> Clock:
     return SystemClock()
+
+
+RunLogWriter = Callable[[Path, str, str, datetime, str], Path | None]
+
+
+def build_run_log_writer() -> RunLogWriter:
+    return write_run_log
 
 
 def build_orchestrator() -> Orchestrator:
@@ -260,12 +272,10 @@ def _run_one(project: Path, pipeline: str, env: str, branch: str | None) -> None
     except Exception as error:
         # Only the type: an unexpected error was never redacted and may hold a secret.
         fail(f"unexpected {type(error).__name__} while running {pipeline}")
-    _print_result(result)
+    for line in result_output(result):
+        typer.echo(line.text, err=line.err)
     if not result.succeeded:
-        fail(f"Pipeline {result.pipeline} failed in Environment {result.environment}.")
-    if branch is not None and all(s.status is StepStatus.DEFERRED for s in result.steps):
-        typer.echo(f"Nothing changed since stage's last run; {result.environment} uses stage.")
-    typer.echo(f"Pipeline {result.pipeline} passed in Environment {result.environment}.")
+        raise typer.Exit(1)
 
 
 def run_project(
@@ -276,7 +286,26 @@ def run_project(
     *,
     lock_timeout: float = DEFAULT_LOCK_TIMEOUT,
 ) -> RunResult:
-    """Run a Pipeline, waiting up to `lock_timeout` seconds for its Warehouse lock."""
+    """Run a Pipeline, waiting up to `lock_timeout` seconds for its Warehouse lock.
+
+    Writes one Run Log holding what `adops run` prints for it, unless the Environment or
+    Pipeline name cannot safely name a Run Log file.
+    """
+    try:
+        result = _run_project(project, pipeline, environment, branch, lock_timeout)
+    except RUN_ERRORS as error:
+        # A Run Log problem never changes the run's outcome.
+        with suppress(Exception):
+            _log_failure(project, pipeline, environment, branch, error)
+        raise
+    with suppress(Exception):
+        _write_run_log(project, result.environment, result.pipeline, result_lines(result))
+    return result
+
+
+def _run_project(
+    project: Path, pipeline: str, environment: str, branch: str | None, lock_timeout: float
+) -> RunResult:
     with _scoped_environ(_dagster_environ(project)):
         if branch is None:
             return run_in_environment(
@@ -292,6 +321,38 @@ def run_project(
             project_env(project),
             lock_timeout,
         )
+
+
+def _log_failure(
+    project: Path, pipeline: str, environment: str, branch: str | None, error: Exception
+) -> None:
+    name = _failed_run_environment(project, environment, branch)
+    if name is not None and is_plain_name(pipeline):
+        _write_run_log(project, name, pipeline, error_lines(error))
+
+
+def _failed_run_environment(project: Path, environment: str, branch: str | None) -> str | None:
+    """The Environment a failed run used, or None when it cannot be named safely."""
+    if branch is None:
+        return environment if is_plain_name(environment) else None
+    try:
+        stage = stage_environment(load_project_settings(read_settings(project)).environments)
+        return stage_branch_name(stage, branch)
+    except RUN_ERRORS:
+        return None
+
+
+def _write_run_log(project: Path, environment: str, pipeline: str, lines: Sequence[str]) -> None:
+    text = redact_secret_values("".join(f"{line}\n" for line in lines), _secret_values(project))
+    build_run_log_writer()(project, environment, pipeline, build_clock().now(), text)
+
+
+def _secret_values(project: Path) -> list[str]:
+    """Best effort: when adops.yaml or .env cannot be read, the text is already redacted."""
+    try:
+        return project_secrets.project_secret_values(project)
+    except (*RUN_ERRORS, OSError, ValueError):
+        return []
 
 
 def _dagster_environ(project: Path) -> dict[str, str]:
@@ -484,22 +545,51 @@ def _scoped_environ(updates: Mapping[str, str]) -> Iterator[None]:
         os.environ.update(saved)
 
 
-def _print_result(result: RunResult) -> None:
+class OutputLine(NamedTuple):
+    text: str
+    err: bool = False
+
+
+def result_lines(result: RunResult) -> list[str]:
+    """What `adops run` prints for a finished run, stdout and stderr in print order."""
+    return [line.text for line in result_output(result)]
+
+
+def result_output(result: RunResult) -> list[OutputLine]:
+    lines: list[OutputLine] = []
     for step in result.steps:
         rows = ", ".join(f"{table} {count} rows" for table, count in step.rows_loaded.items())
         if step.status is StepStatus.DEFERRED:
-            typer.echo(f"step {step.name}: deferred to stage")
+            lines.append(OutputLine(f"step {step.name}: deferred to stage"))
             continue
-        typer.echo(f"step {step.name}: {step.status}" + (f" — {rows}" if rows else ""))
-        for check in step.checks:
-            typer.echo(f"  check {check.table} {check.check}: {check.status}")
+        status = f"step {step.name}: {step.status}" + (f" — {rows}" if rows else "")
+        lines.append(OutputLine(status))
+        lines += (
+            OutputLine(f"  check {check.table} {check.check}: {check.status}")
+            for check in step.checks
+        )
         if step.preview is not None:
-            _print_preview(step.preview)
+            lines += (OutputLine(text) for text in _preview_lines(step.preview))
         if step.error:
-            typer.echo(f"  {step.error}", err=True)
+            lines.append(OutputLine(f"  {step.error}", err=True))
+    lines += _summary_lines(result)
+    return lines
 
 
-def _print_preview(preview: ReverseSyncPreview) -> None:
+def _summary_lines(result: RunResult) -> list[OutputLine]:
+    pipeline, environment = result.pipeline, result.environment
+    if not result.succeeded:
+        return [OutputLine(f"Pipeline {pipeline} failed in Environment {environment}.", err=True)]
+    lines = []
+    # Only a Branch run defers Steps to stage.
+    if all(step.status is StepStatus.DEFERRED for step in result.steps):
+        unchanged = f"Nothing changed since stage's last run; {environment} uses stage."
+        lines.append(OutputLine(unchanged))
+    lines.append(OutputLine(f"Pipeline {pipeline} passed in Environment {environment}."))
+    return lines
+
+
+def _preview_lines(preview: ReverseSyncPreview) -> list[str]:
     if preview.written:
         counts = [f"inserted {preview.inserts}", f"updated {preview.updates}"]
         deleted = f"deleted {preview.deletes}"
@@ -507,19 +597,19 @@ def _print_preview(preview: ReverseSyncPreview) -> None:
         counts = [f"would insert {preview.inserts}", f"would update {preview.updates}"]
         deleted = f"would delete {preview.deletes}"
     counts.append(f"kept {preview.kept} (absent from dbt result)" if preview.kept else deleted)
-    typer.echo(f"  {'wrote' if preview.written else 'Preview'}: {', '.join(counts)}")
+    lines = [f"  {'wrote' if preview.written else 'Preview'}: {', '.join(counts)}"]
     sample = preview.sample
-    _print_sample_keys("insert", sample.inserts)
+    lines += _sample_key_lines("insert", sample.inserts)
     if sample.updates:
         changes = (f"{key} ({', '.join(columns)})" for key, columns in sample.updates)
-        typer.echo(f"  sample update keys: {'; '.join(changes)}")
-    _print_sample_keys("delete", sample.deletes)
-    _print_sample_keys("kept", sample.kept)
+        lines.append(f"  sample update keys: {'; '.join(changes)}")
+    lines += _sample_key_lines("delete", sample.deletes)
+    lines += _sample_key_lines("kept", sample.kept)
+    return lines
 
 
-def _print_sample_keys(kind: str, keys: tuple[object, ...]) -> None:
-    if keys:
-        typer.echo(f"  sample {kind} keys: {', '.join(str(key) for key in keys)}")
+def _sample_key_lines(kind: str, keys: tuple[object, ...]) -> list[str]:
+    return [f"  sample {kind} keys: {', '.join(str(key) for key in keys)}"] if keys else []
 
 
 def fail(*lines: str) -> NoReturn:

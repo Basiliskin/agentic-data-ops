@@ -21,3 +21,5 @@
 - 2026-11-21 | horizon 9 | completed | 5 phases (run/preview/validate MCP tools for dev and Branch Environments only, shared-DB refusal, adops mcp over stdio, demo shop_dev, .mcp.json); 0 amendments, 0 overrides
 - 2026-11-21 | horizon 10 | planned | 5 phases (Assistant MCP: drop-branch, dev-only accept-schema, project view, list/read files, edit files) | template of horizon 9
 - 2026-11-21 | horizon 10 | completed | 5 phases (MCP drop_branch, accept_schema, project_view, list/read/edit file tools)
+- 2026-11-21 | horizon 11 | planned | 5 phases (Run Log store, Run Logs from CLI/MCP runs + plain .gitignore, read-logs, connection check, test-connection); gate passed (0 blockers, 1 major healed, 1 major accepted)
+- 2026-11-22 | horizon 11 | completed | 5 phases (Run Log store, Run Logs from CLI/MCP runs, read-logs, connection check, test-connection MCP tool)

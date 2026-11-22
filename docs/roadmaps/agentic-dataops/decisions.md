@@ -72,3 +72,11 @@
 - 2026-11-21 | horizon 10 | MCP edit_file writes only under pipelines/ and dbt/; adops.yaml is read-only for the Assistant (narrows the horizon-9 edit allow-list) — user choice
 - 2026-11-21 | horizon 10 | MCP drop_branch fails fast on a held stage lock (CLI keeps 30 min); MCP accept_schema is dev only and takes no lock — user choice
 - 2026-11-21 | horizon 10 | MCP tools taking a pipeline argument require a plain Pipeline name (no /, \, ..) — user-confirmed assumption
+- 2026-11-21 | horizon 11 | Run Logs are .adops/logs/<env>/<UTC %Y%m%dT%H%M%SZ>-<pipeline>.log, one per Pipeline run (run --all writes one each), newest 20 kept per Environment — user choice
+- 2026-11-21 | horizon 11 | Only CLI runs and MCP run/preview write Run Logs, by wrapping run_project; scheduled Server runs write none — user choice
+- 2026-11-21 | horizon 11 | A run that fails after its Environment and Pipeline name are accepted still writes a Run Log with the clean error; MCP refusals and invalid --env/Pipeline names write none — user choice
+- 2026-11-21 | horizon 11 | Run Log text equals the CLI's printed text (one shared result_lines), masked with Secret values best-effort; a failed log write or prune never changes a run's outcome
+- 2026-11-21 | horizon 11 | test-connection is an MCP tool only; it connects and closes (10 s timeout, read-only DuckDB, no lock, no writes) and reports every Warehouse, Source and target — user choice
+- 2026-11-21 | horizon 11 | Project-wide connection failures use fixed variants 'Warehouse is unreachable' / 'Source <name> is unreachable' / 'Target <name> is unreachable', built only from adops.yaml names
+- 2026-11-21 | horizon 11 | read-logs applies only the dev/Branch allow-list (not the shared-database refusal) and reads only Run Log names inside .adops/logs/<env>/ — because it touches no database
+- 2026-11-21 | horizon 11 | The plain Project template ships a gitignore with .env and .adops/ — so Run Logs are never committed in plain Projects
