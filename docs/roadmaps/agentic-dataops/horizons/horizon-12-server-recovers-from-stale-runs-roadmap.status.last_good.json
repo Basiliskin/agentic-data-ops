@@ -1,0 +1,147 @@
+{
+  "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-12-server-recovers-from-stale-runs-roadmap.json",
+  "roadmapTask": "Server recovers from runs left STARTED after a crash: add a test that kills the Server mid-run and shows the next scheduled tick is skipped, turn on Dagster run monitoring (plus a startup sweep only if monitoring alone doesn't clear the run), send a webhook alert when a stale run is cleared, and prove it with the Server E2E on both Postgres and DuckDB Warehouses. Keep it to 2–3 phases, before the ADR-0015 Git-based Breaking Change work.",
+  "createdAt": "2026-11-22T09:07:37Z",
+  "updatedAt": "2026-11-22T15:46:23Z",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "test-crash-leaves-schedule-blocked",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-22T09:07:37Z",
+      "baseRef": "4b61c56562f9568925bf50ed3614d244ed2b8890",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/{MAP,blockers,decisions,discoveries,state}.md and the horizon-12 roadmap .json/.md (planning output) | Changed: tests/e2e/test_server.py (+ discoveries.md line). Adds test_crash_leaves_stale_run_and_skips_next_tick: holds the stage Warehouse lock before the Server starts (Postgres pg_advisory_lock from the test; DuckDB flock from a helper container, see amendment), waits for STARTED, SIGKILLs both Server services, frees the lock, restarts, asserts the next post-restart tick is SKIPPED with Pipeline shop_sync is still running and the run is still STARTED.",
+      "amendments": [
+        {
+          "phaseId": "test-crash-leaves-schedule-blocked",
+          "at": "2026-11-22T09:08:15Z",
+          "reason": "On macOS Docker Desktop a host-process fcntl.flock on the bind-mounted .lock file is not visible inside the Server container (verified: host lock -> container acquires; container lock -> second container blocked). Holding the DuckDB lock from a helper container started by the test keeps the same goal (the test holds the Warehouse lock so the run stays STARTED) and works on macOS and Linux CI.",
+          "changes": {
+            "changes": {
+              "before": "For DuckDB, take fcntl.flock on the <warehouse file>.lock path next to the DuckDB file in the Project folder.",
+              "after": "For DuckDB, start a detached helper container from the Server image with the Project bind-mounted at /project that takes fcntl.flock on /project/<warehouse file>.lock and sleeps; release by removing the container (its process exit drops the flock)."
+            }
+          }
+        }
+      ],
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-22T09:33:35Z",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "43 setup errors: ADOPS_TEST_POSTGRES_DSN is not set; coverage 98 < 100",
+          "resolvedBy": "gate-fix",
+          "resolution": "gate env: set ADOPS_TEST_POSTGRES_DSN to the running adops-test-pg on 55432; no code change"
+        }
+      ],
+      "completedAt": "2026-11-22T09:35:29Z",
+      "gateRun": "g1 uv run ruff check: pass; g2 ADOPS_TEST_POSTGRES_DSN=... uv run pytest tests/unit --cov: pass (1753, 100%); g4 uv run pytest tests/e2e -m e2e: pass (10, 615s; crash [postgres] 107s, [duckdb] 117s); g3 n/a (no template change)",
+      "gradeResult": {
+        "phaseId": "test-crash-leaves-schedule-blocked",
+        "overallPass": true,
+        "dimensions": [
+          {
+            "dimensionId": "stale-state-is-genuinely-dead",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "kill both services, assert not running, release, probe lock free, then up; post-restart DB read asserts STARTED. 10: lock-free probe after kill proves no live worker"
+          },
+          {
+            "dimensionId": "skip-tick-is-post-restart",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "timestamp > restarted_at filter, job_name filter, exact reason, 150s deadline with daemon log; ticks[0] not ordered"
+          },
+          {
+            "dimensionId": "lock-and-stack-cleanup",
+            "score": 9,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "context managers + ExitStack + docker rm -f in finally; module passed twice; no forced-failure run"
+          },
+          {
+            "dimensionId": "runtime-budget-visible",
+            "score": 9,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "per-Warehouse monotonic duration in finally, <4 min, one kill per case; excludes fixture setup"
+          }
+        ]
+      }
+    },
+    {
+      "phaseId": "add-stale-run-sweep-and-alert",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-22T14:29:18Z",
+      "baseRef": "4b61c56562f9568925bf50ed3614d244ed2b8890",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/{MAP,blockers,decisions,discoveries,state}.md, tests/e2e/test_server.py, horizon-12 roadmap files | changed: src/adops/application/alerts.py, src/adops/infrastructure/webhook_alerts.py, src/adops/infrastructure/dagster_server.py, tests/unit/application/test_alerts.py, tests/unit/infrastructure/test_webhook_alerts.py, tests/unit/infrastructure/test_dagster_server.py — adds StaleRunAlert + notify_stale_run, widens webhook payload, adds clear_stale_runs (fails STARTING/STARTED runs, then notifies once per run)",
+      "unplannedFiles": [],
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-22T14:35:37Z",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "2 failed, 43 errors: ADOPS_TEST_POSTGRES_DSN unset; EventLogEntry has no attribute event_log_entry; local_temp base_dir missing",
+          "resolvedBy": "gate-fix",
+          "resolution": "set DSN to the running adops-test-pg container; fixed the two new tests (all_logs returns EventLogEntry; mkdir the temp home)"
+        }
+      ],
+      "completedAt": "2026-11-22T14:46:14Z",
+      "gradeResult": {
+        "phaseId": "add-stale-run-sweep-and-alert",
+        "dimensionScores": [
+          {
+            "dimensionId": "sweep-status-scope-and-idempotency",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "Seeds every DagsterRunStatus and checks each final status; separate PIPELINE_FAILURE event test proves report_run_failed wrote the event; second-call no-op test."
+          },
+          {
+            "dimensionId": "exactly-once-alert-per-cleared-run",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "Two-call and zero-call tests; order test shows both runs FAILURE before first notify and a raising notify leaves both FAILURE. Not 10: a raising notify stops remaining alerts (safe only because notify_stale_run never raises)."
+          },
+          {
+            "dimensionId": "alert-and-storage-carry-no-secret",
+            "score": 9,
+            "minScore": 9,
+            "passed": true,
+            "evidence": "Exact sanitized lines with URL/secret in exception; storage dump has no SECRET or hooks.example; exact stale payload body with no http value. Not 10: SECRET never seeded into runs, so storage check is weak."
+          },
+          {
+            "dimensionId": "failure-alert-unchanged",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "Existing FailureAlert body test unedited and passing; scheme check at top of send(); both alert types rejected for ftp:// and file:// with the same message; alerts.py imports no dagster/infrastructure."
+          }
+        ],
+        "overallPass": true,
+        "summary": "All dimensions pass. Gaps: raising notify stops remaining alerts; secret-in-storage check is weak."
+      },
+      "gateRun": "g1 ruff check: pass; g2 unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass 100%; g3 wheel template listing: pass; g4 e2e -m e2e: pass"
+    },
+    {
+      "phaseId": "connect-sweep-to-server-start",
+      "status": "awaiting-verification",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-22T15:36:42Z",
+      "baseRef": "4b61c56562f9568925bf50ed3614d244ed2b8890",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/* memory + horizon-12 files, tests/e2e/test_server.py (phase 1), and phase-2 files: src/adops/application/alerts.py, src/adops/infrastructure/{webhook_alerts,dagster_server}.py, tests/unit/application/test_alerts.py, tests/unit/infrastructure/{test_webhook_alerts,test_dagster_server}.py | changed: src/adops/interface/recover_command.py (new), src/adops/interface/cli.py, src/adops/templates/server/dagster.yaml, src/adops/templates/{demo,plain}/docker-compose.yml, tests/unit/interface/test_recover_command.py (new), tests/unit/interface/test_init_command.py, tests/e2e/test_server.py, docs/roadmaps/agentic-dataops/decisions.md — adds adops server-recover (sweep + one stale-run alert per run, always exit 0), chains it before dagster-daemon in both compose templates, turns on run_monitoring, flips the crash E2E to prove FAILURE + one POST + next tick SUCCESS. blockers.md: both target blockers were already marked resolved by PLAN, no edit.",
+      "unplannedFiles": []
+    }
+  ]
+}

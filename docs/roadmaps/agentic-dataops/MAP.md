@@ -1,78 +1,68 @@
 # Map — agentic-dataops
 
-**Goal (vision.md):** ship v1 of `adops`, a self-hosted Python CLI/library whose YAML Pipelines (dlt/PyAirbyte Sync, dbt Transform, Reverse Sync with Preview) run on Postgres or DuckDB across dev/stage/prod and Branch Environments, operated by the user's own Assistant through an MCP server and six skills, with GitOps Promotion, so a SQL-literate user needs no Git or Docker knowledge.
+**Goal (vision.md):** ship v1 of `adops`, an open-source Python CLI that scaffolds YAML Pipelines (Sync, dbt Transform, Reverse Sync with Preview) running on Postgres or DuckDB across dev/stage/prod and Branch Environments, operated by the user's own Assistant through an MCP server and six skills, with Promotion through GitHub Actions. The target user knows SQL but not Git or Docker.
 
-**As of:** 2026-11-21 · **Ordering:** whatever unblocks the most remaining work comes first; ties go to whatever closes an open question · **User goal:** none given, so the vision is the whole goal.
+**Date:** 2026-11-22 · **Ordering:** whatever unblocks the most remaining work goes first. Ties go to whatever retires an open question, then to whatever gives the earliest visible result. · **User goal:** none given, so the vision is the whole goal.
 
-> This page is regenerated from project memory on every `map` run. It is a view, not a plan. Only **Done** is fact. **Candidates** are guesses about what remains, not planned work.
+> This page is regenerated from project memory on each run. It is not a plan. Only "Done" is fact. There is no "In flight" or "Next" horizon right now. Everything under "Candidates" is a guess.
 
 ## Where the project stands
 
-All ten planning horizons are finished, and every phase is done in its ledger. Nothing is in flight. The demo runs end to end on both Warehouses with Checks, Breaking Changes, dbt, Reverse Sync with Preview, Branch Environments, a Server running Schedules and GitHub Actions Promotion. The Assistant's MCP server has nine tools.
-
-What remains before v1: the last two MCP tools (run logs/read-logs and test-connection), the six skills, a full non-demo `adops init`, carrying accepted schema changes through Git, Promotion hardening with the production playbooks, Community Sources and optional tracing.
-
-There is no brief for the next horizon: the `next-horizon-brief.md` on disk was written for horizon 10, which is now finished.
+All 11 horizons are complete (68 phases). The engine works end to end: Sync, dbt Transform, Reverse Sync with Preview, both Warehouse kinds, Branch Environments, scheduled Servers, GitHub Actions Promotion, and every MCP tool the vision names. What remains is mostly the layer the target user touches (the six skills, and accepting Breaking Changes through Git), plus proof that the production setup works on a real machine.
 
 ## The ordered path
 
 | # | What | Delivers | Unblocks | Status / Confidence |
 |---|---|---|---|---|
-| 1 | Demo shop loads end to end | dlt Sync, built-in Checks, `adops run`/`validate`, Docker E2E in CI | everything after | done (7 phases) |
-| 2 | Breaking Changes and declared Checks | schema snapshots, `accept-schema`, not_null/accepted_values/min_rows/freshness | 3, 6 | done (6) |
-| 3 | dbt Transform and dedicated errors | dbt models + tests as Checks, fixed unreachable/empty/load-failed errors | 4, 5 | done (6) |
-| 4 | DuckDB Warehouse | same Pipelines on DuckDB, E2E on both kinds | 5, 6 | done (6) |
-| 5 | Reverse Sync and Preview | writes only in stage/prod, Preview elsewhere, stage Environment | 6, 9 | done (7) |
-| 6 | Branch Environments | `run --branch` deferring to stage by Step Fingerprint, `drop-branch` | 8, 9 | done (7) |
-| 7 | Server runs Schedules | Schedules, run rules, Server profile, webhook alerts | 8 | done (7) |
-| 8 | GitHub Actions Promotion | `run --all`, Warehouse lock, PR/stage/prod workflows, promotion playbook | 9 | done (6) |
-| 9 | Assistant MCP server | `adops mcp` over stdio: run, preview, validate; dev/branch only; `.mcp.json` | 10 | done (5) |
-| 10 | MCP project and file tools | drop_branch, accept_schema (dev), project_view, list/read/edit files | 11 | done (5) |
-| 11 | Finish the MCP tool set: run logs, read-logs, test-connection | every run writes a secret-free log the Assistant can read; connections checked with fixed messages; closes vision item 7 | the six skills; run-log identity question; test-connection-for-DuckDB/branch question; template `.gitignore` for init; log secret-safety tests | candidate — likely |
-| 12 | Accept a Breaking Change across Environments (ADR-0015 records, branch acceptance) | an accepted schema change travels through Git into stage and prod; a PR branch's Breaking Change has an unattended path | four open record/applied/drift/PR-branch questions; the `accept-schema --branch` gap; a schema-change flow the skills can narrate | candidate — possible (record format needs a decision first) |
-| 13 | The six SKILL.md skills | the Assistant checks prerequisites, does Git itself and narrates plainly (vision item 8) | full `adops init`; real MCP timeout evidence; first user feedback on Promotion | candidate — possible |
-| 14 | Full non-demo `adops init` scaffold | plain `init` gives a complete Project: pipelines, dbt project, settings, compose, `.env.example`, skills, workflows, `.mcp.json` (vision item 1) | single-VM playbook; sources.yml generation if pursued | candidate — possible |
-| 15 | Server and Promotion hardening, then production playbooks | workflows proven on a real runner, Dagster reload, `.adops/` ownership, prod approval gate, stale STARTED runs cleared; Environments/Promotion and single-VM playbooks (vision item 11) | five open runner/reload/ownership/prod-gate/STARTED questions; abandoned `br_` schema cleanup | candidate — speculative (needs live infrastructure and user feedback) |
-| 16 | Source breadth: PyAirbyte Community Sources, every Verified Source under E2E | Docker-free Community Sources, CSV/Parquet Source, the dbt source-test name fix (vision items 2, 10) | CSV/Parquet Source; dbt source-test question; E2E duration question | candidate — speculative |
-| 17 | OpenTelemetry tracing and optional Grafana profile | traced runs with no secret in any span (vision items 2, 6) | span half of the secret-safety criterion | candidate — speculative |
+| 1–11 | Horizons 1–11 | Demo end to end → Checks → dbt → DuckDB → Reverse Sync → Branch Envs → Server Schedules → Promotion → MCP server → MCP project/file tools → Run Logs + test-connection | — | **done** (fact) |
+| 12 | Accepting Breaking Changes in stage and prod through a reviewed Git change (ADR-0015) | Accept an intended schema change for stage/prod by merging a recorded change; each Environment applies it on its next run | 4 open questions on the accepted-change record (contents, applied-once tracking, drift since acceptance, unattended Breaking Changes in a branch); the skills' "fix a Breaking Change" flow | next candidate · likely |
+| 13 | The six Assistant skills, shipped in every scaffolded Project | The Assistant changes, tests and promotes a Pipeline, does the Git steps itself and explains them in plain words | Vision items 1 and 8; the Assistant opening PRs (Git stays in the skills, not the MCP server); skills using read-logs and test-connection; a full plain `adops init` with a dbt project; the real use the timeout question needs | candidate · likely (can overlap #12; only the Breaking Change skill waits on it) |
+| 14 | Server and Promotion hardening on a real self-hosted machine | A Server recovers after a crash; stage/prod workflows shown to work on a real runner | 5 open questions: runs stuck as STARTED, real-runner checkout over `.adops/` and `.env`, Dagster code-location reload, root-owned `.adops/` files, a prod gate without Enterprise; the production playbook | candidate · possible |
+| 15 | Closing the Assistant's remaining safety and long-run gaps | dev can't be pointed at stage/prod data through a dbt `profiles.yml`; long runs don't fail on the MCP tool-call timeout | 2 open questions (dbt/ connection redirect, tool-call timeout); long-run progress or background run handles | candidate · possible (the timeout half needs #13 first) |
+| 16 | Single-VM production playbook | One guide to stand up a stage/prod Server on one Linux machine | Vision item 11; the Environments/Promotion playbook beyond promotion.md | candidate · possible (after #14) |
+| 17 | Community Sources through PyAirbyte | Sync from a Docker-free Community connector with the same Pipeline YAML | The PyAirbyte adapter (ADR-0012); test-connection for Community Sources | candidate · speculative |
+| 18 | Optional tracing and Grafana profile | An optional compose profile shows runs as traces in Grafana, with tests that no span carries a secret | Vision item 2's Grafana/OTel profile; vision item 6's "no span" clause | candidate · speculative |
+
+Rows 12–18 are themes, not planned horizons. Their numbers only continue the sequence. A PLAN run decides what actually comes next.
 
 ## Done
 
-- Horizon 1: 7 phases (demo shop loads end to end; 1 replan, 1 amendment)
-- Horizon 2: 6 phases (Breaking Changes, declared Checks; 2 amendments)
-- Horizon 3: 6 phases (dbt Transform, dedicated errors; 1 amendment)
-- Horizon 4: 6 phases (DuckDB Warehouse; 1 amendment)
-- Horizon 5: 7 phases (Reverse Sync and Preview; 1 amendment)
-- Horizon 6: 7 phases (Branch Environments; 1 amendment)
-- Horizon 7: 7 phases (Server runs Schedules)
-- Horizon 8: 6 phases (GitHub Actions Promotion; 2 amendments)
-- Horizon 9: 5 phases (Assistant MCP server)
-- Horizon 10: 5 phases (MCP project and file tools)
+- Horizon 1: demo shop loads end to end (7 phases)
+- Horizon 2: Breaking Changes + accept-schema, user-declared Checks (6)
+- Horizon 3: dbt Transform Step and dedicated errors (6)
+- Horizon 4: DuckDB Warehouse runs the demo (6)
+- Horizon 5: Reverse Sync and Preview, stage Environment (7)
+- Horizon 6: Branch Environments (7)
+- Horizon 7: the Server runs Schedules (7)
+- Horizon 8: GitHub Actions Promotion (6)
+- Horizon 9: Assistant MCP server with run, preview and validate (5)
+- Horizon 10: MCP project and file tools (5)
+- Horizon 11: Run Logs, read-logs and test-connection (5)
 
 ## Open questions blocking the path
 
-- **Gates #11:** What is a run log identified by (timestamp, run id, Pipeline), how long is it kept, and does a run that fails before a result exists write one?
-- **Gates #11:** What does test-connection mean for a DuckDB Warehouse, and for a Branch Environment that opens stage's Warehouse and targets?
-- **Gates #11, #13:** How does Claude Code's real MCP tool-call timeout compare with a long dev or branch run?
-- **Gates #12:** What is in an accepted-change record: the full accepted shape, or "accept whatever the Source shows next run", given prod's Source can differ from dev's?
-- **Gates #12:** How does an Environment know it already applied a record, and what happens if the Source drifted again?
-- **Gates #12:** How is a Breaking Change in a PR branch handled unattended?
-- **Gates #15:** Do the generated stage/prod workflows work on a real self-hosted runner, and does the Dagster code-location reload pick up changes?
-- **Gates #15:** Do root-owned files in `.adops/` break checkout or later runs as the runner user?
-- **Gates #15:** Without GitHub Enterprise, is "only writers can publish releases" an acceptable prod gate?
-- **Gates #15:** After a Server crash, how are runs left STARTED cleared: run monitoring, a startup sweep, or both?
-- **Gates #15:** What did the first user feedback on Promotion say?
-- **Gates #16:** DbtTransform reports a dbt source test under the source name, not its table. This needs a fix before users write source tests.
-- **Gates #16:** Will a growing Docker E2E suite stay inside the fixed 20-minute CI timeout?
-- **Already answered, not marked resolved:** these horizon-9 entries in `blockers.md` were settled in horizon 10:
-  - drop-branch fails fast on a held lock
-  - accept-schema is dev only, with no lock
-  - read_file blanks out secret values
-  - plain Pipeline names are required
-  - `dbt/profiles.yml` cannot change a connection, because dbt runs with a temporary profiles dir
+- **Gates #12:** What goes into an accepted-change record: the full accepted table shape, or "accept whatever the Source shows next run"? (h7, h8)
+- **Gates #12:** How does an Environment know it already applied a record, and are records ever removed? (h7, h8)
+- **Gates #12:** What happens when the Source has drifted again before the record is applied? (h7, h8)
+- **Gates #12:** How is a Breaking Change in a PR branch handled when nobody is watching, given accept-schema --branch is a known gap? (h6)
+- **Gates #14:** Runs left STARTED after a Server crash make every later tick skip: Dagster run monitoring, a startup sweep, or both? (h7, h8)
+- **Gates #14:** Do the stage/prod workflows work on a real self-hosted runner, with the PR checkout mounted over `.adops/` and `.env`? (h8)
+- **Gates #14:** Does the Dagster code-location reload pick up added or removed Pipelines while a run finishes on the old version? (h8)
+- **Gates #14:** Do root-owned files in `.adops/` break git checkout or later runs started as the runner user? (h8)
+- **Gates #14:** Without GitHub Enterprise, is "only writers can publish releases" an acceptable prod gate? (h8)
+- **Gates #15:** Can a `profiles.yml` under dbt/ redirect dev to stage/prod data without the shared-connection rule seeing it? (h9)
+- **Gates #15:** Claude Code's real MCP tool-call timeout versus how long a dev or Branch run takes. (h9)
+- **Gates nothing specific:** dbt source tests are reported under the source name, not the table. Fix this before users write source tests. (h3)
+- **Waits on users:** What did the first user feedback on Promotion say? (h8)
 
-  Older horizon 2–3 questions about dbt and dlt behaviour are also likely answered by the code that shipped. The next PLAN run should close all of these.
+19 older entries in blockers.md look already settled by later decisions or delivered work, but they are not marked `— resolved` (for example: dbt in-process safety, read_file secret handling, drop_branch fail-fast, plain Pipeline names). The next PLAN run should mark them resolved.
 
 ## Beyond current visibility
 
-Past #14 the order is a guess. Promotion hardening and the playbooks depend on live runner use and user feedback that has not happened yet. "Every Verified Source passes E2E" has no defined list of v1 Verified Sources beyond the demo Postgres and the deferred CSV/Parquet Source. The tail is re-derived on every run and gets sharper as horizons land.
+- CSV/Parquet file Verified Source: ADR-0012 names it, and vision item 10 would then need it in E2E. Whether v1 needs it is unclear.
+- Generating dbt `sources.yml` from the Pipeline YAML (convenience).
+- accept-schema --branch. It may fold into #12.
+- Branch Environment name collisions for short branch names; listing and cleaning up abandoned `br_` schemas.
+- Running only changed Pipelines on merge to stage (`--all` was chosen).
+
+The order past #13 depends on real use and real self-hosted runs, which nobody has done yet. This list is rebuilt on every run and gets sharper as horizons land.

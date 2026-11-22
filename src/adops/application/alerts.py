@@ -1,4 +1,4 @@
-"""The alert sent when a Server run finally fails: names and the sanitized Step error only."""
+"""Alerts the Server sends: names, fixed text and the sanitized Step error only."""
 
 from dataclasses import dataclass
 from typing import Protocol
@@ -14,8 +14,21 @@ class FailureAlert:
     message: str
 
 
+STALE_RUN_MESSAGE = "a run left running by a Server crash was marked failed"
+
+
+@dataclass(frozen=True)
+class StaleRunAlert:
+    pipeline: str
+    environment: str
+    message: str = STALE_RUN_MESSAGE
+
+
+Alert = FailureAlert | StaleRunAlert
+
+
 class AlertSender(Protocol):
-    def send(self, alert: FailureAlert) -> None: ...
+    def send(self, alert: Alert) -> None: ...
 
 
 def failure_alert(result: RunResult) -> FailureAlert:
@@ -29,9 +42,17 @@ def failure_alert(result: RunResult) -> FailureAlert:
 
 
 def notify_failure(result: RunResult, sender: AlertSender) -> str | None:
+    return _notify(failure_alert(result), sender)
+
+
+def notify_stale_run(pipeline: str, environment: str, sender: AlertSender) -> str | None:
+    return _notify(StaleRunAlert(pipeline, environment), sender)
+
+
+def _notify(alert: Alert, sender: AlertSender) -> str | None:
     """Returns a sanitized problem line instead of raising: a failing alert never changes a run."""
     try:
-        sender.send(failure_alert(result))
+        sender.send(alert)
     except Exception as error:
         # Only the type: the error may carry the webhook URL, which is itself a secret.
         return f"alert could not be sent ({type(error).__name__})"

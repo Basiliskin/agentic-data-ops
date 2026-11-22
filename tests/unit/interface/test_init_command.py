@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from dagster import QueuedRunCoordinator
+from dagster import DagsterInstance, QueuedRunCoordinator
 from dotenv import dotenv_values
 from typer.testing import CliRunner
 
@@ -335,7 +335,11 @@ def test_server_services_run_from_the_bind_mounted_project(project):
             "ADOPS_PROJECT": "/project",
         }
         assert service["depends_on"] == {"dagster_meta": {"condition": "service_healthy"}}
-    assert services["dagster_daemon"]["command"] == ["dagster-daemon", "run", "-w", WORKSPACE]
+    assert services["dagster_daemon"]["command"] == [
+        "sh",
+        "-c",
+        f"adops server-recover && exec dagster-daemon run -w {WORKSPACE}",
+    ]
     assert services["dagster_webserver"]["command"] == [
         "dagster-webserver",
         "-h",
@@ -399,10 +403,31 @@ def test_server_dagster_instance_runs_one_run_at_a_time_on_postgres(project):
 
     assert getattr(module, coordinator["class"]) is QueuedRunCoordinator
     assert coordinator["config"] == {"max_concurrent_runs": 1}
-    assert set(config) == {"storage", "run_coordinator"}
+    assert set(config) == {"storage", "run_coordinator", "run_monitoring"}
+    assert config["run_monitoring"] == {
+        "enabled": True,
+        "start_timeout_seconds": 180,
+        "poll_interval_seconds": 120,
+        "max_resume_run_attempts": 0,
+    }
     connection = config["storage"]["postgres"]["postgres_db"]
     assert all(set(value) == {"env"} for value in connection.values())
     assert connection["password"] == {"env": "DAGSTER_PG_PASSWORD"}
+
+
+def test_dagster_reads_back_the_server_run_monitoring_settings(project, tmp_path):
+    config = yaml.safe_load((project / "server" / "dagster.yaml").read_text())
+    del config["storage"]
+    home = tmp_path / "dagster_home"
+    home.mkdir()
+    (home / "dagster.yaml").write_text(yaml.safe_dump(config))
+
+    with DagsterInstance.from_config(str(home)) as instance:
+        assert instance.run_monitoring_enabled
+        assert instance.run_monitoring_start_timeout_seconds == 180
+        assert instance.run_monitoring_poll_interval_seconds == 120
+        assert instance.run_monitoring_max_resume_run_attempts == 0
+        assert instance.run_monitoring_max_runtime_seconds == 0
 
 
 def test_demo_keeps_its_host_dagster_storage_unchanged(demo):

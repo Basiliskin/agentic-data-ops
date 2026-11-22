@@ -29,7 +29,11 @@ services:
     depends_on:
       dagster_meta:
         condition: service_healthy
-    command: ["dagster-daemon", "run", "-w", "/project/server/workspace.yaml"]
+    # Clears runs a crash left running before the daemon starts; exec lets stop signals reach it.
+    command:
+      - sh
+      - -c
+      - adops server-recover && exec dagster-daemon run -w /project/server/workspace.yaml
 
   dagster_webserver:
     <<: *server

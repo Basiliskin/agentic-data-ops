@@ -80,3 +80,8 @@
 - 2026-11-21 | horizon 11 | Project-wide connection failures use fixed variants 'Warehouse is unreachable' / 'Source <name> is unreachable' / 'Target <name> is unreachable', built only from adops.yaml names
 - 2026-11-21 | horizon 11 | read-logs applies only the dev/Branch allow-list (not the shared-database refusal) and reads only Run Log names inside .adops/logs/<env>/ — because it touches no database
 - 2026-11-21 | horizon 11 | The plain Project template ships a gitignore with .env and .adops/ — so Run Logs are never committed in plain Projects
+- 2026-11-22 | horizon 12 | Runs left STARTED after a Server crash are cleared by `adops server-recover` before dagster-daemon starts, plus run_monitoring on — user choice; Dagster 1.13.30 DefaultRunLauncher has no worker health check
+- 2026-11-22 | horizon 12 | Server run_monitoring sets no max_runtime_seconds and max_resume_run_attempts 0 — because real runs sit STARTED through 3x300s retry waits and a retry re-runs the whole Pipeline
+- 2026-11-22 | horizon 12 | The startup sweep fails only STARTED/STARTING runs of its own Dagster DB and sends one name-only stale-run alert per run; it never runs in load_definitions — user choice
+- 2026-11-22 | horizon 12 | The crash E2E keeps a scheduled run STARTED by holding the Warehouse lock from the test, then kills the Server with docker compose kill — user choice
+- 2026-11-22 | horizon 12 | Existing Projects get stale-run recovery only by re-running adops init or hand-editing server/dagster.yaml (run_monitoring) and the dagster_daemon command (adops server-recover && exec dagster-daemon run)

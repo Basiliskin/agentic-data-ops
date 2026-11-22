@@ -7,6 +7,7 @@ holding the Server's single run slot while it waits, so other Pipelines queue be
 from collections.abc import Callable, Sequence
 
 from dagster import (
+    DagsterInstance,
     DagsterRunStatus,
     DefaultScheduleStatus,
     Definitions,
@@ -36,6 +37,8 @@ IN_PROGRESS = [
     DagsterRunStatus.STARTING,
     DagsterRunStatus.STARTED,
 ]
+STALE = [DagsterRunStatus.STARTING, DagsterRunStatus.STARTED]
+STALE_RUN_FAILURE = "Marked failed when the Server started: the run was left running by a crash."
 
 
 def build_server_definitions(
@@ -53,6 +56,23 @@ def build_server_definitions(
         if schedule is not None
     ]
     return Definitions(jobs=jobs, schedules=schedules)
+
+
+def clear_stale_runs(instance: DagsterInstance, notify: Callable[[str], object]) -> list[str]:
+    """Marks every STARTING/STARTED run of this instance FAILURE, then calls `notify` per run.
+
+    Safe only before the daemon starts: runs execute only inside the daemon container
+    (QueuedRunCoordinator with DefaultRunLauncher), so any such run at that moment is dead.
+    QUEUED and NOT_STARTED runs are left for the coordinator to launch. Every run is marked
+    before any alert is sent, so a failing `notify` never leaves a run STARTED.
+    """
+    stale = instance.get_runs(filters=RunsFilter(statuses=STALE))
+    for run in stale:
+        instance.report_run_failed(run, message=STALE_RUN_FAILURE)
+    pipelines = [run.job_name for run in stale]
+    for pipeline in pipelines:
+        notify(pipeline)
+    return pipelines
 
 
 def _pipeline_job(

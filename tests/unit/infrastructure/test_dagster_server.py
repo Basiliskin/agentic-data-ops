@@ -9,6 +9,7 @@ from dagster import (
     DefaultScheduleStatus,
     Definitions,
     JobDefinition,
+    RunsFilter,
     ScheduleDefinition,
     build_schedule_context,
     in_process_executor,
@@ -23,9 +24,14 @@ from dagster._core.types.loadable_target_origin import LoadableTargetOrigin
 from dagster._utils.schedules import is_valid_cron_string
 from pydantic import ValidationError
 
+from adops.application.alerts import notify_stale_run
 from adops.application.ports import RunResult, StepReport, StepStatus
 from adops.domain.schedule import WEEKDAYS, Schedule
-from adops.infrastructure.dagster_server import build_server_definitions
+from adops.infrastructure.dagster_server import (
+    STALE_RUN_FAILURE,
+    build_server_definitions,
+    clear_stale_runs,
+)
 
 SECRET = "s3cr3t-server-sentinel"
 UNREACHABLE = "Step extract: the Source shop is unreachable"
@@ -324,3 +330,108 @@ def test_the_domain_and_dagster_both_reject_impossible_crons(cron: str):
     assert not is_valid_cron_string(cron)
     with pytest.raises(ValidationError):
         Schedule.parse(cron)
+
+
+def status_of(instance: DagsterInstance, job_name: str) -> DagsterRunStatus:
+    (run,) = instance.get_runs(filters=RunsFilter(job_name=job_name))
+    return instance.get_run_by_id(run.run_id).status
+
+
+def seed_every_status(instance: DagsterInstance) -> None:
+    for status in DagsterRunStatus:
+        add_run(instance, status.value.lower(), status)
+
+
+def test_the_sweep_fails_only_starting_and_started_runs(instance: DagsterInstance):
+    seed_every_status(instance)
+    notified: list[str] = []
+
+    cleared = clear_stale_runs(instance, notified.append)
+
+    assert sorted(cleared) == ["started", "starting"]
+    assert sorted(notified) == ["started", "starting"]
+    for status in DagsterRunStatus:
+        expected = (
+            DagsterRunStatus.FAILURE
+            if status in (DagsterRunStatus.STARTING, DagsterRunStatus.STARTED)
+            else status
+        )
+        assert status_of(instance, status.value.lower()) == expected
+
+
+def test_a_second_sweep_clears_nothing_and_alerts_nobody(instance: DagsterInstance):
+    seed_every_status(instance)
+    clear_stale_runs(instance, lambda pipeline: None)
+    notified: list[str] = []
+
+    assert clear_stale_runs(instance, notified.append) == []
+    assert notified == []
+
+
+def test_a_sweep_with_no_stale_runs_alerts_nobody(instance: DagsterInstance):
+    add_run(instance, "orders", DagsterRunStatus.SUCCESS)
+    add_run(instance, "customers", DagsterRunStatus.QUEUED)
+    notified: list[str] = []
+
+    assert clear_stale_runs(instance, notified.append) == []
+    assert notified == []
+
+
+def test_the_sweep_writes_a_run_failure_event_with_fixed_text(instance: DagsterInstance):
+    add_run(instance, "orders", DagsterRunStatus.STARTED)
+
+    clear_stale_runs(instance, lambda pipeline: None)
+
+    (run,) = instance.get_runs()
+    (failure,) = [
+        entry.dagster_event
+        for entry in instance.all_logs(run.run_id)
+        if entry.is_dagster_event and entry.dagster_event.event_type_value == "PIPELINE_FAILURE"
+    ]
+    assert failure.message == STALE_RUN_FAILURE
+
+
+def test_every_run_is_failed_before_the_first_alert(instance: DagsterInstance):
+    add_run(instance, "orders", DagsterRunStatus.STARTED)
+    add_run(instance, "customers", DagsterRunStatus.STARTING)
+    seen: list[tuple[str, DagsterRunStatus, DagsterRunStatus]] = []
+
+    def notify(pipeline: str) -> None:
+        seen.append((pipeline, status_of(instance, "orders"), status_of(instance, "customers")))
+        raise ConnectionRefusedError("https://hooks.example/token")
+
+    with pytest.raises(ConnectionRefusedError):
+        clear_stale_runs(instance, notify)
+
+    assert len(seen) == 1
+    assert seen[0][1:] == (DagsterRunStatus.FAILURE, DagsterRunStatus.FAILURE)
+    assert status_of(instance, "orders") == DagsterRunStatus.FAILURE
+    assert status_of(instance, "customers") == DagsterRunStatus.FAILURE
+
+
+class SecretLeakingSender:
+    def send(self, alert: object) -> None:
+        raise ConnectionRefusedError(f"https://hooks.example/{SECRET}")
+
+
+def test_no_secret_reaches_dagster_storage_or_the_line_after_a_sweep(tmp_path: Path):
+    home = tmp_path / "dagster_home"
+    home.mkdir()
+    lines: list[str | None] = []
+    with DagsterInstance.local_temp(str(home)) as instance:
+        add_run(instance, "orders", DagsterRunStatus.STARTED)
+        add_run(instance, "customers", DagsterRunStatus.STARTING)
+
+        cleared = clear_stale_runs(
+            instance,
+            lambda pipeline: lines.append(
+                notify_stale_run(pipeline, "prod", SecretLeakingSender())
+            ),
+        )
+
+    assert sorted(cleared) == ["customers", "orders"]
+    assert lines == ["alert could not be sent (ConnectionRefusedError)"] * 2
+    files = [path.read_bytes() for path in home.rglob("*") if path.is_file()]
+    assert files
+    assert all(SECRET.encode() not in content for content in files)
+    assert all(b"hooks.example" not in content for content in files)

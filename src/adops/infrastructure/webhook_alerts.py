@@ -3,7 +3,7 @@ from dataclasses import asdict
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from adops.application.alerts import FailureAlert
+from adops.application.alerts import Alert, FailureAlert
 
 TIMEOUT_SECONDS = 10.0
 SCHEMES = ("http", "https")
@@ -21,7 +21,7 @@ class WebhookAlertSender:
         self._url = url
         self._timeout = timeout
 
-    def send(self, alert: FailureAlert) -> None:
+    def send(self, alert: Alert) -> None:
         if urlsplit(self._url).scheme not in SCHEMES:
             raise UnsupportedWebhookScheme()
         request = Request(
@@ -34,9 +34,12 @@ class WebhookAlertSender:
             pass
 
 
-def payload(alert: FailureAlert) -> dict[str, str]:
-    text = (
-        f"Pipeline {alert.pipeline} failed in Environment {alert.environment} "
-        f"at Step {alert.step}: {alert.message}"
-    )
+def payload(alert: Alert) -> dict[str, str]:
+    if isinstance(alert, FailureAlert):
+        text = (
+            f"Pipeline {alert.pipeline} failed in Environment {alert.environment} "
+            f"at Step {alert.step}: {alert.message}"
+        )
+    else:
+        text = f"Pipeline {alert.pipeline} in Environment {alert.environment}: {alert.message}"
     return {"text": text, **asdict(alert)}

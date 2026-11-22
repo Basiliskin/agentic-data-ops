@@ -1,7 +1,15 @@
 import json
 from dataclasses import asdict
 
-from adops.application.alerts import FailureAlert, failure_alert, notify_failure
+from adops.application.alerts import (
+    STALE_RUN_MESSAGE,
+    Alert,
+    FailureAlert,
+    StaleRunAlert,
+    failure_alert,
+    notify_failure,
+    notify_stale_run,
+)
 from adops.application.ports import RunResult, StepReport, StepStatus
 
 SENTINEL_DSN = "postgres://adops:SENTINEL_PASSWORD@db.internal/shop"
@@ -22,14 +30,14 @@ def failed_run() -> RunResult:
 
 class RecordingSender:
     def __init__(self) -> None:
-        self.sent: list[FailureAlert] = []
+        self.sent: list[Alert] = []
 
-    def send(self, alert: FailureAlert) -> None:
+    def send(self, alert: Alert) -> None:
         self.sent.append(alert)
 
 
 class BrokenSender:
-    def send(self, alert: FailureAlert) -> None:
+    def send(self, alert: Alert) -> None:
         raise ConnectionRefusedError(f"https://hooks.example/{SENTINEL_DSN}")
 
 
@@ -58,3 +66,19 @@ def test_a_failing_sender_becomes_a_line_with_only_the_error_type():
     line = notify_failure(failed_run(), BrokenSender())
 
     assert line == "alert could not be sent (ConnectionRefusedError)"
+
+
+def test_notify_stale_run_sends_one_name_only_alert_and_reports_nothing():
+    sender = RecordingSender()
+
+    assert notify_stale_run("shop_sync", "prod", sender) is None
+    assert sender.sent == [StaleRunAlert("shop_sync", "prod", STALE_RUN_MESSAGE)]
+    assert STALE_RUN_MESSAGE == "a run left running by a Server crash was marked failed"
+
+
+def test_a_failing_stale_run_sender_becomes_a_line_with_only_the_error_type():
+    line = notify_stale_run("shop_sync", "prod", BrokenSender())
+
+    assert line == "alert could not be sent (ConnectionRefusedError)"
+    assert "SENTINEL" not in line
+    assert "hooks.example" not in line

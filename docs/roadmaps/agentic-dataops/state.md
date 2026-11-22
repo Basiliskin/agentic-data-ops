@@ -23,3 +23,5 @@
 - 2026-11-21 | horizon 10 | completed | 5 phases (MCP drop_branch, accept_schema, project_view, list/read/edit file tools)
 - 2026-11-21 | horizon 11 | planned | 5 phases (Run Log store, Run Logs from CLI/MCP runs + plain .gitignore, read-logs, connection check, test-connection); gate passed (0 blockers, 1 major healed, 1 major accepted)
 - 2026-11-22 | horizon 11 | completed | 5 phases (Run Log store, Run Logs from CLI/MCP runs, read-logs, connection check, test-connection MCP tool)
+- 2026-11-22 | horizon 12 | planned | 3 phases (Server crash recovery: crash E2E, startup sweep + stale-run alert, server-recover at daemon start + run monitoring, E2E on both Warehouses); gate passed (0 blockers, 0 majors)
+- 2026-11-22 | horizon 12 | completed | 3 phases, 1 amendment — Server stale-run recovery: adops server-recover before dagster-daemon, run_monitoring on, one stale-run webhook alert; crash E2E green on Postgres and DuckDB

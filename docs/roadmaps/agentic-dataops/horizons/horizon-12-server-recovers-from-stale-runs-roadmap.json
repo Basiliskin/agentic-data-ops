@@ -1,0 +1,630 @@
+{
+  "task": "Server recovers from runs left STARTED after a crash: add a test that kills the Server mid-run and shows the next scheduled tick is skipped, turn on Dagster run monitoring (plus a startup sweep only if monitoring alone doesn't clear the run), send a webhook alert when a stale run is cleared, and prove it with the Server E2E on both Postgres and DuckDB Warehouses. Keep it to 2–3 phases, before the ADR-0015 Git-based Breaking Change work.",
+  "analysis": {
+    "objective": "Make the Server recover by itself from a Pipeline run left STARTED after a crash. Dagster run monitoring, plus a startup sweep only if monitoring alone does not clear the run, marks the stale run as finished, a sanitized webhook alert reports it, and the next Schedule tick launches instead of being skipped by the skip-overlap rule. This closes the open horizon-7/8 blocker before the ADR-0015 work and serves vision item 7 (a Server that runs Schedules unattended).",
+    "successDefinition": "Done when ALL hold, within 2-3 phases. (1) A reproduction Server E2E case starts a scheduled stage run, kills the Server (daemon/webserver containers) while the run is STARTED, restarts it and asserts the next tick is skipped with SkipReason 'Pipeline <name> is still running'. This must be observed against the unchanged Server config (red first), proving the blocker that is currently marked 'not reproduced'. (2) The generated server/dagster.yaml template turns on run_monitoring, and init/template tests are updated and the wheel-template check still passes (no new template file). (3) After the same kill-and-restart, the stale run moves out of STARTED into a terminal status (FAILURE or CANCELED) with no manual step, and the next Schedule tick launches a run that reaches SUCCESS. A startup sweep run when the Server starts does this (monitoring alone cannot, see discovery), and it clears only runs of that Server's Dagster instance that are left STARTED/STARTING. (4) Exactly one webhook alert per cleared stale run is POSTed to the configured alert webhook, through the existing AlertSender/WebhookAlertSender path. It carries only the Pipeline name, the Environment and a fixed plain-words message: no secrets, no URL, no engine text. A failing or unset webhook never blocks the recovery and prints a sanitized line, as today. (5) The recovery Server E2E passes on both the Postgres and DuckDB Warehouses, each case with its own Dagster database, and the e2e job stays inside its 20-minute CI timeout. (6) Repo gates stay green: 100% line+branch coverage on adops package code, the domain/application purity tests and the no-secret-in-Dagster-storage test. (7) The horizon-8 blocker 'After a Server crash, how should runs left STARTED be cleared' and its horizon-7 twin are marked resolved, and the mechanism chosen (monitoring only, or monitoring plus sweep) is recorded in decisions.md.",
+    "assumptions": [
+      "'Kill the Server' means docker kill (SIGKILL, no graceful shutdown) of the Server's dagster daemon and webserver containers while the Dagster metadata Postgres keeps running. The run worker dies with them because runs execute in-process under the DefaultRunLauncher and in_process_executor (dagster_server.py).",
+      "The existing skip-overlap check in dagster_server._schedule (SkipReason 'is still running') stays as is. Recovery works by moving the stale run out of STARTED, not by loosening the rule.",
+      "Dagster 1.13.30 run_monitoring settings (enabled, start_timeout_seconds, max_resume_run_attempts=0, poll_interval_seconds) are used with short values, so the E2E finishes quickly. Whether the DefaultRunLauncher can health-check a run worker after a full restart is exactly what phase 1 must find out, which is why the startup sweep is conditional.",
+      "The E2E reuses the existing harness: server_image, the per-case create_dagster_database, set_env, add_schedule with an every-minute cron, the demo parametrized over [postgres, duckdb], and the module-scoped stack fixture. A small local HTTP receiver in the test captures the webhook POST.",
+      "A stale-run alert is a new alert kind next to FailureAlert in application/alerts.py, sent through the same AlertSender port. It is triggered from the Server side (a Dagster run-status/failure sensor for monitoring-cleared runs, or the sweep itself), because the existing on_failure alert fires inside the run worker that was killed.",
+      "The Server keeps serving exactly one Environment (stage or prod), and the DuckDB Warehouse lock (flock on a Linux host) is released when the killed process dies, so the next run can take it.",
+      "Scheduled Server runs still write no Run Logs (horizon-11 decision), so recovery is visible through Dagster run status, daemon output and the webhook only.",
+      "confirmed: stale runs are cleared by a startup sweep plus run monitoring, with no max_runtime_seconds cap (Dagster 1.13.30 DefaultRunLauncher has no worker health check)",
+      "confirmed: the sweep runs as `adops server-recover` before dagster-daemon in the compose daemon command, and that command sends the stale-run alert",
+      "confirmed: the E2E keeps a run STARTED by holding the Warehouse lock from the test",
+      "confirmed: only the stale-run alert fires for a crashed run; alert text is fixed and built from Pipeline and Environment names only",
+      "confirmed: run_monitoring values start_timeout_seconds 180, poll_interval_seconds 120, max_resume_run_attempts 0",
+      "confirmed: phase 3 flips the phase-1 test instead of adding a second kill per Warehouse; existing Projects get the fix only by re-init or hand edit"
+    ],
+    "risks": [
+      "Dagster run monitoring may not detect a dead run worker under the DefaultRunLauncher after a full restart, because health checks may be unsupported for that launcher. The run would stay STARTED, the startup sweep becomes mandatory, and it must be built without racing a run the restarted daemon is legitimately launching.",
+      "A startup sweep that marks every STARTED run as failed could kill a real in-flight run if two Server processes share one Dagster database, or if the sweep runs on a code-location reload rather than a true start. It must be tied to Server start and to its own instance.",
+      "Timing flakiness: kill-mid-run needs the run to be STARTED at the kill, and monitoring poll intervals plus every-minute cron ticks can push each case to several minutes. Two Warehouses times reproduce-and-recover cases could approach the 20-minute e2e timeout (it was 357s locally at horizon 8).",
+      "Duplicate or missing alerts: monitoring and the sweep could both clear the same run, or the run-failure path could also fire the ordinary FailureAlert. Exactly-once per stale run needs an explicit rule.",
+      "Secret safety: Dagster's monitoring failure message or the run's tags/config could carry engine or host text into the alert. The alert must be built from names only, and the no-secret-in-Dagster-storage test must still pass.",
+      "DuckDB: a SIGKILLed run may leave the DuckDB file, the .lock file or dlt state half-written in .adops/, so the next tick fails for a different reason than the overlap rule. The E2E must assert SUCCESS, not just that a run launched.",
+      "Root-owned files left by the killed container in .adops/ (open horizon-8 blocker) may interfere with the restarted Server or with test teardown.",
+      "Scope creep into ADR-0015 or retry semantics. A Dagster resume (max_resume_run_attempts>0) would re-run Steps mid-Pipeline against the horizon-7 decision that a retry re-runs the whole Pipeline, so resume must stay off.",
+      "Changing the server/dagster.yaml template affects existing user Projects only after a re-init or manual edit. Existing Servers keep the bug unless the upgrade is documented."
+    ],
+    "outOfScope": [
+      "ADR-0015 Git-based Breaking Change acceptance and its accepted-change record questions: the user placed this horizon before that work.",
+      "Resuming or re-running the interrupted run from the failed Step: the horizon-7 decision is that a retry re-runs the whole Pipeline, and the next Schedule tick is the recovery path.",
+      "Run timeouts for runs that hang while their process is still alive (max_runtime_seconds): the task is about crashed runs, not slow ones.",
+      "Recovery for CLI, MCP or GitHub Actions runs (adops run, run --all in workflows): they are not Dagster-instance Schedule runs and are not affected by the skip-overlap rule.",
+      "Writing Run Logs for scheduled Server runs or crash events: the horizon-11 decision says scheduled Server runs write none.",
+      "New alert channels (email, PagerDuty, Slack app) or alert configuration beyond the existing alert webhook Secret Reference: the existing Slack-compatible webhook is reused.",
+      "Catch-up of every missed tick during downtime: Dagster already launches only the most recent missed tick, and that default is kept.",
+      "Multi-Server or high-availability Dagster (several daemons on one metadata DB): v1 runs one Server per Environment with one run slot.",
+      "An automated migration that edits server/dagster.yaml in already-generated user Projects: only the template and a release note or playbook line change.",
+      "Resolving the other open Server blockers (code-location reload behaviour, runner file ownership, real self-hosted runner validation): they are separate questions not needed to clear stale runs.",
+      "Dagster webserver auth or UI changes for showing cleared runs: Dagster OSS has no per-action permissions, by decision."
+    ],
+    "domainShape": "technical",
+    "domainShapeReason": "The objective is about orchestration machinery (Dagster run monitoring, crash recovery, daemon restart, alert delivery and E2E harness), not a business entity or rule a domain expert would model.",
+    "ubiquitousLanguage": [
+      {
+        "term": "Server",
+        "meaning": "The Docker-composed Dagster daemon + webserver that serves exactly one Environment (stage or prod) and runs Schedules."
+      },
+      {
+        "term": "Schedule tick",
+        "meaning": "One evaluation of a Pipeline's Schedule by the Dagster daemon, which either launches a run or returns a SkipReason."
+      },
+      {
+        "term": "skip-overlap rule",
+        "meaning": "The existing schedule check that skips a tick when a run of the same Pipeline is still STARTED/queued ('Pipeline <name> is still running')."
+      },
+      {
+        "term": "stale run",
+        "meaning": "A Server run left in STARTED (or STARTING) status in the Dagster metadata database after its process died in a crash."
+      },
+      {
+        "term": "run monitoring",
+        "meaning": "Dagster's daemon feature (run_monitoring in server/dagster.yaml) that detects runs whose worker is gone or that never started, and marks them failed."
+      },
+      {
+        "term": "startup sweep",
+        "meaning": "An adops step run once when the Server starts that clears stale runs of its own Dagster instance; built only if run monitoring alone does not clear them."
+      },
+      {
+        "term": "stale-run alert",
+        "meaning": "A sanitized webhook POST, sent through the existing AlertSender/WebhookAlertSender, saying a stale run of a Pipeline in an Environment was cleared."
+      },
+      {
+        "term": "Warehouse",
+        "meaning": "The Postgres or DuckDB target the Pipelines load into; the recovery E2E must pass on both kinds."
+      }
+    ]
+  },
+  "discoveryFindings": [
+    {
+      "area": "server build: dagster.yaml template",
+      "finding": "server/dagster.yaml holds only Postgres storage (DAGSTER_PG_* env vars) and run_coordinator QueuedRunCoordinator max_concurrent_runs 1 (lines 1-20); no run_launcher, run_monitoring or run_retries, so DefaultRunLauncher is used. adops init copies it byte-for-byte via SERVER_CONFIG_FILES (init_command.py:13, 43-49).",
+      "filePath": "src/adops/templates/server/dagster.yaml",
+      "implication": "Turning on monitoring is a run_monitoring block in this one file; no new template file, so the wheel listing (g3) is unchanged unless a file is added."
+    },
+    {
+      "area": "server build: compose services",
+      "finding": "Demo docker-compose.yml dagster_daemon (lines 46-59) and dagster_webserver (61-70): profile server, build ., network_mode host, env_file .env, DAGSTER_HOME=/project/server, bind mount ./:/project, depend on dagster_meta; no healthcheck, no restart policy. Daemon command: dagster-daemon run -w /project/server/workspace.yaml. Scheduled runs: schedule -> QueuedRunCoordinator -> daemon -> DefaultRunLauncher -> run-worker subprocess inside the dagster_daemon container.",
+      "filePath": "src/adops/templates/demo/docker-compose.yml",
+      "implication": "docker kill of dagster_daemon orphans a STARTED run; the test restarts services explicitly with compose up -d --wait --no-build --no-deps."
+    },
+    {
+      "area": "server build: executor and job",
+      "finding": "Each Pipeline is a one-op job run_pipeline with in_process_executor (dagster_server.py:76). Final failure calls on_failure(result) then raises Failure (73-74); retryable failure raises RetryRequested (MAX_RETRIES=3, RETRY_DELAY_SECONDS=300, 31-32, 71-72).",
+      "filePath": "src/adops/infrastructure/dagster_server.py",
+      "implication": "A legitimate run can stay STARTED 15+ minutes across retry waits; a max_runtime_seconds cutoff would kill such runs unless set well above that."
+    },
+    {
+      "area": "dagster version",
+      "finding": "pyproject pins dagster>=1.13.30,<1.14, dagster-postgres>=0.29.30,<0.30, dagster-webserver>=1.13.30,<1.14; uv.lock resolves 1.13.30 / 0.29.30.",
+      "filePath": "pyproject.toml",
+      "implication": "Monitoring behaviour below is read from installed 1.13.30 source."
+    },
+    {
+      "area": "skip-overlap rule",
+      "finding": "_schedule.evaluate queries instance.get_runs(RunsFilter(job_name, statuses=IN_PROGRESS), limit=1) and returns SkipReason('Pipeline <name> is still running') (dagster_server.py:88-95). IN_PROGRESS=[QUEUED, NOT_STARTED, STARTING, STARTED] (33-38). Pinned by tests/unit/infrastructure/test_dagster_server.py:150-190.",
+      "filePath": "src/adops/infrastructure/dagster_server.py",
+      "implication": "Moving the stale run to FAILURE or CANCELED unblocks the next tick with no rule change. The E2E can read skips from tick records (skip_reason) or daemon logs."
+    },
+    {
+      "area": "alerts today",
+      "finding": "application/alerts.py: FailureAlert(pipeline, environment, step, message), AlertSender Protocol send(alert: FailureAlert), failure_alert(result), notify_failure(result, sender) -> str|None returning 'alert could not be sent (<ErrorType>)' instead of raising (9-38). WebhookAlertSender (infrastructure/webhook_alerts.py:17-34) POSTs {text: 'Pipeline X failed in Environment Y at Step Z: msg', **asdict(alert)} (37-42). interface/server.py _on_failure (92-108) prints ALERTS_OFF when unset and reads the URL via project_env inside the run worker.",
+      "filePath": "src/adops/application/alerts.py",
+      "implication": "A stale-run alert needs a new alert type (or AlertSender widened to a union) plus a notify helper with the same never-raise rule; message built only from names."
+    },
+    {
+      "area": "alerts: where on_failure fires",
+      "finding": "on_failure is called only inside the run_pipeline op body (dagster_server.py:73), in the run worker. No run_failure_sensor/run_status_sensor exists in src; build_server_definitions returns Definitions(jobs, schedules) only (line 55). dagster 1.13.30 provides run_failure_sensor/run_status_sensor.",
+      "filePath": "src/adops/infrastructure/dagster_server.py",
+      "implication": "A run marked FAILURE by monitoring or a sweep will NOT alert through the existing path; the alert must come from the Server side (a filtered run_failure_sensor, or the sweep itself)."
+    },
+    {
+      "area": "dagster run monitoring: launcher support",
+      "finding": "DefaultRunLauncher does not override supports_check_run_worker_health or supports_resume_run (base returns False, base.py:94-96, 109-111). monitor_started_run (_daemon/monitoring/run_monitoring.py:113-184) skips the health check and only runs check_run_timeout, which does nothing unless max_runtime_seconds (default 0) or a dagster/max_runtime tag is set. start_timeout_seconds (default 180) applies only to STARTING/NOT_STARTED runs. max_resume_run_attempts>0 fails an invariant with this launcher. Config keys: enabled, start_timeout_seconds, cancel_timeout_seconds, max_runtime_seconds, max_resume_run_attempts, poll_interval_seconds (default 120), cancellation_thread_poll_interval_seconds, free_slots_after_run_end_seconds.",
+      "filePath": ".venv/lib/python3.12/site-packages/dagster/_daemon/monitoring/run_monitoring.py",
+      "implication": "Monitoring alone CANNOT clear a STARTED run whose worker died in a full restart, unless max_runtime_seconds is set (which also caps real long runs). The startup sweep is near-certain; monitoring still clears runs killed while STARTING."
+    },
+    {
+      "area": "conflict: task assumes the sweep is conditional",
+      "finding": "The task makes the startup sweep conditional on monitoring not clearing the run; installed dagster 1.13.30 shows DefaultRunLauncher has no worker health check, so STARTED runs clear only via max_runtime_seconds. load_definitions/defs is rebuilt on every code-server load and webserver reload (server.py:120-123).",
+      "filePath": ".venv/lib/python3.12/site-packages/dagster/_core/launcher/base.py",
+      "implication": "Plan the sweep as near-certain and record why max_runtime_seconds alone is rejected or accepted. The sweep must run on daemon start, not inside defs construction (would race on reloads)."
+    },
+    {
+      "area": "server E2E harness",
+      "finding": "tests/e2e/test_server.py: session server_image fixture (51-71), set_env (80-86), add_schedule (89-90), create_dagster_database (93-95), function-scoped server fixture with own dagster_<hex> DB, ADOPS_ENVIRONMENT=stage, free webserver port, up -d --wait --no-build --no-deps dagster_daemon dagster_webserver (112-134); Server dataclass with stop() and daemon_log_tail() (98-109); scheduled_runs SQL (137-146); wait_for_scheduled_success 240s deadline (149-161); one test test_schedule_launches_a_successful_stage_run (164-172). conftest demo fixture params=[postgres,duckdb] (conftest.py:32-40); module-scoped stack starts shop, warehouse, dagster_meta (16-29).",
+      "filePath": "tests/e2e/test_server.py",
+      "implication": "A new test using the server fixture runs once per Warehouse automatically. Kill via compose kill dagster_daemon dagster_webserver, restart via compose up -d --wait --no-build --no-deps."
+    },
+    {
+      "area": "server E2E duration",
+      "finding": "Server E2E duration is not recorded; whole e2e was ~357s locally at horizon 8. Each case waits up to 60s for an every-minute tick plus the run; CI e2e job timeout-minutes: 20 (ci.yml:61).",
+      "filePath": ".github/workflows/ci.yml",
+      "implication": "Merge reproduction and recovery into one kill per Warehouse where possible, use short poll values, and measure runtime against g4."
+    },
+    {
+      "area": "webhook receiver in tests",
+      "finding": "No E2E webhook receiver exists; a unit-test ThreadingHTTPServer receiver exists in tests/unit/conftest.py:8, 66-77. Demo sets alert_webhook_env: ALERT_WEBHOOK_URL (templates/demo/adops.yaml:5); .env.example ships it empty (line 19). Server containers use network_mode host.",
+      "filePath": "tests/unit/conftest.py",
+      "implication": "The E2E starts a ThreadingHTTPServer on 127.0.0.1:<free port> and set_env(ALERT_WEBHOOK_URL=...) before up; works with host networking on Linux CI."
+    },
+    {
+      "area": "warehouse lock after SIGKILL",
+      "finding": "Postgres advisory lock is session-level pg_try_advisory_lock (warehouse_lock.py:102-111), released when the session ends; DuckDB uses fcntl.flock on <file>.lock (114-142), cleared on process exit. Default wait 30 min (line 19).",
+      "filePath": "src/adops/infrastructure/warehouse_lock.py",
+      "implication": "No lock cleanup step needed; the E2E must still assert SUCCESS of the next run."
+    },
+    {
+      "area": "unit tests pinning server dagster.yaml",
+      "finding": "test_init_command.py::test_server_dagster_instance_runs_one_run_at_a_time_on_postgres (395-405) asserts set(config)=={storage, run_coordinator}; test_every_variable_the_demo_reads_is_in_env_example (245-260) collects env vars from server/dagster.yaml; test_init_command.py:338 pins the daemon command; SERVER_FILES at line 30.",
+      "filePath": "tests/unit/interface/test_init_command.py",
+      "implication": "Update line 402 for run_monitoring and pin its values (literal, not env vars). Changing the daemon command means updating the :338 test."
+    },
+    {
+      "area": "no-secret-in-Dagster-storage test",
+      "finding": "test_dagster_server.py::test_no_secret_reaches_dagster_storage (256-283) runs the job in process under a temp DAGSTER_HOME and asserts no file contains SECRET. tests/unit/interface/test_server.py:38-39 captures build_server_definitions with the exact keyword signature (pipelines, time_zone, run, on_failure).",
+      "filePath": "tests/unit/infrastructure/test_dagster_server.py",
+      "implication": "A new callback or sensor means updating the capture stub and extending the no-secret test to the sweep/alert path."
+    },
+    {
+      "area": "guard g1: ruff",
+      "finding": "ruff check applies to all new src and test code.",
+      "filePath": ".github/workflows/ci.yml",
+      "implication": "Each phase leaves uv run ruff check clean."
+    },
+    {
+      "area": "guard g2: 100% coverage",
+      "finding": "New adops code (stale-run alert, payload change, sweep/sensor, CLI entry) falls under 100% line+branch coverage; E2E does not count.",
+      "filePath": "pyproject.toml",
+      "implication": "Every new branch (webhook unset, send failing, no stale runs, other job) needs a unit test, e.g. an ephemeral DagsterInstance with add_run as at test_dagster_server.py:140."
+    },
+    {
+      "area": "guard g3: wheel template listing",
+      "finding": "CI lists server/Dockerfile, server/workspace.yaml, server/dagster.yaml in the wheel check (ci.yml:42-53).",
+      "filePath": ".github/workflows/ci.yml",
+      "implication": "Editing server/dagster.yaml or a compose command needs no listing change; any new template file must be added to ci.yml and SERVER_CONFIG_FILES/SERVER_FILES."
+    },
+    {
+      "area": "guard g4: Docker E2E 20-minute timeout",
+      "finding": "New tests/e2e/test_server.py cases run in the same 20-minute job as test_demo_sync.py and the existing Server case.",
+      "filePath": "tests/e2e/test_server.py",
+      "implication": "Short monitoring/poll values, one kill per Warehouse, record measured runtime."
+    },
+    {
+      "area": "needs: application purity",
+      "finding": "present: tests/unit/application/test_application_purity.py:21 and tests/unit/domain/test_domain_purity.py:22.",
+      "filePath": "tests/unit/application/test_application_purity.py",
+      "implication": "Stale-run alert type and notify helper live in application/alerts.py without dagster; the Dagster-specific sweep lives in infrastructure/dagster_server.py."
+    },
+    {
+      "area": "needs: Dagster metadata Postgres survives a Server kill",
+      "finding": "present: dagster_meta is a separate compose service in the module-scoped stack; the server fixture starts only daemon and webserver with --no-deps.",
+      "filePath": "tests/e2e/conftest.py",
+      "implication": "Killing the Server containers leaves run state in Postgres, as the reproduction needs."
+    },
+    {
+      "area": "needs: per-case Dagster database and both Warehouses",
+      "finding": "present: server fixture creates dagster_<hex> per case (test_server.py:117-118); demo fixture parametrized over postgres and duckdb (conftest.py:32).",
+      "filePath": "tests/e2e/test_server.py",
+      "implication": "Reuse directly; the sweep is naturally scoped to one instance by DAGSTER_PG_DB."
+    },
+    {
+      "area": "needs: alert webhook setting in the demo",
+      "finding": "present: alert_webhook_env ALERT_WEBHOOK_URL (templates/demo/adops.yaml:5), .env.example:19, URL read via project_env at alert time (server.py:93, 101).",
+      "filePath": "src/adops/interface/server.py",
+      "implication": "The Server-side stale-run alert reads the URL the same way (project_env, not Dagster config)."
+    },
+    {
+      "area": "needs: a way to keep a run STARTED long enough to kill it",
+      "finding": "missing: the demo shop_sync is fast with no slow-down hook; the only waits are the Warehouse lock (up to 30 min) and retry delay.",
+      "filePath": "tests/e2e/demo_project.py",
+      "implication": "The test holds the Warehouse lock itself (pg_advisory_lock with ADVISORY_LOCK_KEY on the stage Warehouse, or flock on the DuckDB .lock file), polls until STARTED, kills, then releases."
+    },
+    {
+      "area": "needs: daemon-start hook for the sweep",
+      "finding": "missing: no sensor in Definitions and no daemon start hook; dagster-daemon runs the sensor daemon by default.",
+      "filePath": "src/adops/infrastructure/dagster_server.py",
+      "implication": "Build a Server-start trigger, e.g. a wrapper in the compose daemon command (adops <sweep> && dagster-daemon run); test_init_command.py:338 pins that command and must be updated."
+    },
+    {
+      "area": "needs: blocker and decision records",
+      "finding": "present: blockers.md horizon-7 'not reproduced' line and horizon-8 'how should runs left STARTED be cleared' line; decisions.md exists.",
+      "filePath": "docs/roadmaps/agentic-dataops/blockers.md",
+      "implication": "Mark both lines resolved and record the chosen mechanism in decisions.md (memory write, not a phase)."
+    },
+    {
+      "area": "needs: root-owned files after a kill",
+      "finding": "unknown: horizon-8 blocker on root-owned .adops/ files is open; the E2E project lives in tmp_path and teardown uses compose down -v.",
+      "filePath": "docs/roadmaps/agentic-dataops/blockers.md",
+      "implication": "The restarted container also runs as root; keep out of scope unless the DuckDB case fails on file ownership."
+    }
+  ],
+  "repoGuards": [
+    {
+      "id": "g1",
+      "mechanism": "ci-gate",
+      "source": ".github/workflows/ci.yml",
+      "trigger": "on pull request / push to main",
+      "effect": "blocks",
+      "enforces": "ruff check (E,F,W,I,B,UP, line length 100) must pass",
+      "paths": [],
+      "command": "uv run ruff check"
+    },
+    {
+      "id": "g2",
+      "mechanism": "ci-gate",
+      "source": ".github/workflows/ci.yml + pyproject.toml [tool.coverage]",
+      "trigger": "on pull request / push to main",
+      "effect": "requires",
+      "enforces": "unit tests pass with 100% line+branch coverage of the adops package (only TYPE_CHECKING excluded)",
+      "paths": [],
+      "command": "uv run pytest tests/unit --cov --cov-report=term-missing"
+    },
+    {
+      "id": "g3",
+      "mechanism": "ci-gate",
+      "source": ".github/workflows/ci.yml",
+      "trigger": "on pull request / push to main",
+      "effect": "requires",
+      "enforces": "every listed Project template file (incl. server/dagster.yaml, server/workspace.yaml, server/Dockerfile) ships in the built wheel; a new template file must be added to the listing",
+      "paths": [
+        "src/adops/templates/**"
+      ],
+      "command": "uv build --wheel && unzip -l dist/*.whl | grep"
+    },
+    {
+      "id": "g4",
+      "mechanism": "ci-gate",
+      "source": ".github/workflows/ci.yml",
+      "trigger": "on pull request / push to main",
+      "effect": "blocks",
+      "enforces": "Docker E2E suite (pytest tests/e2e -m e2e) must pass within the 20-minute job timeout",
+      "paths": [
+        "tests/e2e/**"
+      ],
+      "command": "uv run pytest tests/e2e -m e2e"
+    }
+  ],
+  "requiredMaterials": [],
+  "phases": [
+    {
+      "id": "test-crash-leaves-schedule-blocked",
+      "order": 0,
+      "name": "Test that a Server crash blocks ticks",
+      "goal": "Add a Server end-to-end (E2E) test that runs on both the Postgres and DuckDB Warehouses. It shows today's bug: when the Server is killed while a scheduled run is STARTED, the run stays STARTED after a restart, and the next Schedule tick is skipped with the reason 'Pipeline <name> is still running'.",
+      "rationale": "The open blocker about runs left STARTED after a crash was marked 'not reproduced', so the fix needs proof of the bug first. The CI E2E job has to stay green, so this phase lands as a characterization test: it asserts the broken behaviour seen today. The phase \"Connect sweep to Server start and prove recovery\" reuses its kill-and-restart helper and flips its final assertions to expect recovery, and that flip is what shows the fix works.",
+      "filesAffected": [
+        "tests/e2e/test_server.py"
+      ],
+      "changes": [
+        "Add a helper that keeps a scheduled run in STARTED status by holding the Warehouse lock from the test process. For Postgres, open a session to the stage Warehouse and call pg_advisory_lock with ADVISORY_LOCK_KEY imported from adops.infrastructure.warehouse_lock. For DuckDB, take fcntl.flock on the '<warehouse file>.lock' path next to the DuckDB file in the Project folder. The scheduled run then waits on this lock and stays STARTED.",
+        "Add a helper that polls the per-case Dagster database (reuse the existing scheduled_runs SQL or the run status table) until the Pipeline's run reports STARTED, with a deadline and daemon_log_tail() in the failure message.",
+        "Add a helper that kills the Server with 'docker compose kill dagster_daemon dagster_webserver' (SIGKILL, so no clean shutdown, and the run worker dies with the daemon), then releases the held lock, then restarts with 'docker compose up -d --wait --no-build --no-deps dagster_daemon dagster_webserver'. The dagster_meta service keeps running, so the run state survives the kill.",
+        "Add test_crash_leaves_stale_run_and_skips_next_tick. It uses the existing function-scoped server fixture and add_schedule with an every-minute cron, so the parametrized demo fixture runs it once per Warehouse. It holds the lock, waits for STARTED, kills and restarts, then asserts that the old run is still STARTED and that the next tick record for the Pipeline's schedule has a skip_reason containing 'is still running'. Use one kill per Warehouse.",
+        "Print the case's wall-clock duration (time.monotonic around the test body) so the effect on the 20-minute CI e2e job is visible in the log."
+      ],
+      "boundedContext": "Server E2E harness",
+      "layer": "cross-cutting",
+      "blastRadius": "small",
+      "inputs": [
+        "tests/e2e/test_server.py server fixture, add_schedule, scheduled_runs and daemon_log_tail",
+        "tests/e2e/conftest.py demo fixture parametrized over postgres and duckdb",
+        "ADVISORY_LOCK_KEY and the DuckDB .lock path rule in src/adops/infrastructure/warehouse_lock.py"
+      ],
+      "expectedResult": "tests/e2e/test_server.py::test_crash_leaves_stale_run_and_skips_next_tick passes on both [postgres] and [duckdb] against today's unchanged Server config, and shows a skipped tick with reason 'is still running' after a kill and restart.",
+      "dependsOn": [],
+      "guardNotes": [
+        "g1: new test helpers pass uv run ruff check (line length 100, import order).",
+        "g4: one kill per Warehouse and a reused per-case Dagster database; the measured runtime is printed so the 20-minute e2e job budget can be checked.",
+        "g2: changes only test code, so adops package coverage is unaffected."
+      ],
+      "rubric": [
+        {
+          "id": "stale-state-is-genuinely-dead",
+          "label": "The STARTED run after restart is genuinely stale",
+          "ruleStatement": "After the kill and restart, the run the test checks must be dead (its worker process is gone and the Warehouse lock is released), not still alive and waiting. Otherwise the test proves nothing about crash recovery. 10 = the test asserts the worker is gone and the lock was released before restart; 8 = the lock is released before restart and the kill is SIGKILL on both Dagster services; minScore marks the lowest acceptable result.",
+          "passCriteria": [
+            "In tests/e2e/test_server.py the kill helper calls 'docker compose kill' (SIGKILL) on both dagster_daemon and dagster_webserver, and it does so before releasing the held lock and before 'docker compose up -d --wait --no-build --no-deps'.",
+            "The lock release (pg_advisory_unlock or closing the Postgres session, or releasing the fcntl.flock / closing the file for DuckDB) happens before the restart, so a surviving run worker could have finished. The test still asserts the run is STARTED after restart.",
+            "The assertion reads the run status from the per-case Dagster database after the restart, not a value cached before the kill.",
+            "Running 'uv run pytest tests/e2e/test_server.py -m e2e -k crash' passes for both [postgres] and [duckdb] ids."
+          ],
+          "failureExamples": [
+            "The lock is held through the restart, so the run is really still waiting and 'STARTED' is legitimate rather than stale.",
+            "The kill uses 'docker compose stop' (SIGTERM), so Dagster shuts down cleanly and marks the run itself, and the test passes on behaviour that will not occur in a real crash.",
+            "The STARTED check runs only before the kill, and after the restart the test checks only the tick."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "skip-tick-is-post-restart",
+          "label": "The skipped tick asserted is one after the restart",
+          "ruleStatement": "The skip_reason assertion must target a Schedule tick evaluated after the restart. A tick recorded before the kill must not satisfy it. 10 = the tick is filtered by timestamp after the restart moment and by this Pipeline's schedule, and the reason is matched as 'Pipeline <name> is still running'; 8 = the tick is filtered by restart time and the reason contains 'is still running'.",
+          "passCriteria": [
+            "The test records a restart timestamp and selects the tick record whose timestamp is later than it, for the Pipeline's schedule name.",
+            "The assertion checks that skip_reason contains 'is still running' (ideally the exact 'Pipeline <name> is still running').",
+            "The poll for the tick has a deadline of at least one cron interval plus a margin, and its failure message includes daemon_log_tail() output."
+          ],
+          "failureExamples": [
+            "The test takes the latest tick without a timestamp filter, and a tick skipped before the kill (the held run already blocked ticks) passes the assertion even if the restarted daemon never evaluates the schedule.",
+            "It asserts on the run count staying at one instead of on a tick skip_reason, so a daemon that never restarted also passes."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "lock-and-stack-cleanup",
+          "label": "Lock and Server cleanup on failure",
+          "ruleStatement": "The hold-lock helper and the kill/restart sequence must release their resources even when an assertion or timeout fails mid-test, so the next parametrized case or test is not poisoned. 10 = context managers or finally blocks, and a forced mid-test failure leaves no held advisory lock, open flock fd or killed-but-not-restarted service; 8 = a finally/context manager releases the lock on every path.",
+          "passCriteria": [
+            "The lock helper is a context manager or try/finally: the Postgres session is closed and the DuckDB lock file descriptor is closed on every exit path.",
+            "If the STARTED poll times out, the test still releases the lock and leaves the stack for the fixture teardown; the [duckdb] case runs after a failed [postgres] case without hanging on a held lock.",
+            "'uv run pytest tests/e2e/test_server.py -m e2e' run twice in a row passes both times, so no state leaks between runs."
+          ],
+          "failureExamples": [
+            "The lock is released only on the happy path, so a timeout leaves the advisory lock held and later E2E cases hang until the 20-minute job timeout.",
+            "The flock is taken on a path other than '<warehouse file>.lock' (for example on the .duckdb file itself), so the run does not block and the STARTED wait times out intermittently."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "runtime-budget-visible",
+          "label": "Measured runtime fits the e2e job",
+          "ruleStatement": "The case must print its wall-clock duration per Warehouse, and that duration must leave the 20-minute e2e job room for the rest of the suite. 10 = durations are printed and each case is under 4 minutes; 8 = durations are printed and each case is under 6 minutes, with one kill per Warehouse.",
+          "passCriteria": [
+            "'uv run pytest tests/e2e/test_server.py -m e2e -k crash -s' prints one duration line for each of [postgres] and [duckdb], measured with time.monotonic.",
+            "Each printed duration is under 6 minutes, and the test body has exactly one 'docker compose kill' per case.",
+            "Waits use deadline-bounded polling, not a fixed time.sleep longer than the poll interval."
+          ],
+          "failureExamples": [
+            "The test sleeps a fixed 120 seconds for the next tick instead of polling, which adds minutes per Warehouse and pushes the suite near the 20-minute timeout.",
+            "The duration is printed only for the whole module, so the per-Warehouse cost cannot be seen."
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "If the test is flaky or the tick assertion picks up a pre-kill skip, filter ticks by a recorded restart timestamp and make sure the lock is released in a finally block before 'docker compose up' runs."
+    },
+    {
+      "id": "add-stale-run-sweep-and-alert",
+      "order": 1,
+      "name": "Add startup sweep and stale run alert",
+      "goal": "Add a stale-run alert type and a never-raising notify helper in application/alerts.py, teach WebhookAlertSender to POST it, and add a Dagster function in infrastructure/dagster_server.py that marks this Dagster instance's STARTED/STARTING runs as FAILURE and sends one stale-run alert per cleared run.",
+      "rationale": "Discovery read the installed Dagster 1.13.30 source: its DefaultRunLauncher has no run-worker health check, so Dagster's run monitoring can never clear a run left STARTED after a full restart. The fix is a sweep that runs once when the Server starts. The ordinary failure alert fires inside the run worker that was killed, so the sweep must send its own alert, built only from names so no secret or engine text can leak. The alert type, its webhook payload and the sweep are one small slice across layers: the sweep is their only consumer.",
+      "filesAffected": [
+        "src/adops/application/alerts.py",
+        "src/adops/infrastructure/webhook_alerts.py",
+        "src/adops/infrastructure/dagster_server.py",
+        "tests/unit/application/test_alerts.py",
+        "tests/unit/infrastructure/test_webhook_alerts.py",
+        "tests/unit/infrastructure/test_dagster_server.py"
+      ],
+      "changes": [
+        "In application/alerts.py add a frozen dataclass StaleRunAlert(pipeline, environment, message), with message set to a fixed plain-words sentence such as 'a run left running by a Server crash was marked failed'. Widen the AlertSender Protocol so send accepts FailureAlert | StaleRunAlert. Add notify_stale_run(pipeline, environment, sender) -> str | None, which catches any exception and returns 'alert could not be sent (<ErrorType>)' exactly as notify_failure does. ",
+        "In infrastructure/webhook_alerts.py widen send and payload to accept both alert types. For StaleRunAlert, the text is 'Pipeline X in Environment Y: <message>' plus the asdict fields. Keep the http/https scheme check.",
+        "In infrastructure/dagster_server.py add clear_stale_runs(instance, notify) -> list[str]. It queries instance.get_runs(RunsFilter(statuses=[STARTED, STARTING])), calls instance.report_run_failed(run, message=<fixed plain-words message>) for each run, calls notify(run.job_name) once per cleared run (the job name is the Pipeline name), and returns the cleared Pipeline names. Explain in a docstring that this is safe only before the daemon starts, because runs execute only inside the daemon container (QueuedRunCoordinator with DefaultRunLauncher), so any STARTED run on this instance at that moment is dead.",
+        "Unit-test each branch with an ephemeral DagsterInstance and add_run, as in test_dagster_server.py:140: no stale runs (no alert), one STARTED and one STARTING run (both become FAILURE, two notify calls), SUCCESS and QUEUED runs left untouched, and the Dagster storage holding no SECRET after a sweep (extend or mirror test_no_secret_reaches_dagster_storage).",
+        "Unit-test notify_stale_run on the success path and with a raising sender (it returns the sanitized line and never raises), and test the webhook payload for StaleRunAlert with the existing ThreadingHTTPServer receiver in tests/unit/conftest.py.",
+        "Keep the application purity test green: StaleRunAlert and notify_stale_run import nothing from Dagster or infrastructure."
+      ],
+      "boundedContext": "Server stale-run recovery and alerting",
+      "layer": "cross-cutting",
+      "blastRadius": "medium",
+      "inputs": [
+        "src/adops/application/alerts.py FailureAlert, AlertSender and notify_failure",
+        "src/adops/infrastructure/webhook_alerts.py WebhookAlertSender and payload",
+        "src/adops/infrastructure/dagster_server.py IN_PROGRESS and the RunsFilter pattern"
+      ],
+      "expectedResult": "uv run pytest tests/unit --cov passes at 100% line+branch coverage with new tests showing clear_stale_runs turns STARTED/STARTING runs into FAILURE and sends exactly one StaleRunAlert per cleared run through WebhookAlertSender.",
+      "dependsOn": [],
+      "guardNotes": [
+        "g2: every new branch (no stale runs, sender raises, both alert types in payload, untouched terminal runs) has a unit test, so coverage stays at 100%.",
+        "g1: new code passes ruff."
+      ],
+      "rubric": [
+        {
+          "id": "sweep-status-scope-and-idempotency",
+          "label": "Sweep touches only STARTED/STARTING and is idempotent",
+          "ruleStatement": "clear_stale_runs must turn exactly the STARTED and STARTING runs into FAILURE. It must leave QUEUED, NOT_STARTED, SUCCESS, FAILURE and CANCELED runs untouched, and a second call must be a no-op. 10 = a unit test seeds every DagsterRunStatus and asserts each one's final status, plus a second-call test; 8 = tests cover STARTED, STARTING, QUEUED, SUCCESS and a second call that returns [].",
+          "passCriteria": [
+            "In tests/unit/infrastructure/test_dagster_server.py, a test adds runs in STARTED, STARTING, QUEUED and SUCCESS to an ephemeral DagsterInstance, calls clear_stale_runs and asserts that only the first two are now FAILURE.",
+            "A second clear_stale_runs call on the same instance returns [] and calls notify zero times.",
+            "clear_stale_runs uses instance.report_run_failed (so a run failure event is written), which a test checks through instance.get_run_by_id(...).status == FAILURE.",
+            "'uv run pytest tests/unit/infrastructure/test_dagster_server.py' passes."
+          ],
+          "failureExamples": [
+            "The sweep reuses the existing IN_PROGRESS constant (which includes QUEUED and NOT_STARTED), so queued runs the coordinator would launch after start are failed too.",
+            "The status is updated directly with handle_run_event or SQL instead of report_run_failed, so no failure event is written and the UI shows a run with no end."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "exactly-once-alert-per-cleared-run",
+          "label": "Exactly one alert per cleared run, after the clear",
+          "ruleStatement": "notify must be called once per run actually cleared, with that run's Pipeline name, and only after the run is marked FAILURE. A failing alert must not stop later runs from being cleared. 10 = tests assert call order (FAILURE before notify) and that a raising notify does not stop the remaining runs from being cleared; 8 = tests assert exactly N calls with the right names for N stale runs and zero for none.",
+          "passCriteria": [
+            "A unit test with two stale runs (one STARTED, one STARTING) records notify calls and asserts exactly two calls, with the two job names, in any order.",
+            "A unit test with no stale runs asserts that notify is never called.",
+            "A test where notify raises for the first run asserts the second run still ends FAILURE, or the code documents and tests that notify is always notify_stale_run, which never raises."
+          ],
+          "failureExamples": [
+            "notify is called before report_run_failed, so a raising sender leaves the run STARTED while an alert was already sent, and the next start sends a duplicate.",
+            "Alerts are sent per run but also once per sweep summary, so a single crash produces two webhook POSTs."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "alert-and-storage-carry-no-secret",
+          "label": "No secret or engine text in the alert or Dagster storage",
+          "ruleStatement": "The StaleRunAlert payload, the notify_stale_run return line and the failure message written to Dagster storage must be built only from the Pipeline name, the Environment and fixed text. No webhook URL, exception message or SECRET value may appear. 10 = tests force an exception whose message contains the URL and a SECRET, and assert neither appears in the return line, the payload or the storage dump; 8 = the return line is checked as exactly 'alert could not be sent (<ErrorType>)' and the storage dump has no SECRET.",
+          "passCriteria": [
+            "A unit test makes the sender raise an exception whose message includes the webhook URL. It asserts that notify_stale_run returns exactly 'alert could not be sent (<ExceptionClassName>)' and does not raise.",
+            "A unit test sweeps an instance, then dumps its event log and run storage (mirroring test_no_secret_reaches_dagster_storage) and asserts the test SECRET string is absent.",
+            "The webhook payload test with the ThreadingHTTPServer receiver in tests/unit/conftest.py asserts that the JSON body keys are exactly pipeline, environment, message and text (or the documented set), and that no value contains 'http'."
+          ],
+          "failureExamples": [
+            "notify_stale_run returns f'alert could not be sent ({e})', which leaks the URL carried in a urllib error message.",
+            "The FAILURE message passed to report_run_failed includes str(run.run_config) or tags, which copies resource config into Dagster storage."
+          ],
+          "minScore": 9
+        },
+        {
+          "id": "failure-alert-unchanged",
+          "label": "Existing FailureAlert behaviour is not regressed",
+          "ruleStatement": "Widening AlertSender and WebhookAlertSender to accept StaleRunAlert must leave the FailureAlert payload byte-for-byte the same, and the http/https scheme check must apply to both alert types. 10 = a test pins the FailureAlert JSON body before and after, and a non-http URL is rejected for both types; 8 = the existing FailureAlert payload tests pass unchanged and one StaleRunAlert payload test exists.",
+          "passCriteria": [
+            "The existing FailureAlert tests in tests/unit/infrastructure/test_webhook_alerts.py pass without their expected values being edited (check with git diff on that file: there are no changes to existing assertions).",
+            "A test sends a StaleRunAlert to an 'ftp://' or 'file://' URL and asserts it is rejected with the same error as a FailureAlert.",
+            "'grep -n \"dagster\\|infrastructure\" src/adops/application/alerts.py' returns nothing."
+          ],
+          "failureExamples": [
+            "payload() is rewritten with a shared formatter that changes the FailureAlert 'text' wording, which silently breaks users' existing Slack filters.",
+            "The scheme check sits only in the FailureAlert branch, so StaleRunAlert can POST to a file:// URL."
+          ],
+          "minScore": 8
+        }
+      ],
+      "healerHint": "The most likely miss is reusing IN_PROGRESS (which also fails QUEUED/NOT_STARTED runs) or interpolating the exception text into the sanitized line; filter on exactly STARTED/STARTING and return only type(e).__name__."
+    },
+    {
+      "id": "connect-sweep-to-server-start",
+      "order": 2,
+      "name": "Connect sweep to Server start and prove recovery",
+      "goal": "Add the 'adops server-recover' CLI command. Run it in the generated docker-compose daemon command before dagster-daemon starts, and turn on Dagster run monitoring in the server/dagster.yaml template. Then flip the phase-1 crash E2E so it proves, on both Warehouses, that the stale run goes to FAILURE, exactly one webhook POST arrives, and the next Schedule tick reaches SUCCESS.",
+      "rationale": "The sweep from the phase \"Add startup sweep and stale run alert\" must run exactly once per Server start, never while Dagster builds its definitions, because the definitions are rebuilt on every code reload and a sweep there could fail a live run. Run monitoring is turned on so runs killed while still STARTING are also cleared. The same kill-and-restart E2E that showed the bug now shows the fix on the real Docker Server.",
+      "filesAffected": [
+        "src/adops/interface/recover_command.py",
+        "src/adops/interface/cli.py",
+        "src/adops/templates/server/dagster.yaml",
+        "src/adops/templates/demo/docker-compose.yml",
+        "src/adops/templates/plain/docker-compose.yml",
+        "tests/unit/interface/test_recover_command.py",
+        "tests/unit/interface/test_init_command.py",
+        "tests/e2e/test_server.py",
+        "docs/roadmaps/agentic-dataops/decisions.md",
+        "docs/roadmaps/agentic-dataops/blockers.md"
+      ],
+      "changes": [
+        "Add interface/recover_command.py with server_recover(). It reads DAGSTER_HOME through DagsterInstance.get() and the Environment from ADOPS_ENVIRONMENT, in the same way load_definitions reads os.environ in interface/server.py. It reads the alert webhook Secret Reference from the Project and the URL through project_env at send time, as interface/server.py _on_failure does. It calls clear_stale_runs with a notify that uses notify_stale_run(WebhookAlertSender(url)). It prints ALERTS_OFF when the webhook is unset, prints any sanitized send problem to stderr, prints one line per cleared Pipeline, and always exits 0 so a failing webhook never blocks the daemon from starting; any unexpected error in the sweep itself is caught, printed as a sanitized one-line message, and still exits 0. Register it in cli.py as 'server-recover'.",
+        "In both the demo and the plain docker-compose.yml templates (each has a dagster_daemon service; exec makes dagster-daemon replace sh so compose stop signals reach it), change the daemon command to ['sh', '-c', 'adops server-recover && exec dagster-daemon run -w /project/server/workspace.yaml']. Leave the webserver command unchanged.",
+        "In templates/server/dagster.yaml add a run_monitoring block with literal values: enabled: true, start_timeout_seconds: 180, poll_interval_seconds: 120, max_resume_run_attempts: 0 (required with DefaultRunLauncher, and keeps the rule that a retry re-runs the whole Pipeline). Do not add max_runtime_seconds, because a real run can wait through three 300-second retry delays.",
+        "Update test_init_command.py: the daemon command assertion at line 338, and test_server_dagster_instance_runs_one_run_at_a_time_on_postgres (around line 402) to expect {storage, run_coordinator, run_monitoring} and pin the monitoring values. Add test_recover_command.py covering webhook unset, webhook set with a stale run (one POST to the unit ThreadingHTTPServer receiver), a send failure (sanitized stderr line, exit 0) and no stale runs.",
+        "In tests/e2e/test_server.py rename the phase-1 test to test_server_recovers_from_crash_and_next_tick_succeeds and keep its hold/kill/restart helpers. Before 'up', start a ThreadingHTTPServer receiver on 127.0.0.1:<free port> and set_env ALERT_WEBHOOK_URL to it (the Server uses host networking). After the restart, assert that the old run is FAILURE, that exactly one POST arrived with the Pipeline name and Environment 'stage' and no URL or engine text, and that the next tick's run reaches SUCCESS through wait_for_scheduled_success. Print the measured runtime per Warehouse.",
+        "Bookkeeping inside this phase: mark the horizon-7 'not reproduced' blocker and the horizon-8 'how should runs left STARTED be cleared' blocker resolved in docs/roadmaps/agentic-dataops/blockers.md. Record in decisions.md that the mechanism is monitoring on plus a startup sweep, why max_runtime_seconds was rejected, and that existing Projects must re-init or hand-edit server/dagster.yaml and docker-compose.yml to get the fix."
+      ],
+      "boundedContext": "Server start-up and Server E2E",
+      "layer": "cross-cutting",
+      "blastRadius": "medium",
+      "inputs": [
+        "clear_stale_runs and notify_stale_run from phase add-stale-run-sweep-and-alert",
+        "kill/hold/restart helpers from phase test-crash-leaves-schedule-blocked",
+        "project_env and ALERTS_OFF usage in src/adops/interface/server.py"
+      ],
+      "expectedResult": "tests/e2e/test_server.py::test_server_recovers_from_crash_and_next_tick_succeeds passes on both [postgres] and [duckdb]: the stale run is FAILURE, one webhook POST is captured, and the next scheduled run is SUCCESS, inside the 20-minute e2e job.",
+      "dependsOn": [
+        "test-crash-leaves-schedule-blocked",
+        "add-stale-run-sweep-and-alert"
+      ],
+      "guardNotes": [
+        "g2: recover_command.py is adops package code, so test_recover_command.py must cover every branch (unset webhook, send failure, no stale runs) to keep 100% coverage.",
+        "g3: no new template file is added (only server/dagster.yaml and the two compose files are edited), so the wheel listing in ci.yml stays unchanged.",
+        "g4: the flipped test replaces the reproduction test instead of adding a second kill per Warehouse, and the measured runtime is checked against the 20-minute timeout.",
+        "g1: new code passes ruff."
+      ],
+      "compensation": "Revert the compose daemon command and the run_monitoring block in the templates. Existing generated Projects are untouched because the templates are copied only at init.",
+      "rubric": [
+        {
+          "id": "sweep-runs-only-at-daemon-start",
+          "label": "Sweep runs once per Server start, never in definitions",
+          "ruleStatement": "server_recover must be called only from the daemon container's start command, before dagster-daemon. It must never be called from the definitions-loading path, which re-runs on every code reload. 10 = a grep shows the only call site is the CLI and a unit test proves load_definitions never calls clear_stale_runs; 8 = both compose templates chain it before dagster-daemon, and nothing under interface/server.py or the definitions module imports it.",
+          "passCriteria": [
+            "'grep -n \"server-recover\" src/adops/templates/demo/docker-compose.yml src/adops/templates/plain/docker-compose.yml' shows it only in the dagster_daemon command, ahead of 'dagster-daemon run', and not in the dagster_webserver command.",
+            "'grep -rn \"clear_stale_runs\\|server_recover\" src/adops' shows call sites only in interface/recover_command.py and the cli.py registration, not in interface/server.py or any load_definitions path.",
+            "test_init_command.py asserts the exact daemon command list for a generated Project."
+          ],
+          "failureExamples": [
+            "The sweep is placed in load_definitions 'for convenience', so every workspace reload fails the live run of a legitimately long Pipeline.",
+            "Only the demo template is updated, so Projects created with the plain template never recover."
+          ],
+          "minScore": 9
+        },
+        {
+          "id": "recover-never-blocks-daemon",
+          "label": "server-recover always exits 0",
+          "ruleStatement": "Because the compose command uses '&&', any non-zero exit from 'adops server-recover' would stop dagster-daemon from starting. Every failure path (unset webhook, failing webhook, an unexpected sweep error) must print a sanitized line and exit 0. 10 = a unit test for each path asserts exit code 0 and stderr text with no URL or traceback; 8 = webhook-unset, send-failure and unexpected-error paths each assert exit 0.",
+          "passCriteria": [
+            "tests/unit/interface/test_recover_command.py invokes the CLI (CliRunner or a subprocess) with the webhook unset and asserts exit 0 and the ALERTS_OFF line.",
+            "A test points the webhook at a closed port and asserts exit 0, a sanitized stderr line with no URL, and that the stale run is still FAILURE.",
+            "A test makes clear_stale_runs raise (for example with a monkeypatched exception that contains a secret string) and asserts exit 0, one stderr line, no 'Traceback' and no secret string."
+          ],
+          "failureExamples": [
+            "Unexpected errors are caught but re-raised as typer.Exit(1), so a temporarily unreachable dagster_meta stops the daemon from ever starting.",
+            "The catch-all prints str(exc), which leaks a Postgres DSN with its password from a connection error."
+          ],
+          "minScore": 9
+        },
+        {
+          "id": "monitoring-config-safe-values",
+          "label": "Run monitoring values are safe for long and retrying runs",
+          "ruleStatement": "server/dagster.yaml must turn on run_monitoring with max_resume_run_attempts: 0 and no max_runtime_seconds, so legitimate runs that sit STARTED through three 300-second retry waits are never killed. 10 = the generated dagster.yaml loads into a real DagsterInstance in a test and the monitoring settings are read back from it; 8 = the test pins the exact keys {storage, run_coordinator, run_monitoring} and the four monitoring values.",
+          "passCriteria": [
+            "In a generated Project, server/dagster.yaml has run_monitoring with enabled: true, start_timeout_seconds: 180, poll_interval_seconds: 120 and max_resume_run_attempts: 0, and 'grep max_runtime_seconds' finds nothing.",
+            "test_server_dagster_instance_runs_one_run_at_a_time_on_postgres asserts the top-level keys are exactly {storage, run_coordinator, run_monitoring}.",
+            "No webhook URL or secret is written into dagster.yaml or the compose environment: 'grep -rn ALERT_WEBHOOK src/adops/templates' shows only a Secret Reference name, never a URL."
+          ],
+          "failureExamples": [
+            "max_resume_run_attempts is set above 0, which Dagster rejects with DefaultRunLauncher and which would resume a run partway through, breaking the rule that a retry re-runs the whole Pipeline.",
+            "max_runtime_seconds: 600 is added 'as a safety net', and that kills a valid run waiting through its retry delays."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "e2e-proves-recovery-end-to-end",
+          "label": "The flipped E2E proves FAILURE, one POST and a successful next tick",
+          "ruleStatement": "On both Warehouses, the renamed E2E must prove all three outcomes against the real Docker Server: the stale run is FAILURE, exactly one webhook POST arrives with the Pipeline and Environment 'stage' and no URL or engine text, and a run launched by a tick after the restart reaches SUCCESS. 10 = all three outcomes are asserted, the POST count is rechecked after the SUCCESS run (still exactly one), and each case's runtime is printed under 5 minutes; 8 = all three outcomes are asserted on both [postgres] and [duckdb].",
+          "passCriteria": [
+            "'uv run pytest tests/e2e/test_server.py -m e2e -k recovers -s' passes for [postgres] and [duckdb] and prints a duration per case.",
+            "The test asserts that the receiver recorded exactly one POST, re-checked after wait_for_scheduled_success, so a second sweep or a duplicate alert would fail it. The POST body contains the Pipeline name and 'stage', and does not contain '127.0.0.1' or 'Traceback'.",
+            "The SUCCESS run asserted is a different run_id from the stale run, and it was created after the restart timestamp.",
+            "The old characterization test name no longer exists ('grep -n test_crash_leaves_stale_run_and_skips_next_tick tests/e2e' returns nothing), so there is still only one kill per Warehouse."
+          ],
+          "failureExamples": [
+            "The test asserts SUCCESS on 'the latest run' without checking its run_id, and it passes because a run from before the kill is picked up.",
+            "The POST count is checked only right after restart. Run monitoring later fails the same run again and sends a second alert, and the test does not notice.",
+            "The receiver is only reachable because host networking happens to work on the developer's machine; CI on Linux is the authority."
+          ],
+          "minScore": 8
+        }
+      ],
+      "healerHint": "If the daemon never comes up or the E2E times out, check that 'adops server-recover' exits 0 on every path (the '&&' chain blocks the daemon otherwise) and that the webhook receiver is reachable through host networking on the Linux CI runner."
+    }
+  ],
+  "successCriteria": [
+    "Done when ALL hold, within 2-3 phases. (1) A reproduction Server E2E case starts a scheduled stage run, kills the Server (daemon/webserver containers) while the run is STARTED, restarts it and asserts the next tick is skipped with SkipReason 'Pipeline <name> is still running'. This must be observed against the unchanged Server config (red first), proving the blocker that is currently marked 'not reproduced'. (2) The generated server/dagster.yaml template turns on run_monitoring, and init/template tests are updated and the wheel-template check still passes (no new template file). (3) After the same kill-and-restart, the stale run moves out of STARTED into a terminal status (FAILURE or CANCELED) with no manual step, and the next Schedule tick launches a run that reaches SUCCESS. A startup sweep run when the Server starts does this (monitoring alone cannot, see discovery), and it clears only runs of that Server's Dagster instance that are left STARTED/STARTING. (4) Exactly one webhook alert per cleared stale run is POSTed to the configured alert webhook, through the existing AlertSender/WebhookAlertSender path. It carries only the Pipeline name, the Environment and a fixed plain-words message: no secrets, no URL, no engine text. A failing or unset webhook never blocks the recovery and prints a sanitized line, as today. (5) The recovery Server E2E passes on both the Postgres and DuckDB Warehouses, each case with its own Dagster database, and the e2e job stays inside its 20-minute CI timeout. (6) Repo gates stay green: 100% line+branch coverage on adops package code, the domain/application purity tests and the no-secret-in-Dagster-storage test. (7) The horizon-8 blocker 'After a Server crash, how should runs left STARTED be cleared' and its horizon-7 twin are marked resolved, and the mechanism chosen (monitoring only, or monitoring plus sweep) is recorded in decisions.md.",
+    "Test that a Server crash blocks ticks: tests/e2e/test_server.py::test_crash_leaves_stale_run_and_skips_next_tick passes on both [postgres] and [duckdb] against today's unchanged Server config, and shows a skipped tick with reason 'is still running' after a kill and restart.",
+    "Add startup sweep and stale run alert: uv run pytest tests/unit --cov passes at 100% line+branch coverage with new tests showing clear_stale_runs turns STARTED/STARTING runs into FAILURE and sends exactly one StaleRunAlert per cleared run through WebhookAlertSender.",
+    "Connect sweep to Server start and prove recovery: tests/e2e/test_server.py::test_server_recovers_from_crash_and_next_tick_succeeds passes on both [postgres] and [duckdb]: the stale run is FAILURE, one webhook POST is captured, and the next scheduled run is SUCCESS, inside the 20-minute e2e job."
+  ],
+  "deferred": [
+    "ADR-0015 Git-based Breaking Change acceptance and its accepted-change record questions: the user placed this horizon before that work.",
+    "Resuming or re-running the interrupted run from the failed Step: the horizon-7 decision is that a retry re-runs the whole Pipeline, and the next Schedule tick is the recovery path.",
+    "Run timeouts for runs that hang while their process is still alive (max_runtime_seconds): the task is about crashed runs, not slow ones.",
+    "Recovery for CLI, MCP or GitHub Actions runs (adops run, run --all in workflows): they are not Dagster-instance Schedule runs and are not affected by the skip-overlap rule.",
+    "Writing Run Logs for scheduled Server runs or crash events: the horizon-11 decision says scheduled Server runs write none.",
+    "New alert channels (email, PagerDuty, Slack app) or alert configuration beyond the existing alert webhook Secret Reference: the existing Slack-compatible webhook is reused.",
+    "Catch-up of every missed tick during downtime: Dagster already launches only the most recent missed tick, and that default is kept.",
+    "Multi-Server or high-availability Dagster (several daemons on one metadata DB): v1 runs one Server per Environment with one run slot.",
+    "An automated migration that edits server/dagster.yaml in already-generated user Projects: only the template and a release note or playbook line change.",
+    "Resolving the other open Server blockers (code-location reload behaviour, runner file ownership, real self-hosted runner validation): they are separate questions not needed to clear stale runs.",
+    "Dagster webserver auth or UI changes for showing cleared runs: Dagster OSS has no per-action permissions, by decision.",
+    "A Dagster run_failure_sensor that alerts when run monitoring (not the sweep) clears a run stuck in STARTING while the daemon is alive: YAGNI gate 1 (no current need). The startup sweep already clears STARTING runs on restart, and a hang with a live daemon is not the crash case in this task.",
+    "A max_runtime_seconds cap or a dagster/max_runtime tag to time out hung runs: out of scope (slow runs, not crashed ones), and it would kill real runs that wait through 3x300s retry delays.",
+    "Keeping both a reproduction E2E case and a separate recovery E2E case on each Warehouse: YAGNI gate 2 (it doubles the kill/restart cost against the 20-minute e2e budget). The single test is flipped instead.",
+    "An automated migration of server/dagster.yaml and docker-compose.yml in already-generated user Projects: out of scope by analysis. A decisions.md line covers it.",
+    "Cleaning root-owned .adops/ files left by the killed container: YAGNI gate 1 (it is a separate open blocker and not needed unless the DuckDB case fails on file ownership)."
+  ],
+  "revision": 0
+}
