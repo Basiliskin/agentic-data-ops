@@ -1,4 +1,4 @@
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -148,11 +148,14 @@ class ReverseSync(Protocol):
 
 @runtime_checkable
 class SchemaSnapshotStore(Protocol):
-    """Keeps each Source table's last accepted shape in the Warehouse; it never judges a change."""
+    """Keeps each Source table's last accepted shape in the Warehouse, and the ids of the
+    accepted-change records the Environment has applied; it never judges a change."""
 
     def load(
         self, warehouse: ResolvedWarehouse, pipeline: str, source: str, table: str
     ) -> TableShape | None: ...
+
+    def applied_record_ids(self, warehouse: ResolvedWarehouse) -> frozenset[str]: ...
 
     def save(
         self,
@@ -161,7 +164,11 @@ class SchemaSnapshotStore(Protocol):
         source: str,
         table: str,
         shape: TableShape,
-    ) -> None: ...
+        *,
+        applied_record_ids: Sequence[str] = (),
+    ) -> None:
+        """Store the shape and the record ids atomically: both are saved, or neither is."""
+        ...
 
 
 @runtime_checkable
@@ -219,6 +226,7 @@ class StepReport:
     error: str | None = None
     preview: ReverseSyncPreview | None = None
     retryable: bool = False
+    notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -226,6 +234,7 @@ class StepOutcome:
     checks: tuple[CheckResult, ...]
     rows_loaded: Mapping[str, int]
     preview: ReverseSyncPreview | None = None
+    notes: tuple[str, ...] = ()
 
 
 class StepTask(Protocol):

@@ -37,6 +37,7 @@ DBT_CHECKS = (
 )
 ORPHAN_CUSTOMER_ID = "999"
 REVERSE_SYNC = "reverse_sync_customer_stats"
+STAGE_RECORD = "2026-03-15-shop_sync-orders"
 REVERSE_SYNC_CHECKS = (
     "target_columns_exist",
     "key_unique",
@@ -268,6 +269,13 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
     assert_no_secret_or_row_value(output, env)
     assert counts(demo) == before_halt
 
+    code, output = adops_run(project, *RUN, "--env", "stage")
+
+    assert code == 1, output
+    assert "Breaking Change in orders: customer_id dropped" in output
+    assert "add an accepted-change record for orders to the PR" in output
+    assert_no_secret_or_row_value(output, env)
+
     code, output = adops_run(project, "accept-schema", "shop_sync", "orders")
 
     assert code == 0, output
@@ -283,6 +291,23 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
     assert_transform_passed(output)
     assert_no_secret_or_row_value(output, env)
     assert counts(demo) == {"customers": 20, "orders": 103}
+
+    accepted = project / "pipelines" / "accepted"
+    accepted.mkdir()
+    (accepted / f"{STAGE_RECORD}.yaml").write_text(
+        "pipeline: shop_sync\ntable: orders\nchanges: [customer_id dropped]\n"
+    )
+
+    code, output = adops_run(project, *RUN, "--env", "stage")
+
+    assert code == 0, output
+    assert f"  Applied accepted-change record {STAGE_RECORD} in stage" in output.splitlines()
+    assert_no_secret_or_row_value(output, env)
+
+    code, output = adops_run(project, *RUN, "--env", "stage")
+
+    assert code == 0, output
+    assert "Applied accepted-change record" not in output
 
     shop(env, "UPDATE customers SET email = NULL WHERE id = 7")
 

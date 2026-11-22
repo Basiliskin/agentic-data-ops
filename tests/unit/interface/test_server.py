@@ -144,7 +144,7 @@ def test_a_scheduled_run_holds_the_environments_warehouse_lock(
 ):
     passed = RunResult("shop_sync", "stage", (StepReport("sync_shop", StepStatus.PASSED),))
 
-    def run_pipeline(*_):
+    def run_pipeline(*_, **__):
         locks.mark("work")
         return passed
 

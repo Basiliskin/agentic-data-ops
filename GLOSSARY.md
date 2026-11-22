@@ -67,8 +67,12 @@ A Sync that reads the Source database's own change log, so it also captures dele
 _Avoid_: replication, streaming sync
 
 **Breaking Change**:
-A change to a Source table's shape (renamed or dropped column, changed type) since the last successful run. It halts the whole Sync Step before any table loads, and every later Step, until resolved. An added column is not a Breaking Change.
+A change to a Source table's shape (renamed or dropped column, changed type) since the last successful run. It halts the whole Sync Step before any table loads, and every later Step, until resolved. In dev it is resolved by running `accept-schema` by hand; in stage, prod and Branch Environments, by a committed Accepted-change record. An added column is not a Breaking Change.
 _Avoid_: schema drift (covers harmless changes too), schema error
+
+**Accepted-change record**:
+A YAML file in `pipelines/accepted/`, committed through Git, that names one Pipeline table and the Breaking Changes accepted for it, written as `<column> dropped` or `<column> retyped (<from> -> <to>)`. Its id is the file name. Each Environment applies a record at most once, and records are never removed.
+_Avoid_: schema approval, migration, waiver
 
 **Transform**:
 Turning Warehouse data into new tables using dbt models and their tests.

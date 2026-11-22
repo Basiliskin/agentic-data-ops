@@ -651,6 +651,19 @@ async def test_validate_returns_the_problems_of_a_failing_pipeline(project, seam
     assert_nothing_touched(seams, locks)
 
 
+async def test_validate_returns_the_problems_of_a_bad_accepted_change_record(project, seams, locks):
+    accepted = project / "pipelines" / "accepted"
+    accepted.mkdir()
+    (accepted / "r1.yaml").write_text("pipeline: nope\ntable: orders\nchanges: [id dropped]\n")
+
+    result = await validate_tool(project)
+
+    reply = result.structuredContent
+    assert reply["valid"] is False
+    assert reply["problems"] == ["pipelines/accepted/r1.yaml: pipeline: no Pipeline with this name"]
+    assert_nothing_touched(seams, locks)
+
+
 async def test_validate_names_a_missing_pipeline(project, seams, locks):
     result = await validate_tool(project, pipeline="nope")
 

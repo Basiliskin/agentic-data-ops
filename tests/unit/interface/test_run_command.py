@@ -34,10 +34,12 @@ from adops.application.run_pipeline import (
     StepFingerprinting,
     current_fingerprints,
 )
+from adops.domain.accepted_change_record import AcceptedChangeRecord
 from adops.domain.branch_environment import SchemaLayout
 from adops.domain.checks import LoadFacts, SourceFacts
+from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import load_pipeline
-from adops.domain.pipeline import SyncStep
+from adops.domain.pipeline import SyncStep, SyncTable
 from adops.domain.reverse_sync import ReverseSyncStep
 from adops.domain.reverse_sync_diff import Diff, Row
 from adops.domain.schema_snapshot import TableShape
@@ -105,15 +107,28 @@ class FakeSync:
     missing_tables: set[str] = field(default_factory=set)
     sync_error: Exception | None = None
     sources: list[ResolvedConnection] = field(default_factory=list)
+    column_types: dict[str, dict[str, str]] = field(default_factory=dict)
+    made_nullable: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
 
     def preflight(self, step: SyncStep, source: ResolvedConnection) -> Mapping[str, SourceFacts]:
         self.sources.append(source)
         return {
             table.name: SourceFacts(
-                table_exists=table.name not in self.missing_tables, columns=COLUMNS[table.name]
+                table_exists=table.name not in self.missing_tables,
+                columns=COLUMNS[table.name],
+                column_types=self.column_types.get(table.name, {}),
             )
             for table in step.tables
         }
+
+    def make_columns_nullable(
+        self,
+        step: SyncStep,
+        table: SyncTable,
+        warehouse: ResolvedWarehouse,
+        columns: tuple[str, ...],
+    ) -> None:
+        self.made_nullable.append((table.name, tuple(columns)))
 
     def sync(
         self, step: SyncStep, source: ResolvedConnection, warehouse: ResolvedConnection
@@ -160,11 +175,15 @@ def sync(monkeypatch):
 @dataclass
 class InMemorySnapshotStore:
     shapes: dict[tuple[str, str, str], TableShape] = field(default_factory=dict)
+    applied: set[str] = field(default_factory=set)
 
     def load(
         self, warehouse: ResolvedConnection, pipeline: str, source: str, table: str
     ) -> TableShape | None:
         return self.shapes.get((pipeline, source, table))
+
+    def applied_record_ids(self, warehouse: ResolvedConnection) -> frozenset[str]:
+        return frozenset(self.applied)
 
     def save(
         self,
@@ -173,8 +192,11 @@ class InMemorySnapshotStore:
         source: str,
         table: str,
         shape: TableShape,
+        *,
+        applied_record_ids: tuple[str, ...] = (),
     ) -> None:
         self.shapes[(pipeline, source, table)] = shape
+        self.applied.update(applied_record_ids)
 
 
 @pytest.fixture(autouse=True)
@@ -457,7 +479,7 @@ def test_run_passes_the_project_snapshot_store_to_the_pipeline(project, monkeypa
         built_for.append(project_dir)
         return sentinel
 
-    def capture(*args: object) -> RunResult:
+    def capture(*args: object, **kwargs: object) -> RunResult:
         received.append(args[5])
         return RunResult("shop_sync", "dev", ())
 
@@ -474,7 +496,7 @@ def test_run_passes_the_built_clock_to_the_pipeline(project, monkeypatch):
     clock = SystemClock()
     received: list[object] = []
 
-    def capture(*args: object) -> RunResult:
+    def capture(*args: object, **kwargs: object) -> RunResult:
         received.append(args[6])
         return RunResult("shop_sync", "dev", ())
 
@@ -496,7 +518,7 @@ def test_run_passes_the_transform_built_for_the_project_to_the_pipeline(project,
         built.append(FakeTransform())
         return built[-1]
 
-    def capture(*args: object) -> RunResult:
+    def capture(*args: object, **kwargs: object) -> RunResult:
         received.append(args[8])
         return RunResult("shop_sync", "dev", ())
 
@@ -517,7 +539,7 @@ def test_run_passes_the_reverse_sync_built_for_the_project_to_the_pipeline(proje
         built.append(FakeReverseSync())
         return built[-1]
 
-    def capture(*args: object) -> RunResult:
+    def capture(*args: object, **kwargs: object) -> RunResult:
         received.append(args[9])
         return RunResult("shop_sync", "dev", ())
 
@@ -1215,7 +1237,7 @@ def test_run_passes_fingerprinting_for_the_project_to_the_pipeline(
 ):
     received: list[object] = []
 
-    def capture(*args: object) -> RunResult:
+    def capture(*args: object, **kwargs: object) -> RunResult:
         received.append(args[10])
         return RunResult("shop_sync", "dev", ())
 
@@ -1786,3 +1808,191 @@ def test_a_clock_failure_returns_the_run_result_unchanged(project, monkeypatch):
 
     assert result.succeeded
     assert run_log_texts(project) == []
+
+
+def test_a_step_prints_each_applied_record_under_its_status_line():
+    passed = StepReport(
+        "sync_shop",
+        StepStatus.PASSED,
+        notes=("Applied accepted-change record r1 in stage",),
+    )
+
+    lines = run_command.result_lines(RunResult("shop_sync", "stage", (passed,)))
+
+    assert lines[:2] == [
+        "step sync_shop: passed",
+        "  Applied accepted-change record r1 in stage",
+    ]
+
+
+ORDERS_BEFORE = {"id": "bigint", "updated_at": "timestamp", "customer_id": "bigint"}
+ORDERS_AFTER = {"id": "bigint", "updated_at": "timestamp"}
+ACCEPT_ORDERS_DROP = """
+pipeline: shop_sync
+table: orders
+changes: [customer_id dropped]
+"""
+
+
+def write_record(project: Path, name: str, text: str = ACCEPT_ORDERS_DROP) -> None:
+    folder = project / "pipelines" / "accepted"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_text(text)
+
+
+def test_pipeline_files_ignore_accepted_change_records(project):
+    write_record(project, "x.yaml")
+
+    files = run_command.pipeline_files(project)
+
+    assert [path.name for path in files] == ["shop_sync.yaml"]
+
+
+def test_a_project_without_records_loads_none(project):
+    assert run_command.load_project_records(project) == ()
+
+
+def test_records_load_in_file_name_order_with_the_file_stem_as_id(project):
+    write_record(project, "2026-x-orders.yaml")
+    write_record(project, "2026-a-orders.yaml")
+    write_record(project, "notes.md", "not a record")
+
+    records = run_command.load_project_records(project)
+
+    assert [record.id for record in records] == ["2026-a-orders", "2026-x-orders"]
+    assert records[0].pipeline == "shop_sync" and records[0].table == "orders"
+
+
+def test_a_malformed_record_names_its_file_and_hides_its_values(project):
+    text = f"pipeline: shop_sync\ntable: orders\nchanges: [{SENTINEL}]\n"
+    write_record(project, "bad.yaml", text)
+
+    with pytest.raises(PipelineValidationError) as raised:
+        run_command.load_project_records(project)
+
+    [problem] = raised.value.problems
+    assert problem.startswith("pipelines/accepted/bad.yaml: changes[0]:")
+    assert SENTINEL not in problem
+
+
+def test_a_record_file_ending_in_yml_is_refused_by_name(project):
+    write_record(project, "r1.yml")
+
+    with pytest.raises(PipelineValidationError) as raised:
+        run_command.load_project_records(project)
+
+    assert raised.value.problems == ("pipelines/accepted/r1.yml: a record file must end in .yaml",)
+
+
+@pytest.mark.usefixtures("sync", "orchestrator")
+def test_a_malformed_record_fails_the_run_cleanly(project):
+    write_record(project, "bad.yaml", "pipeline: [")
+
+    result = invoke(project)
+
+    assert_clean_failure(result)
+    assert result.output.startswith("pipelines/accepted/bad.yaml: ")
+
+
+def test_a_record_file_leaves_every_step_fingerprint_unchanged(project, branch_project):
+    before = stage_fingerprints(project, BRANCH_PIPELINE)
+
+    write_record(project, "r1.yaml")
+
+    assert stage_fingerprints(project, BRANCH_PIPELINE) == before
+
+
+def test_a_record_file_leaves_an_unchanged_branch_fully_deferred(
+    project, branch_project, fingerprint_store
+):
+    stage_ran(project, fingerprint_store, BRANCH_PIPELINE)
+    write_record(project, "r1.yaml")
+
+    result = invoke(project, "--branch", "feat")
+
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines()[:3] == [
+        "step sync_shop: deferred to stage",
+        "step transform_shop: deferred to stage",
+        "step push_stats: deferred to stage",
+    ]
+
+
+def test_records_are_loaded_inside_the_warehouse_lock(project, branch_project, lock, monkeypatch):
+    real = run_command.load_project_records
+
+    def marked(project_dir: Path) -> tuple[AcceptedChangeRecord, ...]:
+        lock.mark("records")
+        return real(project_dir)
+
+    monkeypatch.setattr(run_command, "load_project_records", marked)
+
+    stage = invoke(project, "--env", "stage")
+
+    assert stage.exit_code == 0, stage.output
+    assert lock.events == [("enter", "stage"), ("records",), ("exit", "stage")]
+
+
+def test_branch_records_are_loaded_inside_stages_warehouse_lock(
+    project, branch_project, fingerprint_store, lock, monkeypatch
+):
+    real = run_command.load_project_records
+
+    def marked(project_dir: Path) -> tuple[AcceptedChangeRecord, ...]:
+        lock.mark("records")
+        return real(project_dir)
+
+    monkeypatch.setattr(run_command, "load_project_records", marked)
+    stage_ran(project, fingerprint_store, BRANCH_PIPELINE)
+
+    result = invoke(project, "--branch", "feat")
+
+    assert result.exit_code == 0, result.output
+    assert lock.events == [("enter", "stage"), ("records",), ("exit", "stage")]
+
+
+def test_stage_applies_a_covering_record_once(project, branch_project, sync, snapshot_store):
+    sync.column_types = {"orders": ORDERS_BEFORE}
+    assert invoke(project, "--env", "stage").exit_code == 0
+    sync.column_types = {"orders": ORDERS_AFTER}
+
+    halted = invoke(project, "--env", "stage")
+
+    assert halted.exit_code == 1
+    assert "Breaking Change in orders: customer_id dropped" in halted.output
+    assert "add an accepted-change record for orders to the PR" in halted.output
+
+    write_record(project, "r1.yaml")
+    applied = invoke(project, "--env", "stage")
+
+    assert applied.exit_code == 0, applied.output
+    assert "  Applied accepted-change record r1 in stage" in applied.output.splitlines()
+    assert sync.made_nullable == [("orders", ("customer_id",))]
+    assert snapshot_store.applied == {"r1"}
+
+    again = invoke(project, "--env", "stage")
+
+    assert again.exit_code == 0, again.output
+    assert "Applied accepted-change record" not in again.output
+
+
+def test_a_halted_branch_passes_once_a_covering_record_is_added(
+    project, branch_project, sync, fingerprint_store, snapshot_store
+):
+    edited = BRANCH_PIPELINE.replace("mode: full_refresh", "mode: incremental\n        cursor: x")
+    stage_ran(project, fingerprint_store, edited)
+    sync.column_types = {"orders": ORDERS_BEFORE}
+    assert invoke(project, "--branch", "feat").exit_code == 0
+    sync.column_types = {"orders": ORDERS_AFTER}
+
+    halted = invoke(project, "--branch", "feat")
+
+    assert halted.exit_code == 1
+    assert "Breaking Change in orders: customer_id dropped" in halted.output
+
+    write_record(project, "r1.yaml")
+    passed = invoke(project, "--branch", "feat")
+
+    assert passed.exit_code == 0, passed.output
+    assert "  Applied accepted-change record r1 in br_feat" in passed.output.splitlines()
+    assert (project / "pipelines" / "shop_sync.yaml").read_text() == BRANCH_PIPELINE

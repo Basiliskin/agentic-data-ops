@@ -46,6 +46,7 @@ from adops.application.secrets import (
     resolve_warehouse,
     secret_references,
 )
+from adops.domain.accepted_change_record import AcceptedChangeRecord, load_accepted_record
 from adops.domain.branch_environment import (
     STAGE,
     SchemaLayout,
@@ -71,6 +72,7 @@ from adops.interface import project_secrets
 
 SETTINGS_FILE = Path("adops.yaml")
 PIPELINES_DIR = Path("pipelines")
+ACCEPTED_RECORDS_DIR = "accepted"
 DOTENV_FILE = ".env"
 DAGSTER_FILE = "dagster.yaml"
 
@@ -264,6 +266,36 @@ def pipeline_files(project: Path) -> list[Path]:
     return sorted((project / PIPELINES_DIR).glob("*.yaml"))
 
 
+def accepted_record_files(project: Path) -> list[Path]:
+    """pipelines/accepted/*.yaml in name order; each file's stem is its record id."""
+    return sorted((project / PIPELINES_DIR / ACCEPTED_RECORDS_DIR).glob("*.yaml"))
+
+
+def load_project_records(project: Path) -> tuple[AcceptedChangeRecord, ...]:
+    """The Project's accepted-change records; none when pipelines/accepted/ does not exist."""
+    folder = project / PIPELINES_DIR / ACCEPTED_RECORDS_DIR
+    misnamed = sorted(folder.glob("*.yml"))
+    if misnamed:
+        raise PipelineValidationError(
+            [f"{_relative(project, path)}: a record file must end in .yaml" for path in misnamed]
+        )
+    return tuple(_load_record(project, path) for path in accepted_record_files(project))
+
+
+def _load_record(project: Path, path: Path) -> AcceptedChangeRecord:
+    relative = _relative(project, path)
+    try:
+        return load_accepted_record(path.stem, _read(project, Path(relative)))
+    except PipelineValidationError as error:
+        raise PipelineValidationError(
+            [f"{relative}: {problem}" for problem in error.problems]
+        ) from None
+
+
+def _relative(project: Path, path: Path) -> str:
+    return path.relative_to(project).as_posix()
+
+
 def _run_one(project: Path, pipeline: str, env: str, branch: str | None) -> None:
     try:
         result = run_project(project, pipeline, env, branch)
@@ -393,6 +425,7 @@ def run_in_environment(
             build_transform(project, kind),
             build_reverse_sync(project, environment, kind),
             _fingerprinting(project, environment, kind, warehouse),
+            records=load_project_records(project),
         )
 
     return _holding_lock(
@@ -464,6 +497,7 @@ def _run_branch_locked(
         StepReverseSyncs(reverse_syncs),
         fingerprinting,
         plan,
+        records=load_project_records(project),
     )
 
 
@@ -564,6 +598,7 @@ def result_output(result: RunResult) -> list[OutputLine]:
             continue
         status = f"step {step.name}: {step.status}" + (f" — {rows}" if rows else "")
         lines.append(OutputLine(status))
+        lines += (OutputLine(f"  {note}") for note in step.notes)
         lines += (
             OutputLine(f"  check {check.table} {check.check}: {check.status}")
             for check in step.checks

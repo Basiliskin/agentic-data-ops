@@ -1,42 +1,39 @@
-# Planning Brief — horizon 10 (written by horizon 9 PLAN, 2026-11-21)
+# Planning Brief — horizon 14 (written by horizon 13 PLAN, 2026-11-22)
 
 ## Recommended scope
-Finish the remaining vision item-7 MCP tools on top of the horizon-9 server. The drop-branch, accept-schema (dev only), project-view and list/read/edit-file tools follow this horizon's pattern: one synchronous tool per phase that calls existing code (drop_project_branch, accept_project_schema, loaders plus a small secret_reference_status helper, a resolve_project_file check on top of the pure path rule), sits behind the same guard and error mapping, and has its own refusal and leak tests. That suits a cheap `plan --like 9` horizon, with phases 5 and 6 from stage3-phases.json lifted almost as written. Run logs plus read-logs, and test-connection, need new ports and adapters (a run-log writer using the Clock port, called from run_project, which changes CLI and E2E behaviour; a connection-check port with a psycopg adapter). Plan them as a separate horizon or a clearly split second half. Settle read_file secret handling and dbt/-edit safety before the file tools ship. Keep stdio-only transport, the dev/branch allow-list and the open Promotion/ADR-0015 blockers as stated.
+Close the record loop that h13 left half-done. Make the Breaking Change lookup a read-only step that both accept-schema and runs can use. Make adops accept-schema (CLI and the dev-only MCP tool) write the pipelines/accepted/ record file in dev. Turn --env stage|prod into read-only, record-only commands, which closes the known gap where they still write those Warehouses. Add the CLI-only accept-schema --branch <name> under stage's Warehouse lock as the first phase, as already decided. Extend the demo E2E so stage halts, dev writes the record, stage applies it once and a second run does not apply it again. Finish with the ADR-0015/0014 text and the decisions.md supersessions. Pull in the Breaking Change Assistant skill (or the #14 skills set) only if the planner judges it fits under the phase ceiling. Otherwise leave the skills as the following horizon, now unblocked by a stable record format.
 
 ## Unknowns
-- Does horizon 9 land as planned? The next horizon builds on mcp_server.py's guard helper, error mapping and mcp_harness.assert_no_secret. Check their real names and signatures before reusing them.
-- drop_project_branch takes stage's Warehouse lock but has no lock_timeout path. Can it fail fast like run/preview without changing the CLI's 30-minute wait?
-- accept_project_schema takes no Warehouse lock. Is it safe for the Assistant to accept a dev schema while a dev run is going on, or does the MCP tool need a lock?
-- Run-log identity is undefined: what <run> is (timestamp, run id, pipeline name), retention and pruning, and whether runs that fail before a RunResult exists (refusal, MissingSecretError) write a log at all.
-- read_file can return a literal password a user typed into adops.yaml or dbt/. Should read/list responses go through secret redaction, refuse the file, or return it as is?
-- Can dbt/ contain a profiles.yml or other connection config, so that edit under dbt/ redirects dev to stage/prod data and the adops.yaml shared-connection rule never sees it?
-- What does test-connection mean for a DuckDB Warehouse, and for a Branch Environment, which would open stage's Warehouse and stage's operational Reverse Sync targets?
-- Claude Code's real MCP tool-call timeout versus how long a dev or Branch run takes. Fail-fast covers the lock wait only, not long dlt/dbt runs.
+- Does sync.preflight for stage/prod build or touch anything that writes, such as dlt local state in .adops/dlt/<env> or dataset creation? If it does, find_table_changes is not truly read-only for --env stage|prod.
+- Did h13 settle on the parenthesised BreakingChange.message wording ('<col> retyped (<from> -> <to>)') for record files? The analysis draft used a form without parens. Check the shipped phase 0 before writing dump/halt text.
+- Is a UTC-timestamp record id (<ts>-<pipeline>-<table>) unique enough? Two accept-schema runs in the same second, or on two machines, could collide. Nothing yet says what happens if the target file already exists.
+- When dev accept-schema finds changes that an existing unapplied record already covers, should it write a second, duplicate record? No rule exists yet.
+- With fresh Branch baselines and deferred Sync Steps, how often will a PR's record actually be exercised in its Branch before merge? Is the extended E2E enough proof?
+- Does the 20-minute e2e budget (g4) still have room for the extra stage runs in test_demo_incremental_breaking_change_and_missing_table on both Postgres and DuckDB?
 
 ## Research
-- Read the finished horizon-9 code: src/adops/interface/mcp_server.py, tests/unit/interface/mcp_harness.py and src/adops/domain/assistant_access.py, to get the tool, guard and error-mapping template a plan --like horizon would copy.
-- Read stage3-phases.json phases 5 (project-file-tools) and 6 (project-view-tool). They are already specified in detail and can be lifted almost unchanged.
-- Find out how Path.resolve() and case-insensitive APFS treat `.ENV`, `Pipelines/` and symlinked parents, so the path rule's post-resolve recheck is proven against real filesystem behaviour.
-- Check whether dbt_transform.py generates profiles at run time or reads them from dbt/, which decides whether dbt/ edits are a connection-redirect hole.
-- Find every connect point (warehouse_lock._connect, postgres_reverse_sync._connected, DltSync.preflight) and its fixed sanitized message, to shape a connection-check port without driver text.
-- Look at how Dagster/dbt/dlt output is silenced today (dlt_sync.py:41, dbt_transform.py:143-150, dagster_orchestrator) so a run-log writer logs only RunResult-derived text, never engine text.
+- Read the h13 code as it shipped, not the plan: AcceptedChangeRecord, cover(), the SchemaSnapshotStore applied_record_ids/save contract, load_project_records, ACCEPTED_RECORDS_DIR and the halt-message wording.
+- Read drop-branch's lock and name handling (stage_branch_name, SchemaLayout.for_branch, _holding_lock on STAGE). It is the model for accept-schema --branch.
+- Trace sync.preflight and build_sync/build_snapshot_store in run_command.py to see what an --env stage|prod read-only path must avoid building.
+- Read the decisions.md lines to supersede: h2 line ~10 (accepted only via accept-schema --env) and h6 line ~39 (--branch is a known gap). Also read ADR-0015 Consequences and ADR-0014's stale 'horizon 8' pointer.
+- Read MAP.md candidate #14 (six Assistant skills) to judge whether the Breaking Change skill could ship in the same horizon once record writing exists.
 
 ## Decisions needed
-- One template horizon for the four reuse tools (drop-branch, accept-schema, project-view, file tools) and a separate horizon for run logs, read-logs and test-connection, or one mixed horizon.
-- Secret handling for read_file contents: redact known secret values, refuse, or return the raw text.
-- May edit change the stage/prod Environment blocks in adops.yaml, or only dev's block? Promotion and Git review are the only other safeguard.
-- Run-log format and lifecycle: file naming, what goes in it, retention, and whether CLI runs log by default (this changes existing CLI behaviour and E2E).
-- Whether drop-branch and accept-schema through MCP fail fast on a held lock like run/preview, and whether accept-schema gains a lock at all.
-- Whether open blockers (Promotion hardening, STARTED-run cleanup, ADR-0015 accepted-change records, accept-schema --branch) keep waiting behind the MCP tools or get scheduled next.
+- Does accept-schema --branch use the same Breaking Change detection and dropped-column NOT NULL relaxation as dev (sharing accept_schema), or only overwrite the Branch snapshot?
+- Does dev accept-schema (CLI and MCP) start taking dev's Warehouse lock? Today it takes none (h10 decision), while --branch will take stage's lock.
+- What does accept-schema --env stage|prod do when that Environment has no previous snapshot or sees no Breaking Change? Error, plain message, or point to a hand-written record?
+- Collision policy for record ids and files: refuse, add a suffix, or overwrite. Also whether accept-schema should skip writing when an unapplied record already covers the changes.
+- Horizon scope: only the deferred accept-schema work (orders 5-6 plus --branch), or also the Breaking Change skill (or all six skills) from MAP candidate #14 now that the record format is fixed?
+- Shape of the MCP AcceptedSchemaReply change: an optional record_path, plus how a 'dev saw no Breaking Change' result is reported (field or distinct reply).
 
 ## Artifacts to inspect
-- src/adops/interface/mcp_server.py (horizon-9 tool and guard template)
-- tests/unit/interface/mcp_harness.py (secret-leak harness every new tool must pass)
-- src/adops/domain/assistant_access.py (Environment allow-list; target for allowed_project_path)
-- src/adops/interface/drop_branch_command.py and src/adops/application/drop_branch.py (drop_prefix match, stage lock)
-- src/adops/interface/accept_schema_command.py (accept_project_schema and its error mapping at lines 26-36)
-- src/adops/application/secrets.py (secret_references, resolve_secret_references; home for secret_reference_status)
-- src/adops/interface/run_command.py (run_project, project_env, _scoped_environ; where a run-log hook would go)
-- src/adops/infrastructure/warehouse_lock.py, postgres_reverse_sync.py, dlt_sync.py (connect points for test-connection)
-- src/adops/infrastructure/dbt_transform.py (dbt profile and connection origin, which decides whether dbt/ edits are safe)
-- src/adops/templates/plain/ (no gitignore yet; needed before .adops/logs exists) and .github/workflows/ci.yml wheel list
+- src/adops/application/accept_schema.py (accept_schema, AcceptedSchema; split into find_table_changes)
+- src/adops/interface/accept_schema_command.py (accept_project_schema, --env handling; add --branch and record writing)
+- src/adops/interface/mcp_server.py:142-149,229-241,296-309 (accept_schema tool, refuse_branch_schema_acceptance, AcceptedSchemaReply)
+- tests/unit/interface/test_accept_schema_command.py:154,268,317-345 (tests that assert --env stage writes the Warehouse; must be rewritten)
+- tests/unit/interface/test_mcp_server.py:1044-1142 (accept_schema MCP tests)
+- tests/e2e/test_demo_sync.py:145,255-283 (Breaking Change demo scenario to extend)
+- src/adops/domain/accepted_change_record.py and src/adops/application/run_pipeline.py (h13 record type, cover(), shared relaxation, halt text)
+- src/adops/infrastructure/warehouse_lock.py and src/adops/application/drop_branch.py (lock pattern for --branch)
+- src/adops/interface/run_command.py:113-116,241,436-489,569-572 (store/sync factories, --env/--branch exclusion, Branch layout and name)
+- docs/adr/0015-breaking-changes-accepted-through-git.md, docs/adr/0014-*.md, docs/roadmaps/agentic-dataops/decisions.md, GLOSSARY.md

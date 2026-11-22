@@ -85,3 +85,14 @@
 - 2026-11-22 | horizon 12 | The startup sweep fails only STARTED/STARTING runs of its own Dagster DB and sends one name-only stale-run alert per run; it never runs in load_definitions — user choice
 - 2026-11-22 | horizon 12 | The crash E2E keeps a scheduled run STARTED by holding the Warehouse lock from the test, then kills the Server with docker compose kill — user choice
 - 2026-11-22 | horizon 12 | Existing Projects get stale-run recovery only by re-running adops init or hand-editing server/dagster.yaml (run_monitoring) and the dagster_daemon command (adops server-recover && exec dagster-daemon run)
+- 2026-11-22 | horizon 13 | An accepted-change record lists the accepted dropped/retyped changes of one Pipeline table in BreakingChange.message wording — user choice; works when prod's Source differs from dev's
+- 2026-11-22 | horizon 13 | A Breaking Change not covered by an unapplied record halts the Step naming only uncovered changes, and nothing is applied — user choice
+- 2026-11-22 | horizon 13 | Each Environment stores applied record ids in _adops_applied_records in its own adops schema, saved with the snapshot in one transaction; a record applies at most once per Environment — user choice
+- 2026-11-22 | horizon 13 | Records live in pipelines/accepted/<id>.yaml (id = file stem), are never read as Pipelines and never change Step Fingerprints — user choice
+- 2026-11-22 | horizon 13 | Accepted-change records are kept forever; nothing removes them — user choice, applied ids make them inert
+- 2026-11-22 | horizon 13 | Branch Environments apply records like stage; dev never applies records (dev accepts by hand) — user choice; resolves the unattended PR Branch Breaking Change question
+- 2026-11-22 | horizon 13 | A Breaking Change is accepted only by a committed accepted-change record (stage/prod/Branch) or accept-schema by hand (dev/Branch), never automatically; supersedes the horizon-2 'only — see horizon-13 roadmap.md
+- 2026-11-22 | horizon 13 | accept-schema in dev (CLI and dev-only MCP tool) writes the record from dev's view; hand-written YAML checked by adops validate is the fallback — user choice; MCP accept_schema stays dev only
+- 2026-11-22 | horizon 13 | accept-schema --env stage|prod reads that Environment's snapshot and Source read-only and writes only the record file — user choice; until horizon 14 it still writes directly (accepted gap)
+- 2026-11-22 | horizon 13 | accept-schema --branch <name> is added for hand use, CLI only, under stage's Warehouse lock — user choice; closes the horizon-6 gap, scheduled for horizon 14
+- 2026-11-22 | horizon 13 | The Step result (CLI output and Run Log) names each accepted-change record a run applied — user choice, so a stale record silently accepting a later change is visible

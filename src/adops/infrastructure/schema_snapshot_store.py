@@ -1,6 +1,7 @@
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,13 @@ from adops.infrastructure.dlt_sync import (
 )
 
 SNAPSHOT_TABLE = "_adops_schema_snapshots"
+APPLIED_RECORDS_TABLE = "_adops_applied_records"
+
+
+@dataclass(frozen=True)
+class _Tables:
+    snapshots: str
+    applied_records: str
 
 
 class WarehouseSnapshotStore:
@@ -39,9 +47,9 @@ class WarehouseSnapshotStore:
     def load(
         self, warehouse: ResolvedWarehouse, pipeline: str, source: str, table: str
     ) -> TableShape | None:
-        with self._client(warehouse) as (client, qualified):
+        with self._client(warehouse) as (client, tables):
             rows = client.execute_sql(
-                f"SELECT shape_json FROM {qualified} "
+                f"SELECT shape_json FROM {tables.snapshots} "
                 "WHERE pipeline = %s AND source = %s AND table_name = %s",
                 pipeline,
                 source,
@@ -51,6 +59,11 @@ class WarehouseSnapshotStore:
             return None
         return TableShape(json.loads(rows[0][0]))
 
+    def applied_record_ids(self, warehouse: ResolvedWarehouse) -> frozenset[str]:
+        with self._client(warehouse) as (client, tables):
+            rows = client.execute_sql(f"SELECT record_id FROM {tables.applied_records}")
+        return frozenset(row[0] for row in rows or ())
+
     def save(
         self,
         warehouse: ResolvedWarehouse,
@@ -58,26 +71,39 @@ class WarehouseSnapshotStore:
         source: str,
         table: str,
         shape: TableShape,
+        *,
+        applied_record_ids: Sequence[str] = (),
     ) -> None:
         shape_json = json.dumps(dict(shape.columns), sort_keys=True)
-        with self._client(warehouse) as (client, qualified), client.begin_transaction():
+        with self._client(warehouse) as (client, tables), client.begin_transaction():
             client.execute_sql(
-                f"DELETE FROM {qualified} WHERE pipeline = %s AND source = %s AND table_name = %s",
+                f"DELETE FROM {tables.snapshots} "
+                "WHERE pipeline = %s AND source = %s AND table_name = %s",
                 pipeline,
                 source,
                 table,
             )
             client.execute_sql(
-                f"INSERT INTO {qualified} (pipeline, source, table_name, shape_json) "
+                f"INSERT INTO {tables.snapshots} (pipeline, source, table_name, shape_json) "
                 "VALUES (%s, %s, %s, %s)",
                 pipeline,
                 source,
                 table,
                 shape_json,
             )
+            for record_id in applied_record_ids:
+                client.execute_sql(
+                    f"INSERT INTO {tables.applied_records} (record_id, pipeline, table_name) "
+                    "VALUES (%s, %s, %s)",
+                    record_id,
+                    pipeline,
+                    table,
+                )
 
     @contextmanager
-    def _client(self, warehouse: ResolvedWarehouse) -> Iterator[tuple[SqlClientBase[Any], str]]:
+    def _client(
+        self, warehouse: ResolvedWarehouse
+    ) -> Iterator[tuple[SqlClientBase[Any], _Tables]]:
         pipeline = dlt.pipeline(
             pipeline_name="adops_schema_snapshots",
             pipelines_dir=str(self._pipelines_dir),
@@ -92,11 +118,19 @@ class WarehouseSnapshotStore:
         with warehouse_client(pipeline) as client:
             if not client.has_dataset():
                 client.create_dataset()
-            qualified = client.make_qualified_table_name(SNAPSHOT_TABLE)
+            tables = _Tables(
+                snapshots=client.make_qualified_table_name(SNAPSHOT_TABLE),
+                applied_records=client.make_qualified_table_name(APPLIED_RECORDS_TABLE),
+            )
             client.execute_sql(
-                f"CREATE TABLE IF NOT EXISTS {qualified} ("
+                f"CREATE TABLE IF NOT EXISTS {tables.snapshots} ("
                 "pipeline TEXT NOT NULL, source TEXT NOT NULL, table_name TEXT NOT NULL, "
                 "shape_json TEXT NOT NULL, "
                 "recorded_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP)"
             )
-            yield client, qualified
+            client.execute_sql(
+                f"CREATE TABLE IF NOT EXISTS {tables.applied_records} ("
+                "record_id TEXT PRIMARY KEY, pipeline TEXT NOT NULL, table_name TEXT NOT NULL, "
+                "applied_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+            )
+            yield client, tables

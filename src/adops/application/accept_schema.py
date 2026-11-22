@@ -2,7 +2,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from adops.application.ports import SchemaSnapshotStore, Sync
-from adops.application.run_pipeline import StepError, pick_environment
+from adops.application.run_pipeline import StepError, pick_environment, relax_dropped_columns
 from adops.application.secrets import (
     resolve_connection,
     resolve_secret_references,
@@ -12,7 +12,7 @@ from adops.application.secrets import (
 from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import ensure_sources_defined, load_pipeline, load_project_settings
 from adops.domain.pipeline import Pipeline, SyncStep
-from adops.domain.schema_snapshot import BreakingChangeKind, TableShape, find_breaking_changes
+from adops.domain.schema_snapshot import TableShape, find_breaking_changes
 
 
 @dataclass(frozen=True)
@@ -54,23 +54,10 @@ def accept_schema(
     shape = TableShape(facts.column_types)
     warehouse = resolve_warehouse(environment.warehouse, secrets)
     previous = snapshot_store.load(warehouse, pipeline.name, step.source, table)
-    dropped = _dropped_columns(previous, shape)
-    if dropped:
-        # Loaded rows no longer carry these columns, so a NOT NULL copied from the Source would
-        # reject every new row.
-        sync.make_columns_nullable(step, step.tables[0], warehouse, dropped)
+    changes = () if previous is None else find_breaking_changes(previous, shape)
+    dropped = relax_dropped_columns(sync, step, step.tables[0], warehouse, changes)
     snapshot_store.save(warehouse, pipeline.name, step.source, table, shape)
     return AcceptedSchema(pipeline.name, environment_name, step.name, table, shape, dropped)
-
-
-def _dropped_columns(previous: TableShape | None, current: TableShape) -> tuple[str, ...]:
-    if previous is None:
-        return ()
-    return tuple(
-        change.column
-        for change in find_breaking_changes(previous, current)
-        if change.kind is BreakingChangeKind.DROPPED
-    )
 
 
 def _only_step_with(pipeline: Pipeline, table: str) -> SyncStep:

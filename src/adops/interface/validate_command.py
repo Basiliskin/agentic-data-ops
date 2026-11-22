@@ -5,6 +5,7 @@ from typing import Annotated
 
 import typer
 
+from adops.domain.accepted_change_record import AcceptedChangeRecord, load_accepted_record
 from adops.domain.environment import ProjectSettings
 from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import (
@@ -16,6 +17,7 @@ from adops.domain.loader import (
 from adops.domain.pipeline import Pipeline, SyncStep
 from adops.domain.reverse_sync import ReverseSyncStep
 from adops.domain.transform import TransformStep
+from adops.interface.run_command import ACCEPTED_RECORDS_DIR, accepted_record_files
 
 SETTINGS_FILE = "adops.yaml"
 PIPELINES_DIR = "pipelines"
@@ -57,16 +59,66 @@ def validate(
 def validate_project(project: Path, pipeline: str | None) -> Report:
     report = Report(problems=[], skipped=[], schedules=[])
     settings = _load(project, Path(SETTINGS_FILE), load_project_settings, report)
+    pipelines: dict[str, Pipeline] = {}
+    unloadable: set[str] = set()
     for relative in _pipeline_files(project, pipeline):
         loaded = _load(project, relative, load_pipeline, report)
         if loaded is None:
+            unloadable.add(relative.stem)
             continue
+        pipelines[loaded.name] = loaded
         if settings is not None:
             _check_connections(relative, loaded, settings, report)
             report.schedules.append(_schedule_line(loaded, settings.timezone))
         _check_dbt_projects(project, relative, loaded, report)
         report.skipped.extend(_skipped_checks(loaded))
+    _check_records(project, pipelines, _cross_checked(pipeline, unloadable), report)
     return report
+
+
+def _check_records(
+    project: Path,
+    pipelines: dict[str, Pipeline],
+    cross_checked: Callable[[str], bool],
+    report: Report,
+) -> None:
+    """Check pipelines/accepted/ offline: parse every record, cross-check the ones picked.
+
+    A record's id is its file name, so ids are unique by construction and need no check.
+    """
+    folder = Path(PIPELINES_DIR) / ACCEPTED_RECORDS_DIR
+    report.problems.extend(
+        f"{folder / path.name}: a record file must end in .yaml"
+        for path in sorted((project / folder).glob("*.yml"))
+    )
+    for path in accepted_record_files(project):
+        relative = folder / path.name
+        record = _load(project, relative, _record_loader(path.stem), report)
+        if record is not None and cross_checked(record.pipeline):
+            report.problems.extend(
+                f"{relative}: {problem}"
+                for problem in _record_problems(record, pipelines.get(record.pipeline))
+            )
+
+
+def _cross_checked(pipeline: str | None, unloadable: set[str]) -> Callable[[str], bool]:
+    """A record of a Pipeline that failed to load is not cross-checked: its own error stands."""
+    return lambda name: name not in unloadable and pipeline in (None, name)
+
+
+def _record_loader(record_id: str) -> Callable[[str], AcceptedChangeRecord]:
+    return lambda text: load_accepted_record(record_id, text)
+
+
+def _record_problems(record: AcceptedChangeRecord, pipeline: Pipeline | None) -> list[str]:
+    if pipeline is None:
+        return ["pipeline: no Pipeline with this name"]
+    synced = {
+        table.name for step in pipeline.steps if isinstance(step, SyncStep) for table in step.tables
+    }
+    if record.table not in synced:
+        return ["table: no Sync Step of this Pipeline loads a table with this name"]
+    return []
 
 
 def _pipeline_files(project: Path, pipeline: str | None) -> list[Path]:

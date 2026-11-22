@@ -4,7 +4,7 @@ import pytest
 from typer.testing import CliRunner
 
 from adops.infrastructure import dbt_transform
-from adops.interface import cli, run_command
+from adops.interface import cli, run_command, validate_command
 
 runner = CliRunner()
 
@@ -491,3 +491,177 @@ def test_a_bad_time_zone_is_reported_against_adops_yaml_without_its_value(projec
         "adops.yaml: timezone: not a known time zone; use an IANA name such as Europe/Berlin or UTC"
     ]
     assert "SENTINEL_tz" not in result.output
+
+
+RECORDED_PIPELINE = (
+    pipeline_yaml("a", table_yaml("orders"))
+    + "  - type: reverse_sync\n    name: push\n    model: customers\n    target: crm\n"
+    "    target_table: customers\n    key: id\n    mapping: {n: n}\n"
+)
+
+
+RECORDED_SETTINGS = SETTINGS + CRM_TARGET
+UNKNOWN_TABLE = "table: no Sync Step of this Pipeline loads a table with this name"
+
+
+def record_yaml(pipeline="a", table="orders", changes="[customer_id dropped]"):
+    return f"pipeline: {pipeline}\ntable: {table}\nchanges: {changes}\n"
+
+
+def write_record(project, record_id, text):
+    folder = project / "pipelines" / "accepted"
+    folder.mkdir(exist_ok=True)
+    (folder / f"{record_id}.yaml").write_text(text)
+
+
+@pytest.fixture
+def recorded(project):
+    (project / "adops.yaml").write_text(RECORDED_SETTINGS)
+    write_pipeline(project, "a", RECORDED_PIPELINE)
+    return project
+
+
+def record_problems(project, pipeline=None):
+    report = validate_command.validate_project(project, pipeline)
+    return [line for line in report.problems if line.startswith("pipelines/accepted/")]
+
+
+def test_a_valid_record_gives_no_problem(recorded, no_network):
+    write_record(
+        recorded, "r1", record_yaml(changes="[customer_id dropped, amount retyped (int -> text)]")
+    )
+
+    assert validate_command.validate_project(recorded, None).problems == []
+
+
+def test_a_record_with_bad_yaml_is_named(recorded):
+    write_record(recorded, "r1", "pipeline: [a\n")
+
+    problems = record_problems(recorded)
+
+    assert len(problems) == 1
+    assert problems[0].startswith("pipelines/accepted/r1.yaml: ")
+
+
+def test_a_record_for_an_unknown_pipeline_is_named(recorded):
+    write_record(recorded, "r1", record_yaml(pipeline="nope"))
+
+    assert record_problems(recorded) == [
+        "pipelines/accepted/r1.yaml: pipeline: no Pipeline with this name"
+    ]
+
+
+def test_a_record_table_no_sync_step_loads_is_unknown(recorded):
+    write_record(recorded, "r1", record_yaml(table="ordrs"))
+
+    assert record_problems(recorded) == [f"pipelines/accepted/r1.yaml: {UNKNOWN_TABLE}"]
+
+
+def test_a_record_table_only_a_reverse_sync_step_names_is_unknown(recorded):
+    write_record(recorded, "r1", record_yaml(table="customers"))
+
+    assert record_problems(recorded) == [f"pipelines/accepted/r1.yaml: {UNKNOWN_TABLE}"]
+
+
+def test_a_record_with_no_changes_is_named(recorded):
+    write_record(recorded, "r1", record_yaml(changes="[]"))
+
+    problems = record_problems(recorded)
+
+    assert len(problems) == 1
+    assert problems[0].startswith("pipelines/accepted/r1.yaml: changes: ")
+
+
+def test_a_malformed_change_is_named_without_echoing_it(recorded):
+    write_record(recorded, "r1", record_yaml(changes=f"[customer_id dropped, {SENTINEL} removed]"))
+
+    problems = record_problems(recorded)
+
+    assert problems == [
+        "pipelines/accepted/r1.yaml: changes[1]: must read '<column> dropped' or "
+        "'<column> retyped (<from> -> <to>)'"
+    ]
+    assert SENTINEL not in "\n".join(validate_command.validate_project(recorded, None).problems)
+
+
+def test_a_record_with_an_unknown_field_does_not_echo_its_value(recorded):
+    write_record(recorded, "r1", record_yaml() + f"note: {SENTINEL}\n")
+
+    problems = record_problems(recorded)
+
+    assert problems and all(p.startswith("pipelines/accepted/r1.yaml: ") for p in problems)
+    assert SENTINEL not in "\n".join(problems)
+
+
+def test_every_bad_record_is_reported_in_one_run(recorded):
+    write_record(recorded, "r1", record_yaml(pipeline="nope"))
+    write_record(recorded, "r2", record_yaml(changes="[]"))
+
+    problems = record_problems(recorded)
+
+    assert [line.split(":")[0] for line in problems] == [
+        "pipelines/accepted/r1.yaml",
+        "pipelines/accepted/r2.yaml",
+    ]
+
+
+def test_a_record_file_ending_in_yml_is_named(recorded):
+    write_record(recorded, "r1", record_yaml())
+    (recorded / "pipelines" / "accepted" / "r2.yml").write_text(record_yaml())
+
+    assert record_problems(recorded) == [
+        "pipelines/accepted/r2.yml: a record file must end in .yaml"
+    ]
+
+
+def test_a_non_text_record_is_named(recorded):
+    write_record(recorded, "r1", "")
+    (recorded / "pipelines" / "accepted" / "r1.yaml").write_bytes(b"\xff\xfe")
+
+    assert record_problems(recorded) == ["pipelines/accepted/r1.yaml: not UTF-8 text"]
+
+
+def test_records_are_checked_without_credentials_or_network(recorded, no_network, monkeypatch):
+    (recorded / "adops.yaml").write_text(
+        RECORDED_SETTINGS.replace("localhost", "unreachable.invalid")
+    )
+    for name in ("WAREHOUSE_PASSWORD", "SHOP_PASSWORD", "CRM_PASSWORD"):
+        monkeypatch.delenv(name, raising=False)
+    write_record(recorded, "r1", record_yaml(table="ordrs"))
+
+    assert len(record_problems(recorded)) == 1
+
+
+def test_a_named_pipeline_skips_cross_checks_of_other_pipelines_records(recorded):
+    write_record(recorded, "r1", record_yaml(pipeline="b"))
+    write_record(recorded, "r2", record_yaml(table="ordrs"))
+
+    assert record_problems(recorded, "a") == [f"pipelines/accepted/r2.yaml: {UNKNOWN_TABLE}"]
+
+
+def test_a_named_pipeline_still_reports_every_unparseable_record(recorded):
+    write_record(recorded, "r1", record_yaml(pipeline="b", changes="[]"))
+
+    problems = record_problems(recorded, "a")
+
+    assert len(problems) == 1
+    assert problems[0].startswith("pipelines/accepted/r1.yaml: changes: ")
+
+
+def test_a_record_of_a_pipeline_that_failed_to_load_keeps_only_that_error(recorded):
+    write_pipeline(recorded, "b", "name: b\nsteps: oops\n")
+    write_record(recorded, "r1", record_yaml(pipeline="b"))
+
+    problems = validate_command.validate_project(recorded, None).problems
+
+    assert problems and all(line.startswith("pipelines/b.yaml: ") for line in problems)
+
+
+def test_the_cli_fails_on_a_bad_record(recorded, monkeypatch):
+    monkeypatch.chdir(recorded)
+    write_record(recorded, "r1", record_yaml(pipeline="nope"))
+
+    result = validate()
+
+    assert result.exit_code == 1
+    assert "pipelines/accepted/r1.yaml: pipeline: no Pipeline with this name" in result.output

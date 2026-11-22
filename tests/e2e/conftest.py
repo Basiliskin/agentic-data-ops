@@ -8,6 +8,7 @@ from demo_project import (
     docker_available,
     init_demo,
     reseed_shop,
+    reset_postgres_warehouses,
     use_shipped_duckdb_warehouse,
 )
 from dotenv import dotenv_values
@@ -33,8 +34,10 @@ def stack(tmp_path_factory):
 def demo(request, stack, tmp_path):
     project = tmp_path / "shop"
     init_demo(project)
+    env = dotenv_values(project / ".env")
     if request.param == "duckdb":
         use_shipped_duckdb_warehouse(project / "adops.yaml")
-    env = dotenv_values(project / ".env")
+    else:
+        reset_postgres_warehouses(env)
     reseed_shop(stack, env)
     return Demo(project, env, request.param)

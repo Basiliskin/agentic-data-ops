@@ -26,10 +26,10 @@
 - 2026-11-19 | horizon 6 | Does merge→stage run every Pipeline or only changed ones, given stage writes the fingerprints branches compare against? — resolved by decision 2026-11-21
 - 2026-11-19 | horizon 6 | What happens when two PRs run --branch at once against the same stage Warehouse (no locking, single-writer DuckDB)? — resolved by decision 2026-11-21
 - 2026-11-19 | horizon 6 | How do generated workflows install adops at a pinned version while keeping ADR-0008 (no tool code copied into the Project)? — resolved by decision 2026-11-21
-- 2026-11-19 | horizon 6 | How is a Breaking Change in a PR branch handled unattended, given accept-schema --branch is a recorded gap?
-- 2026-11-20 | horizon 7 | What exactly is in an accepted-change record: the full accepted TableShape copied from where accept-schema ran, or just 'accept whatever shape the Source shows on the next run'? prod's — see horizon-07 roadmap.md
-- 2026-11-20 | horizon 7 | How does an Environment know it already applied a record? Is it tracked in the Warehouse next to _adops_schema_snapshots, and are records ever removed from the Project once every Environment has applied them?
-- 2026-11-20 | horizon 7 | What happens if a record's shape does not match the Source shape seen on the next run (it drifted again)? Halt with a new Breaking Change, or apply it anyway?
+- 2026-11-19 | horizon 6 | How is a Breaking Change in a PR branch handled unattended, given accept-schema --branch is a recorded gap? — resolved by decision 2026-11-22
+- 2026-11-20 | horizon 7 | What exactly is in an accepted-change record: the full accepted TableShape copied from where accept-schema ran, or just 'accept whatever shape the Source shows on the next run'? — resolved by decision 2026-11-22
+- 2026-11-20 | horizon 7 | How does an Environment know it already applied a record? Is it tracked in the Warehouse next to _adops_schema_snapshots, and are records ever removed from the Project once every — resolved by decision 2026-11-22
+- 2026-11-20 | horizon 7 | What happens if a record's shape does not match the Source shape seen on the next run (it drifted again)? Halt with a new Breaking Change, or apply it anyway? — resolved by decision 2026-11-22
 - 2026-11-20 | horizon 7 | How does the Server get Git credentials for a private repo, and from where? A deploy key, a token as a Secret Reference, or SSH agent? And does the — resolved by decision 2026-11-21; see ADR-0016, ADR-0014 clar.
 - 2026-11-20 | horizon 7 | How does the Server find 'the latest release tag': semver ordering, GitHub Releases, or the newest annotated tag by date? What counts as a release — resolved by decision 2026-11-21; see ADR-0016, ADR-0014 clar.
 - 2026-11-20 | horizon 7 | How does a new version reach the running Dagster code location: reload the code location in place, restart containers, or switch a symlink to a — resolved by decision 2026-11-21; see ADR-0016, ADR-0014 clar.
@@ -41,8 +41,8 @@
 - 2026-11-21 | horizon 8 | Do the generated stage/prod workflows actually work on a real self-hosted runner: does docker compose run with the PR checkout mounted over the Server folder's .adops/ and .env build — see horizon-08 roadmap.md
 - 2026-11-21 | horizon 8 | Does the Dagster code-location reload the workflow sends really pick up added or removed Pipelines and Schedule changes while an in-progress run finishes on the old version?
 - 2026-11-21 | horizon 8 | Do files the root Server container creates in .adops/ (DuckDB file, .lock, dlt state) break git checkout or later runs started as the runner user?
-- 2026-11-21 | horizon 8 | What is in an ADR-0015 accepted-change record: the full accepted TableShape from where accept-schema ran, or 'accept whatever the Source shows next run', given prod's Source can differ from dev's?
-- 2026-11-21 | horizon 8 | How does an Environment know it already applied an accepted-change record, and what happens if the Source has drifted again by the time the record is applied?
+- 2026-11-21 | horizon 8 | What is in an ADR-0015 accepted-change record: the full accepted TableShape from where accept-schema ran, or 'accept whatever the Source shows next run', given prod's Source can — resolved by decision 2026-11-22
+- 2026-11-21 | horizon 8 | How does an Environment know it already applied an accepted-change record, and what happens if the Source has drifted again by the time the record is applied? — resolved by decision 2026-11-22
 - 2026-11-21 | horizon 8 | After a Server crash, how should runs left STARTED be cleared so the skip-overlap rule does not skip every later tick: Dagster run monitoring, a startup sweep, or both? — resolved by decision 2026-11-22
 - 2026-11-21 | horizon 8 | What does the Assistant need from the MCP server beyond edit/validate/test-connection/run/Preview/read-logs, and how does server code tell a dev/Branch request from stage/prod — see horizon-08 roadmap.md
 - 2026-11-21 | horizon 8 | What did the first user feedback on Promotion say (runner setup, fork policy, 30-minute lock), and does any of it change horizon-8 choices?
@@ -56,3 +56,9 @@
 - 2026-11-21 | horizon 9 | What does test-connection mean for a DuckDB Warehouse, and for a Branch Environment, which would open stage's Warehouse and stage's operational Reverse Sync targets? — resolved by decision 2026-11-21
 - 2026-11-21 | horizon 9 | Claude Code's real MCP tool-call timeout versus how long a dev or Branch run takes. Fail-fast covers the lock wait only, not long dlt/dbt runs.
 - 2026-11-21 | horizon 9 | The MCP run tool's pipeline argument is not path-checked: run_command reads pipelines/<name>.yaml, so '../x' reads a YAML outside pipelines/. Should MCP tools require a plain Pipeline name?
+- 2026-11-22 | horizon 13 | Does sync.preflight for stage/prod build or touch anything that writes, such as dlt local state in .adops/dlt/<env> or dataset creation? If it does, find_table_changes is not truly read-only for --env stage|prod.
+- 2026-11-22 | horizon 13 | Did h13 settle on the parenthesised BreakingChange.message wording ('<col> retyped (<from> -> <to>)') for record files? The analysis draft used a form without parens. Check the — see horizon-13 roadmap.md
+- 2026-11-22 | horizon 13 | Is a UTC-timestamp record id (<ts>-<pipeline>-<table>) unique enough? Two accept-schema runs in the same second, or on two machines, could collide. Nothing yet says what happens if the target file already exists.
+- 2026-11-22 | horizon 13 | When dev accept-schema finds changes that an existing unapplied record already covers, should it write a second, duplicate record? No rule exists yet.
+- 2026-11-22 | horizon 13 | With fresh Branch baselines and deferred Sync Steps, how often will a PR's record actually be exercised in its Branch before merge? Is the extended E2E enough proof?
+- 2026-11-22 | horizon 13 | Does the 20-minute e2e budget (g4) still have room for the extra stage runs in test_demo_incremental_breaking_change_and_missing_table on both Postgres and DuckDB? — resolved

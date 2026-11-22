@@ -35,6 +35,8 @@ from adops.application.secrets import (
     resolve_warehouse,
     secret_references,
 )
+from adops.domain.accepted_change_record import AcceptedChangeRecord, Coverage, cover
+from adops.domain.assistant_access import DEV
 from adops.domain.branch_environment import (
     STAGE,
     SchemaLayout,
@@ -66,16 +68,22 @@ from adops.domain.loader import (
     load_pipeline,
     load_project_settings,
 )
-from adops.domain.pipeline import Pipeline, Step, SyncStep
+from adops.domain.pipeline import Pipeline, Step, SyncStep, SyncTable
 from adops.domain.reverse_sync import ReverseSyncStep
 from adops.domain.reverse_sync_diff import Diff, compute_diff, preview_sample, writes_allowed
-from adops.domain.schema_snapshot import BreakingChange, TableShape, find_breaking_changes
+from adops.domain.schema_snapshot import (
+    BreakingChange,
+    BreakingChangeKind,
+    TableShape,
+    find_breaking_changes,
+)
 from adops.domain.transform import TransformStep, evaluate_dbt_tests
 
 NOT_IN_SOURCE = SourceFacts(table_exists=False, columns=frozenset())
 URL_PATTERN = re.compile(r"[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE)
 SNAPSHOT_STORE = "schema snapshot store"
 CRASHED = TransformResult(tests=(), crashed=True, failed_models=())
+_RECORD_HINT = " — add an accepted-change record for {table} to the PR"
 
 
 class StepError(Exception):
@@ -143,12 +151,20 @@ class TransformFailedError(StepError):
 
 
 class BreakingChangeError(StepError):
-    def __init__(self, step: str, changes: Mapping[str, Sequence[BreakingChange]]) -> None:
+    def __init__(
+        self,
+        step: str,
+        changes: Mapping[str, Sequence[BreakingChange]],
+        *,
+        ask_for_record: bool = False,
+    ) -> None:
         self.changes = {table: tuple(found) for table, found in changes.items()}
         super().__init__(
             f"Step {step}: "
             + "; ".join(
-                f"Breaking Change in {table}: " + ", ".join(change.message for change in found)
+                f"Breaking Change in {table}: "
+                + ", ".join(change.message for change in found)
+                + (_RECORD_HINT.format(table=table) if ask_for_record else "")
                 for table, found in self.changes.items()
             )
         )
@@ -220,6 +236,12 @@ class FingerprintSavingStep:
 
 
 @dataclass(frozen=True)
+class AcceptedChanges:
+    changes: tuple[BreakingChange, ...]
+    record_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class PlannedStep:
     step: SyncStep
     source: ResolvedConnection
@@ -227,6 +249,8 @@ class PlannedStep:
     pipeline: str
     snapshot_store: SchemaSnapshotStore
     clock: Clock
+    environment: str = DEV
+    records: tuple[AcceptedChangeRecord, ...] = ()
 
     @property
     def name(self) -> str:
@@ -243,7 +267,8 @@ class PlannedStep:
             table.name: TableShape(source_facts[table.name].column_types)
             for table in self.step.tables
         }
-        self._raise_if_breaking(shapes)
+        accepted = self._accept_breaking(shapes)
+        self._relax_dropped(sync, accepted)
 
         result = self._guard(lambda: sync.sync(self.step, self.source, self.warehouse))
         now = self.clock.now()
@@ -254,11 +279,18 @@ class PlannedStep:
             checks += evaluate_load_checks(table, load_facts)
             checks += evaluate_declared_checks(table, load_facts, now)
         _raise_if_failed(self.name, checks, result.rows_loaded)
-        self._save_shapes(shapes)
-        return StepOutcome(tuple(checks), dict(result.rows_loaded))
+        self._save_shapes(shapes, accepted)
+        applied = tuple(
+            f"Applied accepted-change record {record_id} in {self.environment}"
+            for found in accepted.values()
+            for record_id in found.record_ids
+        )
+        return StepOutcome(tuple(checks), dict(result.rows_loaded), notes=applied)
 
-    def _raise_if_breaking(self, shapes: Mapping[str, TableShape]) -> None:
+    def _accept_breaking(self, shapes: Mapping[str, TableShape]) -> dict[str, AcceptedChanges]:
+        """The changes records accept, per table; raises if any change is still breaking."""
         breaking: dict[str, tuple[BreakingChange, ...]] = {}
+        accepted: dict[str, AcceptedChanges] = {}
         for table, current in shapes.items():
             previous = self._guard(
                 lambda table=table: self.snapshot_store.load(
@@ -269,18 +301,56 @@ class PlannedStep:
             if previous is None:
                 continue
             changes = find_breaking_changes(previous, current)
-            if changes:
-                breaking[table] = changes
+            if not changes:
+                continue
+            coverage = self._cover(table, changes)
+            if coverage.uncovered:
+                breaking[table] = coverage.uncovered
+            else:
+                accepted[table] = AcceptedChanges(changes, coverage.used_ids)
         if breaking:
-            raise BreakingChangeError(self.name, breaking)
+            raise BreakingChangeError(self.name, breaking, ask_for_record=self.environment != DEV)
+        return accepted
 
-    def _save_shapes(self, shapes: Mapping[str, TableShape]) -> None:
-        for table, shape in shapes.items():
+    def _cover(self, table: str, changes: tuple[BreakingChange, ...]) -> Coverage:
+        records = [record for record in self.records if record.table == table]
+        if not records:
+            return Coverage(changes, ())
+        applied = self._guard(
+            lambda: self.snapshot_store.applied_record_ids(self.warehouse), SNAPSHOT_STORE
+        )
+        return cover(changes, records, applied)
+
+    def _relax_dropped(self, sync: Sync, accepted: Mapping[str, AcceptedChanges]) -> None:
+        tables = {table.name: table for table in self.step.tables}
+        for name, found in accepted.items():
             self._guard(
-                lambda table=table, shape=shape: self.snapshot_store.save(
-                    self.warehouse, self.pipeline, self.step.source, table, shape
-                ),
+                lambda name=name, found=found: relax_dropped_columns(
+                    sync, self.step, tables[name], self.warehouse, found.changes
+                )
+            )
+
+    def _save_shapes(
+        self, shapes: Mapping[str, TableShape], accepted: Mapping[str, AcceptedChanges]
+    ) -> None:
+        for table, shape in shapes.items():
+            found = accepted.get(table)
+            self._guard(
+                lambda table=table, shape=shape, found=found: self._save_shape(table, shape, found),
                 SNAPSHOT_STORE,
+            )
+
+    def _save_shape(self, table: str, shape: TableShape, found: AcceptedChanges | None) -> None:
+        if found is None:
+            self.snapshot_store.save(self.warehouse, self.pipeline, self.step.source, table, shape)
+        else:
+            self.snapshot_store.save(
+                self.warehouse,
+                self.pipeline,
+                self.step.source,
+                table,
+                shape,
+                applied_record_ids=found.record_ids,
             )
 
     def _guard[T](self, call: Callable[[], T], component: str | None = None) -> T:
@@ -377,6 +447,24 @@ class PlannedReverseSyncStep:
         raise failure
 
 
+def relax_dropped_columns(
+    sync: Sync,
+    step: SyncStep,
+    table: SyncTable,
+    warehouse: ResolvedWarehouse,
+    changes: Iterable[BreakingChange],
+) -> tuple[str, ...]:
+    """Drop NOT NULL from the accepted changes' dropped columns; returns those columns."""
+    dropped = tuple(
+        change.column for change in changes if change.kind is BreakingChangeKind.DROPPED
+    )
+    if dropped:
+        # Loaded rows no longer carry these columns, so a NOT NULL copied from the Source would
+        # reject every new row.
+        sync.make_columns_nullable(step, table, warehouse, dropped)
+    return dropped
+
+
 def _reverse_sync_facts(read: ReverseSyncRead, diff: Diff) -> ReverseSyncFacts:
     return ReverseSyncFacts(
         target_table_exists=read.target_table_exists,
@@ -454,6 +542,7 @@ def run_step(task: StepTask, sync: Sync) -> StepReport:
         outcome.checks,
         outcome.rows_loaded,
         preview=outcome.preview,
+        notes=outcome.notes,
     )
 
 
@@ -470,8 +559,14 @@ def run_pipeline(
     reverse_sync: ReverseSync | None = None,
     fingerprinting: StepFingerprinting | None = None,
     branch: BranchRun | None = None,
+    *,
+    records: Sequence[AcceptedChangeRecord] = (),
 ) -> RunResult:
-    """Run a Pipeline; a Branch run uses stage's settings under the Branch Environment's name."""
+    """Run a Pipeline; a Branch run uses stage's settings under the Branch Environment's name.
+
+    Outside dev, the Pipeline's accepted-change records let Sync Steps past the Breaking Changes
+    they cover; dev accepts by hand with accept-schema.
+    """
     pipeline = load_pipeline(pipeline_text)
     settings = load_project_settings(settings_text)
     if branch is None:
@@ -496,6 +591,7 @@ def run_pipeline(
         transform,
         reverse_sync,
         first,
+        () if environment_name == DEV else [r for r in records if r.pipeline == pipeline.name],
     )
     if fingerprinting is not None and saves_stage_fingerprint(environment_name):
         plan = _saving_fingerprints(plan, pipeline, fingerprinting)
@@ -596,6 +692,7 @@ def _build_plan(
     transform: Transform | None,
     reverse_sync: ReverseSync | None,
     first: int = 0,
+    records: Sequence[AcceptedChangeRecord] = (),
 ) -> RunPlan:
     running = pipeline.steps[first:]
     sources = [environment.sources[step.source] for step in running if isinstance(step, SyncStep)]
@@ -610,7 +707,19 @@ def _build_plan(
     for index, step in enumerate(running, start=first):
         if isinstance(step, SyncStep):
             source = resolve_connection(environment.sources[step.source], secrets)
-            steps.append(PlannedStep(step, source, warehouse, pipeline.name, snapshot_store, clock))
+            tables = {table.name for table in step.tables}
+            steps.append(
+                PlannedStep(
+                    step,
+                    source,
+                    warehouse,
+                    pipeline.name,
+                    snapshot_store,
+                    clock,
+                    environment_name,
+                    tuple(record for record in records if record.table in tables),
+                )
+            )
         elif isinstance(step, TransformStep):
             if transform is None:
                 raise _missing_engine(index, "a Transform Step needs a Transform engine")

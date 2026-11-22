@@ -49,6 +49,18 @@ def reseed_shop(stack, env):
     shop(env, f"DROP SCHEMA public CASCADE; CREATE SCHEMA public; {seed}")
 
 
+def reset_postgres_warehouses(env):
+    """Drop every schema a run created, so no test sees another test's Warehouse state."""
+    for database in WAREHOUSE_DATABASES.values():
+        with connect(env, "WAREHOUSE", "warehouse", database) as conn:
+            schemas = conn.execute(
+                "SELECT nspname FROM pg_namespace WHERE nspname <> 'public'"
+                " AND nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema'"
+            ).fetchall()
+            for (schema,) in schemas:
+                conn.execute(f'DROP SCHEMA "{schema}" CASCADE')
+
+
 def connect(env, prefix, user, database):
     return psycopg.connect(
         host="localhost",

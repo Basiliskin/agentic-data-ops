@@ -1,3 +1,5 @@
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import duckdb
@@ -7,6 +9,7 @@ from dlt.destinations.exceptions import DatabaseException
 from adops.application.ports import (
     ResolvedConnection,
     ResolvedDuckDb,
+    ResolvedWarehouse,
     SchemaSnapshotStore,
     WarehouseUnreachable,
 )
@@ -318,3 +321,124 @@ def test_the_default_layout_on_postgres_keeps_the_adops_schema(tmp_path, postgre
     store.save(postgres_warehouse.connection, "shop", "shop", "orders", ORDERS)
 
     assert {name for name in postgres_warehouse.schemas() if "adops" in name} == {"adops"}
+
+
+STAGE = SchemaLayout.default()
+
+
+@dataclass(frozen=True)
+class Engine:
+    kind: str
+    project: Path
+    connection: ResolvedWarehouse
+    rows: Callable[[str], list[tuple]]
+
+    def store(self, layout: SchemaLayout = STAGE) -> WarehouseSnapshotStore:
+        environment = "stage" if layout == STAGE else "br_x"
+        return WarehouseSnapshotStore(
+            self.project, self.kind, environment=environment, layout=layout
+        )
+
+
+@pytest.fixture(params=["duckdb", "postgres"])
+def engine(request, warehouse) -> Engine:
+    if request.param == "duckdb":
+        return Engine("duckdb", warehouse.project, warehouse.connection, warehouse.rows)
+    postgres = request.getfixturevalue("postgres_warehouse")
+    return Engine("postgres", warehouse.project, postgres.connection, postgres.rows)
+
+
+def test_applied_record_ids_on_a_fresh_warehouse_are_empty(engine):
+    assert engine.store().applied_record_ids(engine.connection) == frozenset()
+
+    assert engine.rows(
+        "SELECT table_schema FROM information_schema.tables "
+        "WHERE table_name = '_adops_applied_records'"
+    ) == [("adops",)]
+
+
+def test_applied_record_ids_build_up_across_saves(engine):
+    store = engine.store()
+
+    store.save(engine.connection, "shop", "shop", "orders", ORDERS, applied_record_ids=["a"])
+    store.save(engine.connection, "shop", "shop", "orders", ORDERS, applied_record_ids=["b"])
+
+    assert store.applied_record_ids(engine.connection) == {"a", "b"}
+
+
+def test_a_save_without_applied_record_ids_keeps_the_earlier_ones(engine):
+    store = engine.store()
+    store.save(engine.connection, "shop", "shop", "orders", ORDERS, applied_record_ids=["a"])
+
+    store.save(engine.connection, "shop", "shop", "orders", ORDERS_RETYPED)
+
+    assert store.applied_record_ids(engine.connection) == {"a"}
+    assert store.load(engine.connection, "shop", "shop", "orders") == ORDERS_RETYPED
+
+
+def test_an_applied_record_row_names_its_pipeline_and_table(engine):
+    engine.store().save(
+        engine.connection, "shop", "crm", "orders", ORDERS, applied_record_ids=["r1", "r2"]
+    )
+
+    rows = engine.rows(
+        "SELECT record_id, pipeline, table_name, applied_at IS NOT NULL "
+        "FROM adops._adops_applied_records ORDER BY record_id"
+    )
+    assert rows == [("r1", "shop", "orders", True), ("r2", "shop", "orders", True)]
+
+
+def test_applied_record_ids_are_kept_apart_per_environment_schema(engine):
+    stage = engine.store()
+    branch = engine.store(BRANCH)
+
+    branch.save(engine.connection, "shop", "shop", "orders", ORDERS, applied_record_ids=["r1"])
+
+    assert stage.applied_record_ids(engine.connection) == frozenset()
+    stage.save(engine.connection, "shop", "shop", "orders", ORDERS, applied_record_ids=["r2"])
+    assert branch.applied_record_ids(engine.connection) == {"r1"}
+    assert stage.applied_record_ids(engine.connection) == {"r2"}
+
+
+def test_rollback_when_an_applied_id_is_saved_again_keeps_the_previous_snapshot(engine):
+    store = engine.store()
+    store.save(engine.connection, "shop", "shop", "orders", ORDERS, applied_record_ids=["r1"])
+
+    with pytest.raises(DatabaseException):
+        store.save(
+            engine.connection,
+            "shop",
+            "shop",
+            "orders",
+            ORDERS_RETYPED,
+            applied_record_ids=["r2", "r1"],
+        )
+
+    assert store.load(engine.connection, "shop", "shop", "orders") == ORDERS
+    assert store.applied_record_ids(engine.connection) == {"r1"}
+
+
+def test_rollback_when_the_snapshot_insert_fails_saves_no_applied_ids(engine, monkeypatch):
+    store = engine.store()
+    store.save(engine.connection, "shop", "shop", "orders", ORDERS)
+    monkeypatch.setattr(
+        "adops.infrastructure.schema_snapshot_store.json.dumps", lambda *_, **__: object()
+    )
+
+    with pytest.raises(DatabaseException):
+        store.save(
+            engine.connection, "shop", "shop", "orders", ORDERS_RETYPED, applied_record_ids=["r1"]
+        )
+
+    monkeypatch.undo()
+    assert store.applied_record_ids(engine.connection) == frozenset()
+    assert store.load(engine.connection, "shop", "shop", "orders") == ORDERS
+
+
+def test_applied_record_ids_from_an_unreachable_warehouse_raise_warehouse_unreachable(tmp_path):
+    store = WarehouseSnapshotStore(tmp_path, "postgres", environment="stage")
+
+    with pytest.raises(WarehouseUnreachable) as raised:
+        store.applied_record_ids(UNREACHABLE)
+
+    assert_holds_no_driver_text(raised.value)

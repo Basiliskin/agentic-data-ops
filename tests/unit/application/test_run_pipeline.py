@@ -78,6 +78,7 @@ from adops.application.run_pipeline import (
     run_step,
 )
 from adops.application.secrets import MissingSecretError
+from adops.domain.accepted_change_record import AcceptedChangeRecord, parse_change
 from adops.domain.branch_environment import STAGE
 from adops.domain.checks import CheckName, CheckResult, CheckStatus, SourceFacts
 from adops.domain.errors import PipelineValidationError
@@ -1958,3 +1959,187 @@ def report(status: StepStatus, retryable: bool = False) -> StepReport:
 )
 def test_a_run_is_retryable_only_when_its_first_failure_is(steps, expected):
     assert RunResult(PIPELINE, "stage", steps).retryable is expected
+
+
+STAGE_BLOCK = SETTINGS.split("  dev:\n")[1].split("  prod:\n")[0]
+RECORD_SETTINGS = SETTINGS.replace("  prod:\n", "  stage:\n" + STAGE_BLOCK + "  prod:\n")
+ORDER_ID_DROPPED = facts_with_types({"id": "integer"})
+UPDATED_AT_RETYPED = facts_with_types({"id": "integer", "updated_at": "date"})
+
+
+def record(record_id: str, table: str, *changes: str, pipeline: str = "shop"):
+    return AcceptedChangeRecord(
+        record_id, pipeline, table, tuple(parse_change(change) for change in changes)
+    )
+
+
+def run_with_records(sync, store, records, environment=STAGE):
+    return run_pipeline(
+        PIPELINE,
+        RECORD_SETTINGS,
+        environment,
+        ENV,
+        sync,
+        store,
+        FixedClock(),
+        records=records,
+    )
+
+
+def test_a_record_covering_the_change_lets_the_step_sync_and_saves_its_id_with_the_snapshot():
+    store = baseline_store()
+    sync = RecordingSync(source_facts={"order_items": ORDER_ID_DROPPED})
+
+    result = run_with_records(sync, store, [record("r1", "order_items", "order_id dropped")])
+
+    assert result.succeeded
+    assert store.saves.count(("shop", "shop", "order_items")) == 1
+    assert store.saved_record_ids == {("shop", "shop", "order_items"): ("r1",)}
+    assert store.applied == {"r1"}
+    assert store.shapes[("shop", "shop", "order_items")] == TableShape({"id": "integer"})
+    assert result.steps[1].notes == ("Applied accepted-change record r1 in stage",)
+    assert result.steps[0].notes == ()
+
+
+def test_covered_dropped_columns_are_made_nullable_before_the_sync_and_retypes_are_not():
+    store = baseline_store()
+    sync = RecordingSync(
+        source_facts={"order_items": ORDER_ID_DROPPED, "orders": UPDATED_AT_RETYPED}
+    )
+    records = [
+        record("r1", "order_items", "order_id dropped"),
+        record("r2", "orders", "updated_at retyped (timestamptz -> date)"),
+    ]
+
+    result = run_with_records(sync, store, records)
+
+    assert result.succeeded
+    assert sync.nullable == [("orders", "order_items", ("order_id",))]
+    orders_calls = [call for call in sync.calls if call[1] == "orders"]
+    assert orders_calls == [
+        ("preflight", "orders"),
+        ("make_columns_nullable", "orders"),
+        ("sync", "orders"),
+    ]
+
+
+def test_each_table_saves_only_its_own_records_and_the_step_names_every_applied_record():
+    store = baseline_store()
+    sync = RecordingSync(
+        source_facts={"order_items": ORDER_ID_DROPPED, "orders": UPDATED_AT_RETYPED}
+    )
+    records = [
+        record("r1", "order_items", "order_id dropped"),
+        record("r2", "orders", "updated_at retyped (timestamptz -> date)"),
+        record("r3", "order_items", "id dropped"),
+    ]
+
+    result = run_with_records(sync, store, records)
+
+    assert store.saved_record_ids == {
+        ("shop", "shop", "orders"): ("r2",),
+        ("shop", "shop", "order_items"): ("r1",),
+    }
+    assert result.steps[1].notes == (
+        "Applied accepted-change record r2 in stage",
+        "Applied accepted-change record r1 in stage",
+    )
+    assert all("r3" not in note for note in result.steps[1].notes)
+
+
+def test_partial_coverage_halts_naming_only_the_uncovered_change_and_applies_nothing():
+    store = baseline_store()
+    sync = RecordingSync(
+        source_facts={"order_items": ORDER_ID_DROPPED, "orders": UPDATED_AT_RETYPED}
+    )
+
+    result = run_with_records(sync, store, [record("r1", "order_items", "order_id dropped")])
+
+    assert statuses(result)[1:] == [("orders", StepStatus.FAILED), ("products", StepStatus.SKIPPED)]
+    assert result.steps[1].error == (
+        "Step orders: Breaking Change in orders: updated_at retyped (timestamptz -> date)"
+        " — add an accepted-change record for orders to the PR"
+    )
+    assert "order_id" not in (result.steps[1].error or "")
+    assert ("sync", "orders") not in sync.calls
+    assert sync.nullable == []
+    assert store.saves == [("shop", "shop", "customers")]
+    assert store.applied == set()
+
+
+def test_an_uncovered_change_in_stage_asks_for_a_record_without_reading_applied_ids():
+    store = baseline_store()
+    sync = RecordingSync(source_facts={"orders": UPDATED_AT_RETYPED})
+
+    result = run_with_records(sync, store, [record("r1", "order_items", "order_id dropped")])
+
+    assert result.steps[1].error == (
+        "Step orders: Breaking Change in orders: updated_at retyped (timestamptz -> date)"
+        " — add an accepted-change record for orders to the PR"
+    )
+    assert store.applied_reads == 0
+
+
+def test_an_already_applied_record_is_ignored_and_the_change_halts():
+    store = baseline_store()
+    store.applied = {"r1"}
+    sync = RecordingSync(source_facts={"order_items": ORDER_ID_DROPPED})
+
+    result = run_with_records(sync, store, [record("r1", "order_items", "order_id dropped")])
+
+    assert statuses(result)[1] == ("orders", StepStatus.FAILED)
+    assert "order_items: order_id dropped" in (result.steps[1].error or "")
+    assert sync.nullable == []
+    assert store.saved_record_ids == {}
+
+
+def test_records_of_another_pipeline_leave_the_change_uncovered():
+    store = baseline_store()
+    sync = RecordingSync(source_facts={"order_items": ORDER_ID_DROPPED})
+    other = record("r1", "order_items", "order_id dropped", pipeline="crm")
+
+    result = run_with_records(sync, store, [other])
+
+    assert statuses(result)[1] == ("orders", StepStatus.FAILED)
+    assert store.applied_reads == 0
+
+
+def test_dev_ignores_records_and_halts_without_the_record_hint():
+    store = baseline_store()
+    sync = RecordingSync(source_facts={"order_items": ORDER_ID_DROPPED})
+
+    result = run_with_records(
+        sync, store, [record("r1", "order_items", "order_id dropped")], environment="dev"
+    )
+
+    assert statuses(result)[1] == ("orders", StepStatus.FAILED)
+    assert result.steps[1].error == "Step orders: Breaking Change in order_items: order_id dropped"
+    assert store.applied_reads == 0
+    assert sync.nullable == []
+
+
+def test_a_failed_check_after_a_covered_change_stores_no_record_id():
+    store = baseline_store()
+    sync = RecordingSync(
+        source_facts={"order_items": ORDER_ID_DROPPED},
+        load_facts={"order_items": healthy_load(null_keys=1)},
+    )
+
+    result = run_with_records(sync, store, [record("r1", "order_items", "order_id dropped")])
+
+    assert statuses(result)[1] == ("orders", StepStatus.CHECK_FAILED)
+    assert store.saved_record_ids == {}
+    assert store.applied == set()
+    assert result.steps[1].notes == ()
+
+
+def test_an_applied_ids_read_error_is_redacted_and_names_the_store():
+    store = baseline_store()
+    store.fail_applied_reads = RuntimeError(LEAKY_STORE_ERROR)
+    sync = RecordingSync(source_facts={"order_items": ORDER_ID_DROPPED})
+
+    result = run_with_records(sync, store, [record("r1", "order_items", "order_id dropped")])
+
+    error = result.steps[1].error or ""
+    assert error.startswith("Step orders: schema snapshot store: RuntimeError: ")
+    assert_no_secret_in(error)

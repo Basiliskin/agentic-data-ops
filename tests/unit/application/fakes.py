@@ -1,4 +1,4 @@
-from collections.abc import Collection, Iterator, Mapping
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -197,6 +197,7 @@ class RecordingSync:
         warehouse: ResolvedWarehouse,
         columns: Collection[str],
     ) -> None:
+        self.calls.append(("make_columns_nullable", step.name))
         self.connections.append(warehouse)
         self.nullable.append((step.name, table.name, tuple(columns)))
 
@@ -211,8 +212,12 @@ class FakeSnapshotStore:
     shapes: dict[SnapshotKey, TableShape] = field(default_factory=dict)
     fail_load: Exception | None = None
     fail_save: Exception | None = None
+    fail_applied_reads: Exception | None = None
     saves: list[SnapshotKey] = field(default_factory=list)
     warehouses: list[ResolvedWarehouse] = field(default_factory=list)
+    applied: set[str] = field(default_factory=set)
+    applied_reads: int = 0
+    saved_record_ids: dict[SnapshotKey, tuple[str, ...]] = field(default_factory=dict)
 
     def load(
         self, warehouse: ResolvedWarehouse, pipeline: str, source: str, table: str
@@ -222,6 +227,13 @@ class FakeSnapshotStore:
             raise self.fail_load
         return self.shapes.get((pipeline, source, table))
 
+    def applied_record_ids(self, warehouse: ResolvedWarehouse) -> frozenset[str]:
+        self.warehouses.append(warehouse)
+        self.applied_reads += 1
+        if self.fail_applied_reads is not None:
+            raise self.fail_applied_reads
+        return frozenset(self.applied)
+
     def save(
         self,
         warehouse: ResolvedWarehouse,
@@ -229,12 +241,18 @@ class FakeSnapshotStore:
         source: str,
         table: str,
         shape: TableShape,
+        *,
+        applied_record_ids: Sequence[str] = (),
     ) -> None:
         self.warehouses.append(warehouse)
         if self.fail_save is not None:
             raise self.fail_save
-        self.saves.append((pipeline, source, table))
-        self.shapes[(pipeline, source, table)] = shape
+        key = (pipeline, source, table)
+        self.saves.append(key)
+        self.shapes[key] = shape
+        if applied_record_ids:
+            self.saved_record_ids[key] = tuple(applied_record_ids)
+            self.applied.update(applied_record_ids)
 
 
 NOW = datetime(2026, 11, 18, 12, 0, tzinfo=UTC)

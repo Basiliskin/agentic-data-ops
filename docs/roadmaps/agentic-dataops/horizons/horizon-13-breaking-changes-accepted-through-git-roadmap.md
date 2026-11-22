@@ -1,0 +1,451 @@
+# Horizon 13 — Breaking Changes accepted through Git
+
+## Executive Summary
+
+**🎯 What are we trying to achieve?**  
+A *Breaking Change* (a dropped or retyped column in a Source table) halts a Pipeline. Today, accepting one in stage or prod means someone runs `adops accept-schema --env prod` on a machine that can reach prod. This horizon adds *accepted-change records*: small YAML files committed to the Project (`pipelines/accepted/<id>.yaml`) that list the changes to accept for one table. A stage, prod or PR Branch run applies a record once, remembers that in its own Warehouse, and halts as before if anything is not covered.
+
+**🧠 Why does this change need to happen?**  
+The target user knows no Git or Docker and cannot reach the Server, and the Assistant may not touch stage or prod. Scheduled runs and unattended PR checks therefore had no way past an intended Breaking Change. A reviewed file in Git gives them one, which is what ADR-0015 decided. This horizon also settles the open questions on what a record holds, how an Environment knows it applied one, whether records are removed, and what happens when the Source has drifted again.
+
+**At a glance**
+
+- Phases: 5
+- Complexity: Medium (one medium phase; the gate needed one success-criteria fix and two contract fixes)
+- Main risk: saving the snapshot and the applied record ids must happen in one transaction on both Postgres and DuckDB, or a crash could apply a record twice or not at all
+- Testing focus: uncovered change halts and applies nothing, applied at most once, dev ignores records, atomic save, record files not read as Pipelines and not changing Step Fingerprints, sanitized validate errors, stage E2E on both Warehouses
+
+**Settled this horizon (user decisions):**
+- A record lists the accepted changes for one table, in the same wording as the halt message (`customer_id dropped`, `amount retyped (numeric -> bigint)`).
+- Any uncovered change halts the Step and applies nothing.
+- Each Environment keeps applied record ids in `_adops_applied_records` in its own Warehouse, so a record applies at most once there.
+- Records are kept forever.
+- Branch Environments apply records like stage does.
+- The run output names each applied record.
+- Next horizon: `accept-schema` writes records (in dev; with `--env stage|prod` read-only, record only), plus `--branch`. Until then `--env stage|prod` still writes those Warehouses directly.
+
+## Implementation plan
+
+### Order of work
+```
+Phase 1 — Add the accepted change record and coverage rule
+        ↓  (Phase 2 uses the record type and coverage rule)
+Phase 2 — Change Sync Steps to apply accepted-change records
+        ↓  (Phase 3 implements the port the run phase extended)
+Phase 3 — Add an applied records table to snapshot storage
+        ↓  (Phase 4 loads files into the run that now applies them)
+Phase 4 — Connect record files to stage, prod, Branch runs
+        ↓  (Phase 5 reuses the record-file helper the run phase added)
+Phase 5 — Add record file checks to adops validate
+```
+```mermaid
+graph TD
+  accepted_change_record_domain["Add the accepted change record and coverage rule (accepted-change-record-domain)"]
+  apply_records_in_sync_steps["Change Sync Steps to apply accepted-change records (apply-records-in-sync-steps)"]
+  applied_records_table["Add an applied records table to snapshot storage (applied-records-table)"]
+  load_records_in_runs["Connect record files to stage, prod, Branch runs (load-records-in-runs)"]
+  validate_record_files["Add record file checks to adops validate (validate-record-files)"]
+  accepted_change_record_domain --> apply_records_in_sync_steps
+  apply_records_in_sync_steps --> applied_records_table
+  accepted_change_record_domain --> load_records_in_runs
+  apply_records_in_sync_steps --> load_records_in_runs
+  applied_records_table --> load_records_in_runs
+  accepted_change_record_domain --> validate_record_files
+  load_records_in_runs --> validate_record_files
+```
+
+### Phase 1 — Add the accepted change record and coverage rule
+
+Technical ID: `accepted-change-record-domain` · Breaking Change acceptance · domain · small
+
+**Goal** — Add a pure domain type for an accepted-change record. It parses from plain YAML, writes back to YAML, and has one rule that splits the Breaking Changes a run found into the ones unapplied records cover and the ones they do not.
+
+**Why** — Every later phase depends on one shared definition of a record: the run that applies it, the validate check, and the accept-schema command that writes it. Keeping the parsing and matching pure, with no I/O, lets all three use the same rule and test it without a Warehouse. dump_accepted_record has no caller in this horizon; it is built here because the very next horizon's accept-schema writes records with it, and the round-trip test is what keeps record files and the halt text in the same wording.
+
+**Changes**
+- Create a frozen AcceptedChangeRecord(id, pipeline, table, changes: tuple[BreakingChange, ...]). The id is the record file's name without '.yaml' and is passed in by the caller.
+- Add load_accepted_record(record_id, text) built on the existing loader._load pattern: yaml.safe_load must give a mapping with 'pipeline', 'table' and a non-empty 'changes' list of strings. Errors are PipelineValidationError lines that never echo values (include_input=False, nothing chained).
+- Add parse_change(text) that reads exactly the BreakingChange.message wording: '<column> dropped' or '<column> retyped (<from> -> <to>)'. Normalize both types with normalize_column_type. Raise a clear RuleViolation for any other shape.
+- Add dump_accepted_record(record) that writes the same YAML, changes in BreakingChange.message wording, so dump then load gives the same record back.
+- Add cover(found, records, applied_ids) -> Coverage(uncovered: tuple[BreakingChange, ...], used_ids: tuple[str, ...]). Ignore records whose id is in applied_ids. A dropped change matches on (column, kind). A retyped change matches on (column, kind, normalized from, normalized to). Several records may together cover one run. used_ids lists only records that covered at least one found change.
+- Add a GLOSSARY entry 'Accepted-change record' (bold term, definition, _Avoid_ line) in the existing format.
+- Update the GLOSSARY 'Breaking Change' entry to say how it is resolved: a record in stage/prod/Branch, accept-schema in dev.
+
+**Files / areas**
+- `src/adops/domain/accepted_change_record.py`
+- `src/adops/domain/schema_snapshot.py`
+- `tests/unit/domain/test_accepted_change_record.py`
+- `GLOSSARY.md`
+
+**How to verify**
+- **Change text uses BreakingChange.message wording with normalized types** — `uv run pytest tests/unit/domain/test_accepted_change_record.py -k "parse or dump or round" -v` passes
+- **Malformed record YAML gives sanitized, value-free errors** — `uv run pytest tests/unit/domain/test_accepted_change_record.py -k load -v` has one test for each shape: invalid YAML, top-level list, missing 'pipeline', missing 'table', 'changes: []', 'changes: [42]'
+- **cover() splits found changes exactly as decided** — `uv run pytest tests/unit/domain/test_accepted_change_record.py -k cover -v` has separate tests for: fully covered, partly covered (uncovered holds only the leftover change), two records covering one run together (both ids in used_ids), a record whose id is in applied_ids is ignored even though it matches, and a record that matches nothing is missing from used_ids
+- **Record type stays pure domain with no filesystem or Warehouse knowledge** — `grep -nE "pathlib|open\(|os\.|glob|duckdb|psycopg|adops\.(application|infrastructure|interface)" src/adops/domain/accepted_change_record.py` prints nothing
+
+**Done when** — src/adops/domain/accepted_change_record.py, whose unit tests cover parse, dump round-trip, malformed changes, int4/integer type normalization, and every cover() case: full, partial, several records, already-applied ids, and unused records., and every check under *How to verify* passes its bar.
+
+**Depends on** — nothing — can start immediately
+
+**Guards**
+- g5: imports only pydantic/yaml and other domain modules; test_domain_purity stays green; no pragma
+- g2: every parse/cover branch has a unit test so src/adops stays at 100% line+branch
+- g1: ruff E,F,W,I,B,UP at 100 columns
+
+<details><summary>Reference — full rubric</summary>
+
+| Dimension | Rule | Pass criteria | Failure examples | Min |
+|---|---|---|---|---|
+| Change text uses BreakingChange.message wording with normalized types | parse_change accepts exactly the wording BreakingChange.message produces, normalizes both retype types with normalize_column_type, and dump_accepted_record writes text that loads back to an equal record. | `uv run pytest tests/unit/domain/test_accepted_change_record.py -k "parse or dump or round" -v` passes<br>A test asserts parse_change(bc.message) == bc for a real BreakingChange of each kind (DROPPED and RETYPED), so the wording is tied to schema_snapshot.py and not copied by hand<br>A test parses 'amount retyped (int4 -> TEXT)' and asserts the from/to types equal normalize_column_type('int4') and normalize_column_type('TEXT')<br>A test asserts load_accepted_record(id, dump_accepted_record(r)) == r for a record with both a dropped and a retyped change<br>Tests show that 'amount removed', 'amount retyped int -> text' (no parentheses) and an empty string each raise RuleViolation | parse_change uses its own hard-coded format (for example 'retyped int -> text' without parentheses), so a record written from BreakingChange.message fails to parse<br>Types are normalized when parsing but dump writes the raw input, so 'int4' and 'integer' records dump to different text<br>A column name that contains spaces or ' retyped ' is split in the wrong place and no test catches it | 8 |
+| Malformed record YAML gives sanitized, value-free errors | load_accepted_record rejects bad YAML, a non-mapping, missing pipeline/table, a non-list or empty changes, and non-string change entries with PipelineValidationError lines that never echo the input values and chain no exception. | `uv run pytest tests/unit/domain/test_accepted_change_record.py -k load -v` has one test for each shape: invalid YAML, top-level list, missing 'pipeline', missing 'table', 'changes: []', 'changes: [42]'<br>Each error test puts a sentinel value such as 'SECRET_x' in the YAML and asserts it is not in str(exc)<br>Each error test asserts exc.__cause__ is None and exc.__context__ is None or suppressed (`raise ... from None`)<br>The error format matches loader._load's: run `grep -n include_input src/adops/domain/accepted_change_record.py` and see include_input=False | A pydantic ValidationError is re-raised whose text holds the bad input value<br>A yaml.YAMLError is chained, so the traceback shows the raw file line<br>'changes: []' is accepted and gives a record that covers nothing | 8 |
+| cover() splits found changes exactly as decided | cover(found, records, applied_ids) matches dropped changes on (column, kind) and retyped changes on (column, kind, normalized from, normalized to). It skips applied ids, lets several records cover one run together, and lists in used_ids only records that covered at least one found change. | `uv run pytest tests/unit/domain/test_accepted_change_record.py -k cover -v` has separate tests for: fully covered, partly covered (uncovered holds only the leftover change), two records covering one run together (both ids in used_ids), a record whose id is in applied_ids is ignored even though it matches, and a record that matches nothing is missing from used_ids<br>A test shows a retype record 'int -> text' does NOT cover a found retype 'int -> bigint' on the same column<br>A test shows a 'dropped' record does NOT cover a 'retyped' change on the same column<br>A test shows a record that lists more changes than were found still covers, and its id is in used_ids<br>used_ids has no duplicates and its order is stable (sorted or in record order), checked by one assertion | A retype matches on the column alone, so any later retype of that column is silently accepted<br>used_ids includes every unapplied record passed in, so a record that covered nothing is marked applied and never covers its real change later<br>A record already in applied_ids still counts as covering, so the at-most-once rule fails | 8 |
+| Record type stays pure domain with no filesystem or Warehouse knowledge | accepted_change_record.py takes the id and text from the caller and does no file, path, environment or Warehouse work. Folder layout and file discovery belong to outer layers. | `grep -nE "pathlib\|open\(\|os\.\|glob\|duckdb\|psycopg\|adops\.(application\|infrastructure\|interface)" src/adops/domain/accepted_change_record.py` prints nothing<br>The string 'pipelines/accepted' does not appear in src/adops/domain/ (`grep -rn "accepted/" src/adops/domain` is empty)<br>AcceptedChangeRecord is frozen: a test assigning to record.table raises an error | load_accepted_record takes a Path and reads the file itself, so the id is taken from the path inside domain code<br>The domain module hard-codes the 'pipelines/accepted' folder<br>Records are mutable, so cover() could change them | 8 |
+
+Healer hint: The most likely failure is a parse_change format drifting from BreakingChange.message or not normalizing types. Fix it by deriving the test inputs from real BreakingChange(...).message values and calling normalize_column_type on both sides in parse and dump.
+
+</details>
+
+### Phase 2 — Change Sync Steps to apply accepted-change records
+
+Technical ID: `apply-records-in-sync-steps` · Breaking Change acceptance · application · medium
+
+**Goal** — In stage, prod and Branch Environments, a Sync Step that finds Breaking Changes continues when unapplied records cover all of them. It relaxes NOT NULL on the covered dropped columns, syncs, and after every Check passes saves the new snapshot together with the ids of the records it used. Any uncovered change halts the Step as today, names only the uncovered changes, and applies nothing.
+
+**Why** — Records are how stage, prod and unattended PR Branch runs get past a Breaking Change without anyone at a terminal, so the run itself has to act on them. The rule goes where Breaking Changes are detected today (PlannedStep._raise_if_breaking), before any write, so a halt still changes nothing.
+
+**Changes**
+- Extend the SchemaSnapshotStore port with applied_record_ids(warehouse) -> frozenset[str]. Add a keyword applied_record_ids: Sequence[str] = () to save(), with the contract that the snapshot and the ids are stored atomically. Update FakeSnapshotStore to match.
+- Add a keyword-only records: Sequence[AcceptedChangeRecord] = () parameter to run_pipeline. Keep only records whose pipeline matches, and use none when environment_name is dev (dev accepts by hand). Pass the records for each table into PlannedStep through _build_plan.
+- In PlannedStep._raise_if_breaking, call snapshot_store.applied_record_ids only when the table has records, then call cover(). Raise BreakingChangeError with only the uncovered changes. Outside dev, add the text 'add an accepted-change record for <table> to the PR' to the message (the folder name stays only in the interface constant).
+- Pull the dropped-column relaxation into one shared application function. Call it for covered DROPPED columns via sync.make_columns_nullable per table, after the coverage check and before sync.sync.
+- In _save_shapes, pass each table's used record ids to snapshot_store.save only when that table used records, so a run with no records calls save exactly as today and the real WarehouseSnapshotStore (extended in the next phase) keeps working; ids are stored only after every Check passed.
+- Add one line per applied record to the Step result text (e.g. 'Applied accepted-change record <id> in <env>'), so the CLI output and Run Log name every record a run applied.
+
+**Files / areas**
+- `src/adops/application/run_pipeline.py`
+- `src/adops/application/ports.py`
+- `tests/unit/application/fakes.py`
+- `tests/unit/application/test_run_pipeline.py`
+
+**How to verify**
+- **Any uncovered change halts and applies nothing** — `uv run pytest tests/unit/application/test_run_pipeline.py -k "uncovered or partial" -v` passes
+- **Used ids are saved only after every Check passes, in the same save as the snapshot** — `uv run pytest tests/unit/application/test_run_pipeline.py -k "applied or record" -v` passes
+- **Dev ignores records; only matching Pipeline/table records are considered** — A dev test passes a covering record and asserts BreakingChangeError is still raised and FakeSnapshotStore.applied_record_ids was never called
+- **NOT NULL relaxation is shared and limited to covered dropped columns** — `grep -rn "make_columns_nullable" src/adops/application` shows exactly one caller: the shared function
+- **Step result names every applied record** — A test with two records covering one Step asserts the Step result text contains 'Applied accepted-change record <id1> in stage' and the same line for <id2>
+- **Application change depends only on domain and ports** — `grep -nE "yaml|glob|pathlib|_adops_applied_records|adops\.infrastructure|adops\.interface" src/adops/application/run_pipeline.py src/adops/application/ports.py` prints nothing new (compare with `git diff`)
+
+**Done when** — run_pipeline applies records through PlannedStep. Unit tests with FakeSnapshotStore show: a covered change passes and stores the used ids, an uncovered change halts naming only that change with nothing saved or relaxed, an already-applied record is ignored, failed Checks store no ids, and dev ignores records, and the Step result names each applied record., and every check under *How to verify* passes its bar.
+
+**Depends on** — Add the accepted change record and coverage rule
+
+**Guards**
+- g5: application imports only domain and ports; test_application_purity green
+- g2: every new branch (no records, covered, partial, applied, dev, failed checks) has a test; the default records=() keeps existing tests unchanged
+- g1: ruff clean
+
+<details><summary>Reference — full rubric</summary>
+
+| Dimension | Rule | Pass criteria | Failure examples | Min |
+|---|---|---|---|---|
+| Any uncovered change halts and applies nothing | When cover() leaves any change uncovered, PlannedStep raises BreakingChangeError naming only the uncovered changes, with the record hint outside dev. No NOT NULL relaxation, sync, snapshot save or id save happens. | `uv run pytest tests/unit/application/test_run_pipeline.py -k "uncovered or partial" -v` passes<br>A partial-coverage test asserts the error message contains the uncovered column and not the covered column<br>The same test asserts the fake sync recorded no make_columns_nullable call and no sync call, and FakeSnapshotStore recorded no save<br>A stage test asserts the message contains 'add an accepted-change record for <table> to the PR', and a dev test asserts it does not<br>Downstream Steps of the halted Step are reported halted/skipped as they are today (assert on the run result) | The covered dropped columns are made nullable before the uncovered check runs, so a halted run has still changed the Warehouse<br>The error lists every found change, including covered ones, so the user adds records that are not needed<br>The PR hint is also shown in dev, where accept-schema is the right fix | 9 |
+| Used ids are saved only after every Check passes, in the same save as the snapshot | Covered record ids reach snapshot_store.save(applied_record_ids=...) only from _save_shapes after all Checks passed, in the same call that saves that table's snapshot. A failed Check saves no ids. | `uv run pytest tests/unit/application/test_run_pipeline.py -k "applied or record" -v` passes<br>A test with a covering record and a passing Check asserts FakeSnapshotStore got one save for the table with applied_record_ids equal to exactly the used ids<br>A test with a covering record and a failing Check asserts no ids are stored and applied_record_ids(warehouse) stays empty<br>`grep -n "applied_record_ids" src/adops/application/run_pipeline.py` shows ids passed only through save(...), with no separate store call<br>A two-table test asserts each table's save gets only its own records' ids | Ids are stored in _raise_if_breaking right after cover() succeeds, so a later failed Check still marks the record applied<br>A separate mark_applied() port call is added, which breaks the rule that ids and snapshot are saved together<br>Every table's save gets all used ids from the whole Pipeline | 9 |
+| Dev ignores records; only matching Pipeline/table records are considered | With environment_name 'dev', records have no effect, and dev halts exactly as before. Elsewhere only records whose pipeline matches the run and whose table matches the Step are passed to cover(), and applied_record_ids is queried only when the table has records. | A dev test passes a covering record and asserts BreakingChangeError is still raised and FakeSnapshotStore.applied_record_ids was never called<br>A test with records for another Pipeline asserts they do not cover a change in this Pipeline<br>A test with no records for the table asserts applied_record_ids was not called (the fake counts calls)<br>Existing run_pipeline tests pass without modification, and `uv run pytest tests/unit/interface` (which builds the real WarehouseSnapshotStore) stays green after this phase alone | Dev applies records, so a developer's local run silently accepts a change without accept-schema<br>Records are filtered by table but not Pipeline, so two Pipelines with an 'orders' table share records<br>applied_record_ids is called for every Step, adding a Warehouse round trip on every run | 8 |
+| NOT NULL relaxation is shared and limited to covered dropped columns | One application function does the dropped-column NOT NULL relaxation for both accept-schema and record application. Record application calls it only for covered DROPPED columns, after coverage passes and before sync.sync. | `grep -rn "make_columns_nullable" src/adops/application` shows exactly one caller: the shared function<br>A test with a covered dropped column and a covered retype asserts make_columns_nullable got only the dropped column<br>A test asserts the call order make_columns_nullable then sync on the fake (the fake records an ordered call log)<br>The existing accept-schema tests pass unchanged: `uv run pytest tests/unit -k accept_schema` passes | The relaxation is copied into PlannedStep, so accept-schema and record application drift apart<br>Retyped columns are also made nullable<br>Relaxation runs after sync, so the sync fails on the NOT NULL column | 8 |
+| Step result names every applied record | For each record id stored on a successful run, the Step result text has one line naming that id and the Environment. | A test with two records covering one Step asserts the Step result text contains 'Applied accepted-change record <id1> in stage' and the same line for <id2><br>A test asserts that a record which covered nothing (not in used_ids) is not named<br>A failed-Check test asserts no 'Applied accepted-change record' line appears | The line is added before Checks run, so a run whose Checks failed still claims the record was applied<br>Only the first record is named when several cover one run<br>Records are logged to stdout but not added to the Step result, so the Run Log does not show them | 8 |
+| Application change depends only on domain and ports | run_pipeline gets records as parsed AcceptedChangeRecord values and reaches storage only through the SchemaSnapshotStore port. It knows nothing about YAML files, folders or SQL tables. | `grep -nE "yaml\|glob\|pathlib\|_adops_applied_records\|adops\.infrastructure\|adops\.interface" src/adops/application/run_pipeline.py src/adops/application/ports.py` prints nothing new (compare with `git diff`)<br>The SchemaSnapshotStore Protocol in ports.py declares applied_record_ids(warehouse) -> frozenset[str] and save(..., applied_record_ids: Sequence[str] = ()), and its docstring states the atomic contract | run_pipeline globs pipelines/accepted itself instead of taking records=<br>The port docstring does not state atomicity, so the infrastructure phase writes ids in a second transaction | 8 |
+
+Healer hint: The most likely failure is ordering: relaxation or id storage happens before the uncovered check or before the Checks pass. Fix it by doing cover() first, raising before any sync call, and passing used ids only through _save_shapes' save(applied_record_ids=...).
+
+</details>
+
+### Phase 3 — Add an applied records table to snapshot storage
+
+Technical ID: `applied-records-table` · Breaking Change acceptance · infrastructure · small
+
+**Goal** — WarehouseSnapshotStore keeps applied record ids in a new _adops_applied_records table next to _adops_schema_snapshots in each Environment's adops schema. It writes them in the same transaction as the snapshot.
+
+**Why** — Each Environment must remember in its own Warehouse which records it already applied, so a record applies at most once there. Writing the ids and the snapshot in one transaction means a crash can never leave one saved without the other.
+
+**Changes**
+- In the existing lazy CREATE block in _client(), also run CREATE TABLE IF NOT EXISTS _adops_applied_records(record_id TEXT PRIMARY KEY, pipeline TEXT, table_name TEXT, applied_at TIMESTAMPTZ DEFAULT now()).
+- Implement applied_record_ids(warehouse) as a SELECT of record_id.
+- Extend save() to INSERT the given applied_record_ids inside the same client.begin_transaction() as the snapshot DELETE/INSERT.
+- Test on real DuckDB files and on Postgres through ADOPS_TEST_POSTGRES_DSN: round trip, the Branch layout (br_<branch>__adops) is kept separate from 'adops', and a failing id insert rolls back the snapshot.
+
+**Files / areas**
+- `src/adops/infrastructure/schema_snapshot_store.py`
+- `tests/unit/infrastructure/test_schema_snapshot_store.py`
+
+**How to verify**
+- **Snapshot and ids are written in one transaction** — `uv run pytest tests/unit/infrastructure/test_schema_snapshot_store.py -k rollback -v` passes on DuckDB, and on Postgres when ADOPS_TEST_POSTGRES_DSN is set
+- **Applied ids are separate for each Environment schema** — A test saves id 'r1' through a Branch-layout store and asserts applied_record_ids on the 'adops' store of the same Warehouse is empty, and the reverse
+- **Ids round-trip on DuckDB and Postgres** — `uv run pytest tests/unit/infrastructure/test_schema_snapshot_store.py -k applied -v` passes, and with ADOPS_TEST_POSTGRES_DSN set the Postgres tests run and are not skipped (check that `-rs` output shows no skip for them)
+
+**Done when** — WarehouseSnapshotStore implements applied_record_ids and the atomic save, with DuckDB and Postgres tests passing, including the rollback test., and every check under *How to verify* passes its bar.
+
+**Depends on** — Change Sync Steps to apply accepted-change records
+
+**Guards**
+- g2: the Postgres branches run in CI through the DSN, so coverage stays 100%
+- g1: ruff clean
+- g5: no 'pragma: no cover'; Postgres-only branches are covered through ADOPS_TEST_POSTGRES_DSN in CI, not excluded
+
+**Rollback** — The table is additive and created lazily. To undo, remove the CREATE and INSERT and run DROP TABLE <adops schema>._adops_applied_records in each Environment. Branch schemas go with drop-branch CASCADE.
+
+<details><summary>Reference — full rubric</summary>
+
+| Dimension | Rule | Pass criteria | Failure examples | Min |
+|---|---|---|---|---|
+| Snapshot and ids are written in one transaction | save() inserts applied_record_ids inside the same client.begin_transaction() as the snapshot DELETE/INSERT, so if either fails, neither is saved. | `uv run pytest tests/unit/infrastructure/test_schema_snapshot_store.py -k rollback -v` passes on DuckDB, and on Postgres when ADOPS_TEST_POSTGRES_DSN is set<br>The rollback test forces the id insert to fail (for example by saving an id that already exists, which breaks the PRIMARY KEY) and asserts the stored snapshot is still the previous one<br>`sed -n '/def save/,/^    def /p' src/adops/infrastructure/schema_snapshot_store.py` shows the id INSERT inside the begin_transaction block<br>A test with a failing snapshot insert asserts applied_record_ids stays empty | Ids are inserted after the transaction commits, so a crash leaves a new snapshot with the record unmarked, and the record is applied twice<br>The rollback test only runs on DuckDB, and Postgres autocommit lets the ids through<br>An id saved again in a later save raises an error that rolls back a valid snapshot, even though the code is meant never to send it again (no test covers this case) | 9 |
+| Applied ids are separate for each Environment schema | _adops_applied_records is created lazily in the Environment's own adops schema (adops for stage/prod, br_<branch>__adops for a Branch), and ids saved in one are not visible in another. | A test saves id 'r1' through a Branch-layout store and asserts applied_record_ids on the 'adops' store of the same Warehouse is empty, and the reverse<br>A test on a fresh Warehouse calls applied_record_ids before any save and gets frozenset() without error, which shows the lazy CREATE works<br>`grep -n "_adops_applied_records" src/adops/infrastructure/schema_snapshot_store.py` shows the table name qualified with the same schema variable as _adops_schema_snapshots | The table name is hard-coded as adops._adops_applied_records, so a Branch marks stage's records as applied<br>applied_record_ids on a new Environment raises 'table does not exist' because CREATE runs only in save() | 9 |
+| Ids round-trip on DuckDB and Postgres | Ids saved with a snapshot come back from applied_record_ids as a frozenset on both engines, and they build up across saves. | `uv run pytest tests/unit/infrastructure/test_schema_snapshot_store.py -k applied -v` passes, and with ADOPS_TEST_POSTGRES_DSN set the Postgres tests run and are not skipped (check that `-rs` output shows no skip for them)<br>A test saves ids ['a'] then ['b'] in two saves and asserts applied_record_ids == {'a','b'}<br>A test saving with applied_record_ids=() leaves earlier ids in place<br>The pipeline and table_name columns are filled: a SELECT in the test asserts them for a saved id | The snapshot DELETE wrongly also clears _adops_applied_records, so ids from earlier runs are lost and records apply again<br>pipeline/table_name are left NULL because save() does not pass them through | 8 |
+
+Healer hint: The most likely failure is a lost or non-atomic id write: the INSERT sits outside begin_transaction, or the snapshot DELETE also clears the ids. Fix it by moving the INSERT inside the transaction block, touching only _adops_schema_snapshots in the DELETE, and proving it with a PRIMARY KEY collision rollback test on both engines.
+
+</details>
+
+### Phase 4 — Connect record files to stage, prod, Branch runs
+
+Technical ID: `load-records-in-runs` · Pipeline run · interface · small
+
+**Goal** — Every non-dev run reads pipelines/accepted/*.yaml from the Project and passes the parsed records to run_pipeline. This covers adops run, the Server, the MCP run tool and the workflows. Record files never change Step Fingerprints and are never read as Pipelines.
+
+**Why** — All run paths go through run_in_environment and _run_branch_locked, so loading records there gives Server scheduled runs and PR Branch runs the same behaviour. A record that changed fingerprints would make Branches re-sync. The user chose to keep fingerprints unchanged, so this is pinned with a test.
+
+**Changes**
+- Add one module constant ACCEPTED_RECORDS_DIR = 'accepted' (under pipelines/). Add accepted_record_files(project), which returns sorted((project/'pipelines'/'accepted').glob('*.yaml')), and load_project_records(project), which parses each file with load_accepted_record(stem, text) and prefixes any error with the file's relative path.
+- Call load_project_records inside run_in_environment and _run_branch_locked, inside the existing Warehouse lock. Pass the result as records= to run_pipeline.
+- Add a test that pipeline_files ignores pipelines/accepted/*.yaml.
+- Add a test that adding a record file leaves current_fingerprints unchanged and leaves an otherwise unchanged Branch run fully deferred.
+- Add a test that a stage run with a covering record file passes, and that a second run does not apply it again (through the fake store).
+- Add a test that a Branch run whose rebuilt Sync Step halted on a Breaking Change passes on the next run once a covering record file is added, with no other change to the Pipeline.
+- Extend test_demo_incremental_breaking_change_and_missing_table: run stage before the ALTER, assert stage halts naming 'customer_id dropped' and the PR hint, write a covering record file into the demo's pipelines/accepted/, assert the next stage run passes and names the record, and a second stage run does not name it again. Add only these few runs so the e2e job stays under 20 minutes.
+
+**Files / areas**
+- `src/adops/interface/run_command.py`
+- `tests/unit/interface/test_run_command.py`
+- `tests/e2e/test_demo_sync.py`
+
+**How to verify**
+- **Record files are never Pipelines and never change Step Fingerprints** — `uv run pytest tests/unit/interface/test_run_command.py -k "fingerprint or pipeline_files" -v` passes
+- **Every non-dev run path passes records** — `grep -n "load_project_records" src/adops/interface/run_command.py` shows calls in both run_in_environment and _run_branch_locked, inside the lock context
+- **Missing folder and bad record files handled clearly** — A test with no pipelines/accepted folder asserts load_project_records returns () and the run proceeds
+- **Interface only loads files; matching stays in domain/application** — `grep -nE "cover\(|applied_record_ids|== ?['\"]dev['\"]" src/adops/interface/run_command.py` shows no new coverage or dev-filter logic in the diff (`git diff src/adops/interface/run_command.py`)
+- **Demo E2E shows stage applying a record exactly once** — `uv run pytest tests/e2e -m e2e -k breaking_change` passes for both the postgres and duckdb params
+
+**Done when** — run_command passes the Project's records to every non-dev run. Unit tests pin that record files are not Pipelines and do not change fingerprints., and every check under *How to verify* passes its bar.
+
+**Depends on** — Add the accepted change record and coverage rule, Change Sync Steps to apply accepted-change records, Add an applied records table to snapshot storage
+
+**Guards**
+- g2: tests cover the missing folder, a bad record file and records present
+- g1: ruff clean
+- g4: only a few stage runs are added to the existing demo scenario on both Warehouses; no new full-demo test
+- g5: no 'pragma: no cover'; every new branch gets a unit test
+
+<details><summary>Reference — full rubric</summary>
+
+| Dimension | Rule | Pass criteria | Failure examples | Min |
+|---|---|---|---|---|
+| Record files are never Pipelines and never change Step Fingerprints | pipelines/accepted/*.yaml is outside Pipeline discovery and does not change current_fingerprints, so adding a record leaves an unchanged Branch fully deferred. | `uv run pytest tests/unit/interface/test_run_command.py -k "fingerprint or pipeline_files" -v` passes<br>A test writes pipelines/accepted/x.yaml and asserts pipeline_files(project) does not include it<br>A test computes current_fingerprints before and after adding a record file and asserts they are equal<br>A Branch test asserts that after adding a record file, an otherwise unchanged Branch run shows every Step as deferred (assert on the run output or result) | The fingerprint hashes every file under pipelines/** recursively, so a record makes every Branch re-sync<br>pipeline_files uses rglob, so the record is loaded as a Pipeline and fails validation | 9 |
+| Every non-dev run path passes records | Both run_in_environment and _run_branch_locked load the Project's records inside the Warehouse lock and pass them as records=. That covers adops run, the Server and the MCP run tool. | `grep -n "load_project_records" src/adops/interface/run_command.py` shows calls in both run_in_environment and _run_branch_locked, inside the lock context<br>A stage test with a covering record file passes, and a second run on the same fake store does not name the record again (no 'Applied accepted-change record' line)<br>A Branch test: the first run halts on a Breaking Change, a covering record file is added, and the next run passes with no Pipeline edit<br>No other module re-implements the record glob: `grep -rn "glob(" src/adops/interface` shows the pipelines/accepted pattern only inside accepted_record_files | Records are loaded only in the CLI 'run' handler, so Server scheduled runs and the MCP run tool ignore them<br>Records are loaded before the lock is taken, so a record committed while a run is waiting is missed<br>The Branch path is forgotten, so unattended PR runs can never get past a Breaking Change | 9 |
+| Missing folder and bad record files handled clearly | A Project without pipelines/accepted gives no records and no error. A bad record file fails the run with an error that starts with the file's relative path and does not leak the file's values. | A test with no pipelines/accepted folder asserts load_project_records returns () and the run proceeds<br>A test with a malformed record asserts the error text starts with 'pipelines/accepted/<name>.yaml:' and does not hold a sentinel value from the file<br>A test asserts records come back in sorted file-name order (ids match sorted stems)<br>Ids equal the file stem: a test with 'pipelines/accepted/2026-x-orders.yaml' asserts record.id == '2026-x-orders' | A missing folder raises FileNotFoundError on every Project that has never had a record<br>The error shows an absolute path from the Server machine instead of the Project-relative path<br>A .yml file is silently ignored, and no one finds out why the record did not apply | 8 |
+| Interface only loads files; matching stays in domain/application | run_command reads files and calls load_accepted_record. It does no coverage matching, dev filtering or id tracking, which run_pipeline already does. | `grep -nE "cover\(\|applied_record_ids\|== ?['\"]dev['\"]" src/adops/interface/run_command.py` shows no new coverage or dev-filter logic in the diff (`git diff src/adops/interface/run_command.py`)<br>ACCEPTED_RECORDS_DIR is defined once and used by accepted_record_files | run_command drops records when env == 'dev', repeating the application rule so the two can drift apart<br>run_command calls the snapshot store to filter out applied records itself | 7 |
+| Demo E2E shows stage applying a record exactly once | On both Postgres and DuckDB the demo E2E halts stage on a Breaking Change, passes once a covering record file is added, and does not apply the record again. 8 = all three steps asserted on both Warehouses. | `uv run pytest tests/e2e -m e2e -k breaking_change` passes for both the postgres and duckdb params<br>The test asserts the stage halt output contains 'customer_id dropped' and 'accepted-change record'<br>The test asserts the next stage run output contains 'Applied accepted-change record <id> in stage' and a second stage run output does not | The E2E only runs on the postgres param, so the DuckDB transaction path is never exercised end to end<br>The record file is written into the test's temp folder instead of the demo Project's pipelines/accepted/, so the run never sees it | 8 |
+
+Healer hint: The most likely failure is a missed run path (_run_branch_locked or the Server) or a fingerprint that hashes pipelines/** recursively. Fix it by calling load_project_records in both locked functions and excluding the accepted/ subfolder from fingerprint and Pipeline globs, with an equality test on current_fingerprints.
+
+</details>
+
+### Phase 5 — Add record file checks to adops validate
+
+Technical ID: `validate-record-files` · Project validation · interface · small
+
+**Goal** — adops validate (and the MCP validate tool, which uses the same report) reports a sanitized error naming the file for each bad record: bad YAML, an unknown Pipeline, a table no Sync Step of that Pipeline loads, an empty change list, or a malformed change.
+
+**Why** — The Server and the PR/stage/prod workflows run validate before running, so a bad hand-written record has to be caught early with a message clear enough to fix without Warehouse access. Hand-written YAML is the fallback whenever accept-schema cannot see the change.
+
+**Changes**
+- After the Pipeline loop in validate_project, add _check_records(project, loaded pipelines, report). It reads accepted_record_files(project) through the existing _load helper and load_accepted_record, so problems look like 'pipelines/accepted/<file>.yaml: ...'.
+- Check that each record's pipeline is a loaded Pipeline and that its table is one a Sync Step of that Pipeline loads. With a Pipeline argument, skip cross-checks for records of other Pipelines.
+- Record ids are file names inside one folder, so they are unique by construction. Add no separate duplicate check, and say so in a docstring.
+- Never touch a Warehouse or Source in these checks.
+
+**Files / areas**
+- `src/adops/interface/validate_command.py`
+- `tests/unit/interface/test_validate_command.py`
+
+**How to verify**
+- **Each bad-record kind gives a file-named problem** — `uv run pytest tests/unit/interface/test_validate_command.py -k record -v` has one passing test for each kind: bad YAML, unknown pipeline, unknown table, empty changes, malformed change, and a valid record with zero problems
+- **Record checks are sanitized and never touch a Warehouse or Source** — A test puts a sentinel such as 'SECRET_x' in a malformed change and asserts it is not in any problem text
+- **A Pipeline argument limits record cross-checks** — A test runs validate_project(project, pipeline='a') with a record for an unloaded Pipeline 'b' and asserts no 'unknown Pipeline' problem for it
+
+**Done when** — validate_project reports each bad-record kind as a sanitized '<file>: ...' problem, with one unit test per error kind and one for a valid record., and every check under *How to verify* passes its bar.
+
+**Depends on** — Add the accepted change record and coverage rule, Connect record files to stage, prod, Branch runs
+
+**Guards**
+- g2: one test per error branch
+- g1: ruff clean
+- g5: no 'pragma: no cover'; every new branch gets a unit test
+
+<details><summary>Reference — full rubric</summary>
+
+| Dimension | Rule | Pass criteria | Failure examples | Min |
+|---|---|---|---|---|
+| Each bad-record kind gives a file-named problem | validate_project reports bad YAML, an unknown Pipeline, a table no Sync Step of that Pipeline loads, an empty change list and a malformed change, each as a 'pipelines/accepted/<file>.yaml: ...' problem, and reports nothing for a valid record. | `uv run pytest tests/unit/interface/test_validate_command.py -k record -v` has one passing test for each kind: bad YAML, unknown pipeline, unknown table, empty changes, malformed change, and a valid record with zero problems<br>Each error test asserts the problem string starts with 'pipelines/accepted/<file>.yaml:'<br>A test with two bad record files asserts both are reported in one validate run, so the first does not stop the check<br>The table check uses the tables Sync Steps load: a test with a table that a non-Sync Step of the Pipeline mentions still reports 'unknown table' | The table check only confirms the Pipeline exists, so a typo in the table name passes validate and the record never applies<br>The first bad record raises and stops validate, so the other bad files are not reported<br>A record for a Pipeline that itself failed to load is reported as 'unknown Pipeline', which hides the real error | 8 |
+| Record checks are sanitized and never touch a Warehouse or Source | Record problems never echo file values, and _check_records opens no Warehouse, Source or network connection, so validate works without credentials. | A test puts a sentinel such as 'SECRET_x' in a malformed change and asserts it is not in any problem text<br>A test runs validate_project with a Project whose connections have unreachable or empty credentials and asserts the record checks still report<br>`sed -n '/def _check_records/,/^def /p' src/adops/interface/validate_command.py \| grep -nE "connect\|warehouse\|source\|client"` prints nothing | A malformed change error shows the full bad line, which leaks a hand-typed value<br>The table check opens the Warehouse to list tables, so validate in CI fails without credentials | 8 |
+| A Pipeline argument limits record cross-checks | When validate is given one Pipeline, it skips the pipeline and table cross-checks for records of other Pipelines. It still reports parse errors in every record file. The MCP validate tool shows the same problems. | A test runs validate_project(project, pipeline='a') with a record for an unloaded Pipeline 'b' and asserts no 'unknown Pipeline' problem for it<br>The same setup with a malformed record for 'b' still reports the parse problem for that file (parse errors are reported for every record file regardless of the Pipeline argument)<br>A test or existing shared-report path asserts the MCP validate tool output includes a record problem: `uv run pytest tests/unit -k "mcp and validate"` passes | 'adops validate a' reports every other Pipeline's record as 'unknown Pipeline', because only 'a' was loaded<br>The MCP validate tool builds its own report and does not show record problems | 7 |
+
+Healer hint: The most likely failure is a scoped validate run reporting false 'unknown Pipeline' errors, or a table check that accepts any table name. Fix it by cross-checking only records whose pipeline is in the loaded set, and by comparing against the tables of that Pipeline's Sync Steps.
+
+</details>
+
+## Discovery Findings
+
+| Area | Finding | File | Implication |
+|---|---|---|---|
+| 1. halt seam: Breaking Change detection | PlannedStep.__call__ runs preflight, then preflight Checks, then builds shapes, then calls _raise_if_breaking(shapes) BEFORE sync.sync. _raise_if_breaking loads previous via snapshot_store.load(warehouse, pipeline, step.source, table), calls find_breaking_changes, collects a dict table->changes and raises BreakingChangeError(step, breaking). Message: 'Step <s>: Breaking Change in <table>: <c1.message>, ...; ...'. run_step turns it into StepStatus.FAILED and InOrderOrchestrator skips later Steps. | src/adops/application/run_pipeline.py:136-147,240-284 | Record coverage belongs in _raise_if_breaking: subtract changes covered by unapplied records, raise BreakingChangeError only with uncovered ones, and add 'add an accepted-change record to the PR' text. Do it before any NOT NULL relaxation or sync, so nothing is applied on a halt. |
+| 1. snapshot save seam | After the load and declared Checks pass (_raise_if_failed), PlannedStep calls self._save_shapes(shapes). That calls snapshot_store.save once per table, each in its own guarded call and its own connection/transaction. There is no 'used records' state anywhere. PlannedStep fields are step, source, warehouse, pipeline, snapshot_store, clock. It has no Environment name and no records. | src/adops/application/run_pipeline.py:213-238,264-271 | PlannedStep (built in _build_plan) needs new fields: the records that apply (empty for dev) plus an applied-records store, or a combined port. _save_shapes must save the snapshot and the applied ids together, and the NOT NULL relaxation (sync.make_columns_nullable) must run between the coverage check and sync.sync. |
+| 1. run_pipeline signature / purity | run_pipeline(pipeline_text, settings_text, environment_name, env, sync, snapshot_store, clock, orchestrator, transform, reverse_sync, fingerprinting, branch) takes text and ports only. It reads no files. The dev/stage/prod/branch decision is environment_name plus the optional BranchRun. | src/adops/application/run_pipeline.py:449-492 | Records must reach run_pipeline as parsed domain objects, or as texts through a port like ProjectFiles. Add a keyword parameter that defaults to none so the many existing tests keep working. Apply records only when the Environment is not 'dev' (domain/assistant_access.DEV, or a new domain predicate). |
+| 2. SchemaSnapshotStore port | Protocol with load(warehouse, pipeline, source, table) -> TableShape/None and save(warehouse, pipeline, source, table, shape). Its docstring says it keeps the shape and never judges a change. FakeSnapshotStore is in tests/unit/application/fakes.py:208. | src/adops/application/ports.py:150-164 | To add applied ids, extend the port (e.g. applied_ids(warehouse, pipeline, table) and save(..., applied_ids=())) or add a sibling port. Either way the fake in fakes.py and every place that builds a store must be updated. Keep 100% branch coverage (guard g2). |
+| 2. WarehouseSnapshotStore adapter | Each call opens a dlt pipeline 'adops_schema_snapshots' with dataset_name=layout.adops ('adops' or 'br_<branch>__adops'), passing branch_schemas=layout!=default so '__' is not normalized. It creates the dataset and runs CREATE TABLE IF NOT EXISTS _adops_schema_snapshots(pipeline, source, table_name, shape_json, recorded_at TIMESTAMPTZ DEFAULT now) on every use. There is no primary key. save is DELETE then INSERT inside client.begin_transaction(). The same SQL serves Postgres and DuckDB through the dlt sql_client. | src/adops/infrastructure/schema_snapshot_store.py:20-102 | An _adops_applied_records(record_id TEXT PRIMARY KEY, pipeline, table_name, applied_at) table fits in the same _client() CREATE block. The DELETE/INSERT of the snapshot and the INSERT of the ids can share the one begin_transaction(), which works for both DuckDB and Postgres. A multi-table Step still saves table by table, so save per table with that table's record ids. |
+| 2. per-Environment adops schema and local state | build_snapshot_store(project, environment, kind, layout) builds WarehouseSnapshotStore. Its local dlt state is in .adops/dlt/<environment>. A Branch run passes layout=SchemaLayout.for_branch(name) (adops schema 'br_<branch>__adops') and the Branch Environment name. Stage, prod and dev use 'adops' in their own Warehouse. | src/adops/interface/run_command.py:113-116,436-489 | Applied ids are kept per Environment automatically if they live in the same store. drop-branch already runs DROP SCHEMA ... CASCADE on br_ schemas (infrastructure/warehouse_schemas.py:65), so a Branch's applied table is removed with the branch. |
+| conflict: lock scope | The analysis assumes a per-Pipeline Warehouse lock. warehouse_lock is one exclusive lock per Warehouse: a fixed Postgres ADVISORY_LOCK_KEY, or fcntl for DuckDB. A Branch run takes stage's lock (_holding_lock(project, STAGE, ...)). accept_schema (CLI and MCP) takes no lock at all (horizon-10 decision). | src/adops/infrastructure/warehouse_lock.py:19-38 | Applying records happens inside run_in_environment/_run_branch's whole-Warehouse lock, which is fine. accept-schema --branch writing into stage's Warehouse should decide whether to take stage's lock, as drop-branch does. |
+| 3. accept_schema application | accept_schema(pipeline_text, settings_text, environment_name, table, env, sync, snapshot_store) -> AcceptedSchema(pipeline, environment, step, table, shape, nullable_columns). It preflights one table, loads previous, takes the DROPPED columns from find_breaking_changes, calls sync.make_columns_nullable, then snapshot_store.save. It never returns the list of BreakingChange. It uses pick_environment, not stage_environment. | src/adops/application/accept_schema.py:28-60 | Return the found changes (the full tuple, not only dropped) in AcceptedSchema so the dev path can write the record. Pull the dropped-column relaxation out into a shared function that run_pipeline's apply path also uses. Add a branch variant that uses stage settings and the Branch layout. |
+| 3. accept-schema CLI flags | Arguments are pipeline and table. Options are --env (default 'dev') and --project. There is no --branch. Output: 'Accepted the current shape of <t> (<n> columns, Step <s>) for Pipeline <p> in Environment <e>.' plus the nullable line. accept_project_schema reads the files and builds the sync and store through run_command factories. Errors go through fail(). | src/adops/interface/accept_schema_command.py:15-62 | Add a --branch option that refuses --env, as run does in run_command.py:241. Resolve it via stage_branch_name and SchemaLayout.for_branch. Branch the stage/prod path to write a record file and print a 'commit it' message. Write record files from the interface layer (filesystem), not from application. |
+| 3. tests asserting --env stage writes the Warehouse | test_accept_schema_in_stage_uses_stage_local_state_and_finds_stage_snapshot (line 317) asserts that --env stage builds the store with .adops/dlt/stage and makes stage_only nullable. test_env_option_targets_only_that_environment (line 154) and test_adapters_are_built_for_the_chosen_environments_kind (line 268, parametrized env/kind) also cover non-dev envs. | tests/unit/interface/test_accept_schema_command.py:154,268,317-345 | These tests must be rewritten as part of the supersession: --env stage/prod writes only a record and builds no store. Supersede decisions.md horizon-2 line 10 and the horizon-6 'accept-schema --branch is a known gap' line 39. |
+| 4. MCP accept_schema tool | accept_schema(pipeline, table, environment=None, branch=None). It runs plain_pipeline_name, then guarded_run_arguments (allows only dev or a branch, and refuses a dev that shares the stage/prod DB), then refuse_branch_schema_acceptance(branch), which raises ACCEPT_SCHEMA_DEV_ONLY. It then calls accept_project_schema(project, name, table, DEV) and replies AcceptedSchemaReply(pipeline, table, step, environment, column_count, nullable_columns). | src/adops/interface/mcp_server.py:142-149,229-241,296-309 | Keep the dev-only guard (ADR-0009). Write the record from the shared interface function that the CLI also uses. Add a record path/id field to AcceptedSchemaReply, plus a 'no Breaking Change seen' reply. Tests at test_mcp_server.py:1044-1142 assert the arguments and refusal texts. |
+| 4. edit_file boundary allows pipelines/accepted/<x>.yaml | allowed_project_path(write=True) requires parts[0] in PROJECT_FILE_ROOTS=('pipelines','dbt') and len(parts)>=2. It refuses '..', .env* and absolute paths. write_project_file creates missing parent folders (mkdir parents=True), so pipelines/accepted/x.yaml is writable and listable. | src/adops/domain/assistant_access.py:21,69-85 | present: hand-written records through MCP edit_file need no change to the boundary. The record writer for accept-schema can reuse write_project_file or plain Path writes in the interface layer. |
+| 5. Pipeline discovery globs | run_command.pipeline_files = sorted((project/'pipelines').glob('*.yaml')), which is non-recursive. Users: run --all, mcp load_pipelines/project_view, server._pipelines. validate_command._pipeline_files uses its own identical glob('*.yaml'). There is no rglob over pipelines/. ProjectTree.read_tree is rglob but is used only for dbt Transform folders. | src/adops/interface/run_command.py:263-265 | A pipelines/accepted/ subfolder is never read as a Pipeline. Records should use a separate glob, e.g. pipelines/accepted/*.yaml, through a new shared helper. A unit test should pin that pipeline_files ignores subfolders. |
+| conflict: Pipeline-name path vs record folder | Pipelines are addressed as pipelines/<name>.yaml (read_project_files). A Pipeline whose name is 'accepted' would be pipelines/accepted.yaml, which can sit next to the pipelines/accepted/ folder without conflict. On case-insensitive filesystems that is still no clash. | src/adops/interface/run_command.py:524-526 | No blocker. The folder name should be a module constant in one place, shared by validate, run and accept-schema. |
+| 6. Step Fingerprint of a Sync Step | current_fingerprints uses step_fingerprint(canonical_step_json(step), _step_files(step)). _step_files returns project_files.read_tree(step.project) only for a TransformStep and {} otherwise. A Sync Step's fingerprint is its canonical JSON alone, and a Transform hashes only its dbt project folder. | src/adops/application/run_pipeline.py:509-523 | Adding a record file under pipelines/accepted/ does not change any fingerprint and forces no branch re-sync. The plan must state this choice and pin it with a test. The risk is that a PR that only adds a record leaves its Branch fully deferred, so the record is never exercised in the Branch. |
+| 7. branch runs: store and deferral | _run_branch_locked builds plan_branch_run from stage's fingerprints and uses layout=SchemaLayout.for_branch(name) for sync and snapshot store, with stage settings. run_pipeline returns all-DEFERRED when first_changed is None. Otherwise _build_plan builds only steps[first:], so deferred Sync Steps never preflight or check for Breaking Changes. | src/adops/interface/run_command.py:436-489 | Records are consulted in a Branch only for rebuilt Sync Steps. The Branch snapshot starts empty (load returns None), so its first run never sees a Breaking Change. A Branch halts only when the Source changes between two Branch runs of a rebuilt Sync Step. |
+| 7. branch name derivation | The Branch Environment name is stage_branch_name(stage, branch), which goes through branch_environment_name with a hash suffix when the name is too long. It sizes the name to stage's longest Source name. The schema prefix is drop_prefix(name) = '<name>__'. | src/adops/application/run_pipeline.py:569-572 | accept-schema --branch must derive the name exactly this way, with stage settings and stage's Warehouse, so it writes the same br_<x>__adops schema that runs read. |
+| 8. validate_command structure | validate_project(project, pipeline) builds a Report(problems, skipped, schedules). It loads adops.yaml, then each pipeline file via _load(project, relative, loader, report), which prefixes problems with the relative path and handles a missing file or non-UTF-8 text. It then runs _check_connections and _check_dbt_projects. The MCP validate tool returns the same report. | src/adops/interface/validate_command.py:61-90 | Add a _check_records(project, loaded pipelines, report) step after the pipeline loop. Reuse _load with a new domain load_record so bad YAML gives the same sanitized '<file>: ...' lines. Check ids against file names, duplicates, unknown Pipeline, a table no Sync Step loads, an empty list and malformed changes. Decide whether validate <pipeline> checks only that Pipeline's records. |
+| 8. validate gates Server and workflows | Server load_definitions raises ServerConfigError when validate_project(project, None).problems is non-empty. The pull-request, stage and prod workflow templates all run 'adops validate' before 'adops run --all'. | src/adops/interface/server.py:43-63 | A malformed record will stop the Server from loading and fail the workflows. This is intended (fail early), but error text must name the file and stay sanitized. Record checks must not need a Warehouse. |
+| 9. BreakingChange representation | BreakingChange(column, kind: BreakingChangeKind{DROPPED,RETYPED}, previous_type, current_type=None) is a frozen dataclass. message gives '<col> dropped' or '<col> retyped (<from> -> <to>)', with parentheses. normalize_column_type lowercases, maps aliases and keeps parameters and [] depth. find_breaking_changes skips _dlt_ columns and sorts. | src/adops/domain/schema_snapshot.py:38-97 | A record change can be parsed into BreakingChange. A DROPPED record has no previous_type, so matching must compare only (column, kind) for dropped, and (column, kind, normalize(from), normalize(to)) for retyped. The record text form '<col> retyped <from> -> <to>' differs from .message (parens): choose one format and parse it in the domain. |
+| 9. loader conventions for a new file kind | load_pipeline and load_project_settings use _load(model, text): yaml.safe_load must give a mapping, then pydantic model_validate. Errors become PipelineValidationError lines '<path>: msg' via format_path, with include_input=False so values are never echoed, and nothing is chained. Validators can raise RuleViolation for multi-problem detail. | src/adops/domain/loader.py:13-80 | Add a domain AcceptedChangeRecord pydantic model (pipeline, table, changes: list[str] parsed into BreakingChange) and load_accepted_record(text) built on _load. The domain must stay framework-free apart from pydantic/yaml, which it already uses (guard g5, test_domain_purity). |
+| 10. unit test layout | tests/unit mirrors the layers: domain/, application/ (fakes.py holds FakeSnapshotStore and fake fingerprint stores), infrastructure/ (test_schema_snapshot_store.py uses real DuckDB files, and Postgres through ADOPS_TEST_POSTGRES_DSN in CI), and interface/ (mcp_harness.py, test_accept_schema_command.py, test_validate_command.py, test_run_command.py). Domain and application have purity tests. | tests/unit | Each phase adds tests in the matching folder. The applied-records adapter needs DuckDB tests and Postgres-DSN tests, including a transaction rollback test for the atomic snapshot+ids save. |
+| 10. E2E Breaking Change scenario | test_demo_incremental_breaking_change_and_missing_table runs dev, then ALTER TABLE orders DROP COLUMN customer_id in the shop Source and asserts 'Breaking Change in orders: customer_id dropped' plus skipped downstream Steps. It then runs 'accept-schema shop_sync orders' (dev) and asserts 'in Environment dev.' and 'may now be NULL ... customer_id', then re-runs. The demo fixture is parametrized over postgres and duckdb, and the shop() helper runs SQL against the Source. | tests/e2e/test_demo_sync.py:145,255-283 | Extend this test, or add one: also run stage before the ALTER, check that stage halts and names the change, run dev accept-schema to write the record, and check that stage passes on the next run and does not re-apply the record on a second run. The new assertions on dev output (record file path) must be added. |
+| 10. E2E stage feasibility | In the demo adops.yaml, dev and stage share the same shop Source DB (port 15432, database shop) and use separate Warehouses (warehouse vs warehouse_stage, or separate DuckDB files). warehouse(demo, sql, environment=...) can query stage. One ALTER is therefore seen by both dev and stage. | src/adops/templates/demo/adops.yaml | A stage record-apply E2E needs no new Source fixture: one ALTER drives both Environments. reseed_shop restores the Source. The e2e job has a 20-minute timeout across both params (guard g4), so add steps to the existing scenario rather than a new full-demo test. |
+| 11. GLOSSARY Breaking Change | The GLOSSARY has 'Breaking Change' (it halts the whole Sync Step and later Steps 'until resolved'). There is no entry for accept-schema, accepted-change record, schema snapshot or applied records. | GLOSSARY.md:69-71 | Add 'Accepted-change record' (with _Avoid_ terms) and update Breaking Change to say how it is resolved per Environment. Follow the glossary's bold-term, definition, _Avoid_ format. |
+| 11. ADR-0015 text | ADR-0015 says the Assistant opens a PR adding an accepted-change record, a human merges, the Server pulls, and the next run records the new shape. Consequences: accept-schema 'produc[es] a record in the Project that each Environment applies on its next run; running it by hand stays available for dev and Branch Environments.' ADR-0014 line 15 points Git acceptance to horizon 8. | docs/adr/0015-breaking-changes-accepted-through-git.md | Update the Consequences with what was built: record location and format, applied ids per Environment Warehouse, uncovered-change halt, --env stage/prod writes only a record, --branch, records kept forever. Also fix the stale horizon-8 pointer in ADR-0014. |
+| guard g3: template wheel list | The CI step greps an explicit list of demo/plain/server/github template files in the wheel. init_command._copy_tree copies template directories recursively (iterdir). The demo has only pipelines/shop_sync.yaml, and plain has no pipelines/ folder. | .github/workflows/ci.yml:39-57 | No template folder is needed: accept-schema creates pipelines/accepted/ on first write (mkdir parents). If a pipelines/accepted/.gitkeep template is added, list 'pipelines/accepted/.gitkeep' in the demo loop, check that hatch ships dotfiles, and update test_init_command. |
+| guard g2: coverage | Coverage must be 100% line and branch on src/adops, with only TYPE_CHECKING excluded. | pyproject.toml | Each new branch needs a unit test: covered/uncovered/partial records, multiple records, already-applied ids, dev skips, the atomic save failing, the validate error kinds, the accept-schema dev-none-seen and --branch cases, and the MCP record reply. |
+| guard g5: layering and no pragma | The domain/application purity tests forbid framework imports, and 'pragma: no cover' is banned apart from TYPE_CHECKING. | tests/unit/application/test_application_purity.py | Record parsing and coverage matching go in the domain (pure). Reading record files from disk and writing them go in interface or infrastructure. run_pipeline gets records as values or through a port. |
+| guard g1: ruff | ruff check runs E,F,W,I,B,UP with line-length 100. | .github/workflows/ci.yml | New code follows the existing 100-column style. |
+| guard g4: E2E | pytest tests/e2e -m e2e runs on ubuntu with Docker, with a 20-minute job timeout. The demo fixture runs every scenario twice (postgres and duckdb). | tests/e2e/conftest.py:32-40 | Keep the added E2E steps minimal (a few extra adops runs) so the job stays within 20 minutes. |
+| 12. Server path | Server load_definitions finds Pipelines with pipeline_files. Each scheduled run calls run_in_environment(project, pipeline, environment, InOrderOrchestrator()), the same function adops run --env uses. It reads the Project files at call time, so committed records pulled by horizon 8 are seen. | src/adops/interface/server.py:66-89 | Load records inside run_in_environment and _run_branch_locked, not in the CLI wrapper, so the Server, run --all, MCP run (run_project) and the workflows all apply records through one seam. |
+| needs: per-Environment snapshot table exists | present: _adops_schema_snapshots is created lazily in <layout>.adops per Environment. | src/adops/infrastructure/schema_snapshot_store.py:20,92-101 | Create the applied-records table in the same lazy CREATE IF NOT EXISTS block. |
+| needs: dropped-column NOT NULL relaxation via Sync port | present: Sync.make_columns_nullable(step, table, warehouse, columns) is implemented in DltSync, and accept_schema uses it. | src/adops/infrastructure/dlt_sync.py:192-202 | Reuse it in PlannedStep for covered DROPPED changes, per table, before sync.sync. |
+| needs: Server reads the updated Project from Git (horizon 8) | unknown: no Git pull code is in src. The Server reads the bind-mounted Project folder at call time, and the stage/prod workflows run validate and run on the self-hosted runner after checkout. ADR-0014 still says Git acceptance comes 'with horizon 8'. | src/adops/templates/github/workflows/adops-stage.yml:30,55 | Rely on the workflow checkout plus the Server's per-call file reads. Do not build any pull logic. Note the dependency in the plan. |
+| needs: MCP accept_schema has no Warehouse lock / dev only | present: horizon-10 decision line 73 says MCP accept_schema is dev only and takes no lock, and refuse_branch_schema_acceptance enforces it. | docs/roadmaps/agentic-dataops/decisions.md:73 | The MCP stays dev-only. --branch is CLI-only unless the user decides otherwise. Update the ACCEPT_SCHEMA_DEV_ONLY text if 'nothing to accept there' becomes untrue. |
+
+## Repo guards this plan works under
+
+| Id | Enforces | Defined in | Phases |
+|---|---|---|---|
+| g1 | uv run ruff check (E,F,W,I,B,UP; line-length 100) must pass on every PR | .github/workflows/ci.yml | 1, 2, 3, 4, 5 |
+| g2 | uv run pytest tests/unit --cov with fail_under=100 line+branch on src/adops; only 'if TYPE_CHECKING:' excluded | .github/workflows/ci.yml + pyproject.toml [tool.coverage] | 1, 2, 3, 4, 5 |
+| g3 | builds the wheel and greps for an explicit list of template files; a new template file not added to the list is not checked, a listed file missing fails CI | .github/workflows/ci.yml 'Project templates ship in the wheel' | all (repo-wide) |
+| g4 | uv run pytest tests/e2e -m e2e on ubuntu with Docker, 20-minute timeout | .github/workflows/ci.yml e2e job | 4 |
+| g5 | no 'pragma: no cover' except TYPE_CHECKING; domain/application import no framework | docs/roadmaps/agentic-dataops/decisions.md horizon 1 | 1, 2, 3, 4, 5 |
+
+## Out of Scope
+
+- An 'Accept' button on the Dagster page or any other unreviewed acceptance — ADR-0015 rejected it.
+- The Assistant committing, pushing or opening the PR that carries a record — the MCP server does no Git (horizon-9 decision); the six skills are a later horizon.
+- Removing, archiving or expiring record files — kept forever by user decision.
+- Accepting added columns or a full new TableShape — records list only dropped or retyped changes.
+- Copying stage's snapshots or applied ids into a new Branch Environment — branch baselines start fresh (horizon 6).
+- Automatic drop-branch on PR merge or close — stays manual (horizon 6).
+- New Breaking Change kinds (renames, NOT NULL tightening) — find_breaking_changes keeps dropped and retyped.
+- Changing the Server's Git update flow or Promotion workflows — horizon 8 already delivers the checkout.
+- Changing the MCP allow-list or adding stage/prod MCP tools — ADR-0009 stays.
+- A cross-Environment 'pending records' report — not needed to unblock unattended runs.
+- Change accept_schema to report found Breaking Changes (accept-schema-reports-changes) — held for the next Planning Horizon to keep this one small and reviewable — the Planning Brief and project memory carry the context forward
+- Write record files from the accept schema command (accept-schema-writes-records) — held for the next Planning Horizon to keep this one small and reviewable — the Planning Brief and project memory carry the context forward
+- Add `adops accept-schema --branch <name>` (CLI only, takes stage's Warehouse lock like drop-branch, writes br_<branch>__adops directly) — gate 2 (Needed now): unattended PR Branch runs already get past Breaking Changes through records (phases 1 and 3) and the halt message points to records; the hand command blocks no phase here and would push the horizon past the 7-phase ceiling. It is a binding user decision, so plan it as the first phase of the next horizon.
+- Ship a pipelines/accepted/.gitkeep in the demo template — gate 4 (Not ceremony): accept-schema and edit_file both create the folder on first write, and a template file would add a wheel-list entry (g3) for nothing.
+- Expiring or removing old or unapplied records — gate 1: the user decided records are kept forever.
+- Copying stage's applied ids or snapshots into a new Branch Environment — gate 1: Branch baselines start fresh by an earlier decision.
+- Counting record files in Sync Step Fingerprints so a record-only PR re-syncs its Branch — gate 1: the user decided fingerprints stay unchanged; phase 3 pins this with a test.
+- A separate applied-records port next to SchemaSnapshotStore — gate 3 (speculative abstraction): one adapter keeps both tables, and the atomic save needs them in one transaction.
+- Until the next horizon, `adops accept-schema --env stage|prod` still writes those Warehouses directly — a known temporary gap the user accepted at the Alignment Preview
+- Update ADR-0015 Consequences and fix ADR-0014's stale 'horizon 8' pointer — done with the next horizon's accept-schema phase, so the ADR describes the whole finished flow once
+- Superseding the horizon-2 'accepted only via accept-schema --env' decision in code/tests — the decisions.md line is written now; the --env stage|prod test rewrites land with the next horizon's accept-schema phase
+
+## Success Criteria
+
+- Done when ALL hold, with tests at 100% line and branch coverage on the adops package and the demo E2E green on Postgres and DuckDB. (1) An accepted-change record is a small plain YAML file pipelines/accepted/<id>.yaml (id = file name, so ids are unique by construction) holding a Pipeline name, a table name and a non-empty list of changes in BreakingChange.message wording ('<column> dropped' or '<column> retyped (<from> -> <to>)'), types normalized when matching. (2) adops validate reports a sanitized '<file>: ...' problem for bad YAML, an unknown Pipeline, a table no Sync Step of that Pipeline loads, an empty change list or a malformed change; record files are never read as Pipelines and never change Step Fingerprints. (3) In stage, prod and Branch Environments a Sync Step whose Breaking Changes are all covered by unapplied records relaxes NOT NULL on covered dropped columns, syncs, and after every Check passes saves the new snapshot and the used record ids in one transaction; the Step result names each applied record. Any uncovered change halts the Step and downstream Steps naming only the uncovered changes and telling the user to add an accepted-change record to the PR; nothing is applied. (4) Applied record ids live in _adops_applied_records in each Environment's own adops schema (br_<branch>__adops for a Branch); a stored id never applies again there. dev never applies records. (5) The demo E2E shows stage halting on a Breaking Change, passing once a covering record file is added, and not applying it again on the next run. (6) No code path deletes record files; a Breaking Change is never accepted automatically; GLOSSARY describes accepted-change records. accept-schema writing records, --env stage|prod becoming read-only, --branch and the ADR-0015/0014 text are the next horizon.
+- Add the accepted change record and coverage rule: src/adops/domain/accepted_change_record.py, whose unit tests cover parse, dump round-trip, malformed changes, int4/integer type normalization, and every cover() case: full, partial, several records, already-applied ids, and unused records.
+- Change Sync Steps to apply accepted-change records: run_pipeline applies records through PlannedStep. Unit tests with FakeSnapshotStore show: a covered change passes and stores the used ids, an uncovered change halts naming only that change with nothing saved or relaxed, an already-applied record is ignored, failed Checks store no ids, and dev ignores records, and the Step result names each applied record.
+- Add an applied records table to snapshot storage: WarehouseSnapshotStore implements applied_record_ids and the atomic save, with DuckDB and Postgres tests passing, including the rollback test.
+- Connect record files to stage, prod, Branch runs: run_command passes the Project's records to every non-dev run. Unit tests pin that record files are not Pipelines and do not change fingerprints.
+- Add record file checks to adops validate: validate_project reports each bad-record kind as a sanitized '<file>: ...' problem, with one unit test per error kind and one for a valid record.
+
+## Alignment Preview
+
+Stage 3 proposed 7 phases. The phase cap kept 4. The preview raised 5 concerns. The user kept the validate phase too (5 phases) and asked for applied records to be named in the run output. The concern about a record-only PR became a Branch test in phase 4. The accepted temporary gap is that `accept-schema --env stage|prod` writes directly until horizon 14. There was one redirect round, with no Stage 3 re-run: the validate phase already existed.
+
+## Quality Gate
+
+The full path ran one critic iteration with no verification call and no healer call. The orchestrator applied the fixes the critic named, and the user confirmed the scope-touching ones.
+- **Blocker (confirmed on evidence):** `successCriteria[0]` copied the whole-task success definition, including deferred accept-schema work. Healed by rewriting it to this horizon's scope.
+- **Major, valid-dependencies:** phase 2 could break the real snapshot store before phase 3. Healed: ids are passed to `save()` only when a table used records, and the interface suite must stay green after phase 2.
+- **Major, grounded-in-discovery:** the stage E2E, the ADR text and the horizon-2 supersession had no home. Healed: the E2E was added to phase 4 (user-confirmed), and the ADR-0015/0014 text and the `--env` test rewrites are deferred to horizon 14.
+- **Minor, respects-repo-guards:** g5 notes were added to phases 3–5.
+- **Minor (fixed):** the halt hint no longer hard-codes the folder in the application layer, GLOSSARY edits moved to phase 1, fragile greps were fixed, the undecided validate criterion was settled, duplicate deferred entries were removed, and the lock assumption was corrected to a whole-Warehouse lock.
+- **Accepted debt:** none.
+
+Verdict: passed after fixes.
+
+## Cost
+
+7 Agent calls against a budget of 8–10: Stage 1, Discovery, Stage 3, preview concerns, Stage 4, the Stage 3.5 brief and the critic. No patch, verify or healer call was needed, because the orchestrator applied the critic's named fixes. Nothing overran.
+
+## Full analysis
+
+**Domain shape:** business — The objective is a DataOps governance rule — who may accept a Breaking Change in which Environment, reviewed through Git, and when it is applied or halted — across real seams between Pipeline schema rules, Environments and the Assistant interface.
+
+| Term | Meaning |
+|---|---|
+| Breaking Change | A dropped or retyped column in a Source table compared with the Environment's saved schema snapshot; it halts the Sync Step and its downstream Steps unless accepted. |
+| Accepted-change record | A committed YAML file in the Project (ADR-0015) with a unique id, one Pipeline table and the list of accepted Breaking Changes. |
+| Apply (a record) | What a stage, prod or Branch run does when unapplied records cover every Breaking Change found: continue the Step, save the new snapshot and store the record ids as applied. |
+| Applied records | The small table in each Environment's adops schema, next to _adops_schema_snapshots, holding ids of records that Environment applied. |
+| Uncovered change | A Breaking Change no unapplied record lists exactly; any uncovered change halts the Step and only those are named. |
+| accept-schema | The adops command and dev-only MCP tool: in dev it accepts in dev's Warehouse and writes a record; with --env stage|prod it only writes a record; with --branch it writes the Branch snapshot by hand. |
+| Environment | dev, stage, prod or a Branch Environment (br_<branch>__ schemas in stage's Warehouse); each keeps its own snapshots and applied records. |
+| Schema snapshot | The accepted TableShape of a Pipeline table in adops._adops_schema_snapshots of one Environment's Warehouse, saved only after every Check of the Step passes. |
+
+**Assumptions**
+- confirmed: record content is the list of accepted changes for one Pipeline table
+- confirmed: uncovered Breaking Change at apply time halts the Step and applies nothing
+- confirmed: applied record ids are tracked per Environment in its own Warehouse; at most once per Environment
+- confirmed: dev accept-schema (CLI or MCP) writes the record from dev's view; hand-written YAML is the fallback, checked by adops validate
+- confirmed: Branch Environments apply records like stage; accept-schema --branch added; halt message says to add a record to the PR
+- confirmed: record files are kept forever
+- confirmed: accept-schema --env stage|prod writes a record file, never that Warehouse
+- The record id is the record file's name, unique across the Project; accept-schema names it <UTC timestamp>-<pipeline>-<table>.
+- Records live in a subfolder under pipelines/ (e.g. pipelines/accepted/), inside the MCP edit_file boundary and outside the top-level pipelines/*.yaml Pipeline glob.
+- A change is matched exactly: same column, same kind and, for a retype, the same normalized from/to types. A record may list more changes than an Environment sees.
+- A record is marked applied only on a run where it covered at least one Breaking Change found there and the Step's Checks passed.
+- Several unapplied records for the same table may together cover one run's Breaking Changes; every record that covered at least one is marked applied.
+- Applying happens inside the existing whole-Warehouse lock (one lock per Warehouse; a Branch run holds stage's), in the same run that saves the snapshot.
+- dev never applies records, because dev accepts by hand.
+- Server scheduled runs and the merge/release workflows already see committed records via the updated Server Project folder (horizon 8).
+- The applied-records table is created when first needed, like _adops_schema_snapshots; drop-branch CASCADE removes it with the branch.
+
+**Risks**
+- Step Fingerprints hash Project files; if record files under pipelines/ count toward a Sync Step's fingerprint, adding a record makes branches rebuild or re-sync. The choice must be deliberate.
+- An unapplied record stays pending forever; if the same column change later appears in that Environment, the old record silently accepts it.
+- Saving the snapshot and the applied ids must be ordered so a crash never leaves a record marked applied without the new snapshot (or the reverse); DuckDB and Postgres differ.
+- Branch baselines start fresh (horizon 6), so a Branch may never see the change the record was written for, giving a false sense it was tested before merge.
+- Supersession: horizon-2 decision 'accepted only via adops accept-schema --env' must be superseded in decisions.md and in tests asserting --env stage writes the Warehouse.
+- Horizon-10 'MCP accept_schema is dev only' stays for Warehouse writes; writing the record from MCP must not widen the tool to stage/prod names (ADR-0009).
+- Type strings must match through normalize_column_type; validate should normalize hand-written types so 'int4' and 'integer' match.
+- MCP edit_file has no special handling for record files; validate errors and the halt message must be enough to fix a bad record without Warehouse access.
+- accept-schema --env stage|prod changes from a Warehouse write to a file write; the CLI output must say nothing was applied yet and the file must be committed.

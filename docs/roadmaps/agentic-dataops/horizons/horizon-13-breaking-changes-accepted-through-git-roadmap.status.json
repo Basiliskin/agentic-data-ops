@@ -1,0 +1,330 @@
+{
+  "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-13-breaking-changes-accepted-through-git-roadmap.json",
+  "roadmapTask": "Horizon 13: Breaking Changes in stage/prod are accepted through Git (ADR-0015 accepted-change records). Settle what a record holds, how an Environment knows it already applied one, whether records are ever removed, and what happens if the Source has drifted again by apply time. Also cover how a Breaking Change in a PR branch is handled unattended (the accept-schema --branch gap).",
+  "createdAt": "2026-11-22T16:49:51Z",
+  "updatedAt": "2026-11-22T18:33:20Z",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "accepted-change-record-domain",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-22T16:49:51Z",
+      "baseRef": "16d53c2bc386e81a026dbf861dd5d1254eb7b059",
+      "baseDirty": true,
+      "notes": "Already dirty at start: docs/roadmaps/agentic-dataops/{MAP,blockers,decisions,discoveries,next-horizon-brief,state}.md, docs/roadmaps/.tmp/, horizon-13 roadmap .json/.md | Changed: src/adops/domain/accepted_change_record.py (new), tests/unit/domain/test_accepted_change_record.py (new), GLOSSARY.md. Adds AcceptedChangeRecord, parse_change, load_accepted_record, dump_accepted_record, cover(). schema_snapshot.py was planned but not changed. A dropped change parses with previous_type \"\" (a record has no old type), so the parse test for DROPPED compares message and (column, kind), not == against the found change.",
+      "unplannedFiles": [],
+      "gateRun": "ruff check . : pass; ADOPS_TEST_POSTGRES_DSN=postgresql://postgres:adops@localhost:55432/postgres uv run pytest tests/unit --cov (fail_under=100) : pass, 1812 tests, 100% line+branch",
+      "failures": [
+        {
+          "at": "2026-11-22T16:58:22Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run pytest tests/unit --cov",
+          "detail": "43 errors in Postgres-backed infrastructure tests and coverage 98.42% because ADOPS_TEST_POSTGRES_DSN was unset locally",
+          "resolvedBy": "gate-fix",
+          "resolution": "Ran with ADOPS_TEST_POSTGRES_DSN pointing at the local adops-test-pg container (port 55432), as CI sets it; no code change"
+        }
+      ],
+      "completedAt": "2026-11-22T16:58:59Z",
+      "gradeResult": {
+        "phaseId": "accepted-change-record-domain",
+        "overallPass": true,
+        "dimensionScores": [
+          {
+            "dimensionId": "change-text-round-trip",
+            "score": 8,
+            "pass": true,
+            "evidence": "14 parse/dump/round tests pass; retype parse == real BreakingChange; DROPPED compared via message + previous_type \"\" since a record has no old type (literal == criterion not met, deducted)"
+          },
+          {
+            "dimensionId": "loader-errors-sanitized",
+            "score": 9,
+            "pass": true,
+            "evidence": "11 load tests, one per required shape plus extras; sentinel absent, no chaining; include_input=False at line 60"
+          },
+          {
+            "dimensionId": "cover-matching-semantics",
+            "score": 9,
+            "pass": true,
+            "evidence": "10 cover tests covering full, partial, multi-record, applied ids, unused, wrong retype, drop vs retype, extra changes, record-order used_ids"
+          },
+          {
+            "dimensionId": "domain-layer-no-io",
+            "score": 9,
+            "pass": true,
+            "evidence": "I/O and layer greps empty; no accepted/ in domain; frozen dataclasses tested"
+          }
+        ]
+      }
+    },
+    {
+      "phaseId": "apply-records-in-sync-steps",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-22T17:03:04Z",
+      "baseRef": "16d53c2bc386e81a026dbf861dd5d1254eb7b059",
+      "baseDirty": true,
+      "notes": "already dirty at start: GLOSSARY.md,docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,docs/roadmaps/.tmp/,docs/roadmaps/agentic-dataops/horizons/horizon-13-breaking-changes-accepted-through-git-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-13-breaking-changes-accepted-through-git-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-13-breaking-changes-accepted-through-git-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-13-breaking-changes-accepted-through-git-roadmap.status.last_good.json,src/adops/domain/accepted_change_record.py,tests/unit/domain/test_accepted_change_record.py\nChanged: src/adops/application/{ports,run_pipeline,accept_schema}.py, src/adops/infrastructure/schema_snapshot_store.py, src/adops/interface/run_command.py, tests/unit/application/{fakes,test_run_pipeline}.py, tests/unit/infrastructure/test_schema_snapshot_store.py, tests/unit/interface/test_run_command.py. run_pipeline(records=) passes matching non-dev records to PlannedStep; _accept_breaking covers changes with cover(), halts naming only uncovered ones (+PR hint outside dev), relax_dropped_columns (shared with accept_schema) runs before sync, _save_shapes passes used ids through save(applied_record_ids=), StepOutcome/StepReport.notes name applied records and result_output prints them. Real store has placeholder applied_record_ids()=empty and refuses ids (amendment 1, user choice) until applied-records-table.",
+      "amendments": [
+        {
+          "at": "2026-11-22T17:07:51Z",
+          "by": "execute",
+          "reason": "The contract extends the runtime_checkable SchemaSnapshotStore port and also requires tests/unit/interface to stay green, but test_run_command.py:566 and test_schema_snapshot_store.py:42 assert the real WarehouseSnapshotStore is a SchemaSnapshotStore, so it needs placeholder applied_record_ids/save(applied_record_ids=) until applied-records-table replaces them (user chose this). The shared relaxation must also be called from accept_schema.py, and the applied-record lines must be printed by run_command.result_output to reach the CLI output and Run Log.",
+          "grounding": "isinstance on a runtime_checkable Protocol checks every member exists; run_command.result_lines is what _write_run_log stores; accept_schema.py:61 is the only current make_columns_nullable caller",
+          "before": {
+            "filesAffected": [
+              "src/adops/application/run_pipeline.py",
+              "src/adops/application/ports.py",
+              "tests/unit/application/fakes.py",
+              "tests/unit/application/test_run_pipeline.py"
+            ]
+          },
+          "after": {
+            "filesAffected": [
+              "src/adops/application/run_pipeline.py",
+              "src/adops/application/ports.py",
+              "tests/unit/application/fakes.py",
+              "tests/unit/application/test_run_pipeline.py",
+              "src/adops/infrastructure/schema_snapshot_store.py",
+              "tests/unit/infrastructure/test_schema_snapshot_store.py",
+              "src/adops/application/accept_schema.py",
+              "src/adops/interface/run_command.py",
+              "tests/unit/interface/test_run_command.py"
+            ]
+          }
+        }
+      ],
+      "unplannedFiles": [],
+      "completedAt": "2026-11-22T17:27:25Z",
+      "gradeResult": {
+        "phaseId": "apply-records-in-sync-steps",
+        "dimensionScores": [
+          {
+            "dimensionId": "uncovered-halts-nothing-applied",
+            "score": 9,
+            "pass": true,
+            "evidence": "cover-then-raise precedes relax and sync; partial test asserts exact uncovered-only message, no nullable/sync/save, downstream SKIPPED; stage hint and dev no-hint tests. Covered+uncovered never mixed in one table."
+          },
+          {
+            "dimensionId": "ids-saved-only-after-checks",
+            "score": 9,
+            "pass": true,
+            "evidence": "ids written only via save(applied_record_ids=) in _save_shapes after _raise_if_failed; single-save, failed-check and two-table tests."
+          },
+          {
+            "dimensionId": "dev-and-scope-filtering",
+            "score": 9,
+            "pass": true,
+            "evidence": "dev passes (), pipeline and table filtering, applied_reads==0 tests; existing tests unchanged; tests/unit/interface green."
+          },
+          {
+            "dimensionId": "relaxation-shared-and-scoped",
+            "score": 9,
+            "pass": true,
+            "evidence": "one caller in relax_dropped_columns, accept_schema reuses it; dropped-only and call-order tests; accept_schema tests pass."
+          },
+          {
+            "dimensionId": "step-result-names-records",
+            "score": 9,
+            "pass": true,
+            "evidence": "notes built after checks and saves, flow to StepReport and result_output with interface test; unused record not named; failed check no notes. No stored Run Log test."
+          },
+          {
+            "dimensionId": "application-layer-respected",
+            "score": 9,
+            "pass": true,
+            "evidence": "no forbidden imports; Protocol declares both methods with atomic docstring; purity test green."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": [
+        "uv run ruff check: pass",
+        "uv run pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass, 1825 passed, 100% line+branch",
+        "uv run pytest tests/e2e -m e2e: pass, 10 passed in 10m30s",
+        "wheel template check (g3): not applicable, no template touched"
+      ]
+    },
+    {
+      "phaseId": "applied-records-table",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-22T17:28:22Z",
+      "baseRef": "16d53c2bc386e81a026dbf861dd5d1254eb7b059",
+      "baseDirty": true,
+      "notes": "already dirty at start: GLOSSARY.md,docs/roadmaps/.tmp/h13-skills-draft/stage0-guards.json,docs/roadmaps/.tmp/h13-skills-draft/stage1-analysis.json,docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/horizons/horizon-13-breaking-changes-accepted-through-git-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-13-breaking-changes-accepted-through-git-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-13-breaking-changes-accepted-through-git-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-13-breaking-changes-accepted-through-git-roadmap.status.last_good.json,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/accept_schema.py,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/domain/accepted_change_record.py,src/adops/infrastructure/schema_snapshot_store.py,src/adops/interface/run_command.py,tests/unit/application/fakes.py,tests/unit/application/test_run_pipeline.py,tests/unit/domain/test_accepted_change_record.py,tests/unit/infrastructure/test_schema_snapshot_store.py,tests/unit/interface/test_run_command.py\nChanged (both were already dirty from apply-records-in-sync-steps; diffed against a pre-phase copy): src/adops/infrastructure/schema_snapshot_store.py, tests/unit/infrastructure/test_schema_snapshot_store.py. _client() lazily creates _adops_applied_records(record_id TEXT PRIMARY KEY, pipeline, table_name, applied_at) in the layout adops schema; applied_record_ids SELECTs record_id; save() INSERTs ids inside the snapshot begin_transaction (placeholder + NotImplementedError removed). Tests parametrized over DuckDB and Postgres (ADOPS_TEST_POSTGRES_DSN): lazy create, build-up, empty save keeps ids, pipeline/table columns, Branch vs adops isolation, PK-collision rollback, failing snapshot insert rollback. Gates: ruff clean, tests/unit 1838 passed, coverage 100%.\nCompensation known: remove the CREATE/INSERT and DROP TABLE <adops schema>._adops_applied_records per Environment; Branch schemas go with drop-branch CASCADE. Not invoked. During implementation ruff flagged B008 in the new test helper (fixed with a module STAGE constant) before verification began.",
+      "unplannedFiles": [],
+      "completedAt": "2026-11-22T17:45:24Z",
+      "gradeResult": {
+        "phaseId": "applied-records-table",
+        "dimensions": [
+          {
+            "dimensionId": "atomic-snapshot-and-ids",
+            "score": 9,
+            "minScore": 9,
+            "passed": true,
+            "evidence": "id INSERT loop inside the snapshot begin_transaction; both rollback tests pass on duckdb and postgres (PK collision keeps previous snapshot and ids; failing snapshot insert saves no ids). Not 10: duplicate ids within one save untested."
+          },
+          {
+            "dimensionId": "per-environment-isolation",
+            "score": 9,
+            "minScore": 9,
+            "passed": true,
+            "evidence": "both tables qualified via make_qualified_table_name on the layout-bound client; lazy CREATE in _client(); fresh-warehouse and two-way Branch/adops isolation tests pass on both engines. Not 10: Branch schema name not asserted directly."
+          },
+          {
+            "dimensionId": "round-trip-both-engines",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "build-up, empty-save-keeps-ids and pipeline/table_name column tests pass on duckdb and postgres, no skips in -rs."
+          }
+        ],
+        "overallPass": true,
+        "summary": "Ids are written atomically with the snapshot, isolated per Environment schema, and round-trip on DuckDB and Postgres (38 passed, none skipped)."
+      },
+      "gateRun": [
+        "uv run ruff check: pass",
+        "uv run pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass, 1838 passed, 100% line+branch",
+        "uv run pytest tests/e2e -m e2e: pass, 10 passed in 10m43s",
+        "wheel template check (g3): not applicable, no template touched"
+      ]
+    },
+    {
+      "phaseId": "load-records-in-runs",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-22T17:46:49Z",
+      "baseRef": "16d53c2bc386e81a026dbf861dd5d1254eb7b059",
+      "baseDirty": true,
+      "notes": "Already dirty at start: GLOSSARY.md,docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/accept_schema.py,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/infrastructure/schema_snapshot_store.py,src/adops/interface/run_command.py,tests/unit/application/fakes.py,tests/unit/application/test_run_pipeline.py,tests/unit/infrastructure/test_schema_snapshot_store.py,tests/unit/interface/test_run_command.py,docs/roadmaps/.tmp/,docs/roadmaps/agentic-dataops/horizons/horizon-13-breaking-changes-accepted-through-git-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-13-breaking-changes-accepted-through-git-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-13-breaking-changes-accepted-through-git-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-13-breaking-changes-accepted-through-git-roadmap.status.last_good.json,src/adops/domain/accepted_change_record.py,tests/unit/domain/test_accepted_change_record.py | Changed: src/adops/interface/run_command.py, tests/unit/interface/test_run_command.py, tests/unit/interface/test_server.py, tests/e2e/test_demo_sync.py. run_command gains ACCEPTED_RECORDS_DIR, accepted_record_files and load_project_records (rejects *.yml by name, prefixes errors with the relative path); run_in_environment and _run_branch_locked pass records= inside the Warehouse lock. Unit tests for discovery, fingerprints, deferral, lock order, stage apply-once and Branch recovery; demo E2E halts stage, applies a record once. | Graded before the e2e fixture fix, which changed only test setup, not the graded code or assertions.",
+      "unplannedFiles": [
+        "tests/unit/interface/test_server.py",
+        "tests/e2e/conftest.py",
+        "tests/e2e/demo_project.py"
+      ],
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-22T17:56:23Z",
+          "gate": "uv run pytest tests/unit --cov",
+          "detail": "FAILED tests/unit/interface/test_server.py::test_a_scheduled_run_holds_the_environments_warehouse_lock (stub run_pipeline(*_) rejects records=); 50 errors: ADOPS_TEST_POSTGRES_DSN not set",
+          "resolvedBy": "gate-fix",
+          "resolution": "Stub now accepts **kwargs; started the test Postgres on :55432 and set ADOPS_TEST_POSTGRES_DSN",
+          "attempt": 1,
+          "by": "execute"
+        },
+        {
+          "at": "2026-11-22T18:08:09Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run pytest tests/e2e -m e2e",
+          "detail": "FAILED test_branch_environment_defers_rebuilds_and_drops[postgres]: target_before != SEED_CUSTOMER_STATS (stage Postgres Warehouse kept post-drop rows from the breaking-change test)",
+          "resolvedBy": "gate-fix",
+          "resolution": "demo fixture now drops every run-created schema in both Postgres Warehouses before each test (reset_postgres_warehouses)"
+        }
+      ],
+      "completedAt": "2026-11-22T18:19:34Z",
+      "gradeResult": {
+        "phaseId": "load-records-in-runs",
+        "dimensionScores": [
+          {
+            "dimensionId": "records-not-pipelines-or-fingerprints",
+            "score": 9,
+            "pass": true,
+            "evidence": "pipeline_files stays non-recursive; tests pin pipeline_files ignores accepted/x.yaml, fingerprints equal before/after a record, unchanged Branch fully deferred."
+          },
+          {
+            "dimensionId": "every-non-dev-path-loads",
+            "score": 9,
+            "pass": true,
+            "evidence": "load_project_records called in run_in_environment and _run_branch_locked inside the lock; lock-order tests, stage apply-once and Branch recovery tests. Minor: a second *.yml glob only rejects misnamed files."
+          },
+          {
+            "dimensionId": "record-loading-errors",
+            "score": 9,
+            "pass": true,
+            "evidence": "Missing folder gives (); malformed record error starts with pipelines/accepted/bad.yaml: and hides the sentinel; sorted ids equal stems; .yml refused by name."
+          },
+          {
+            "dimensionId": "interface-layer-thin",
+            "score": 9,
+            "pass": true,
+            "evidence": "No cover/applied_record_ids/dev filtering in run_command; ACCEPTED_RECORDS_DIR defined once. Folder path rebuilt once for the .yml check."
+          },
+          {
+            "dimensionId": "stage-applies-once-e2e",
+            "score": 9,
+            "pass": true,
+            "evidence": "E2E on postgres and duckdb: stage halts naming customer_id dropped and the record hint, next run applies the record by id, second run does not."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": "ruff check: pass; uv run pytest tests/unit --cov (100% line+branch, 1850 passed): pass; uv run pytest tests/e2e -m e2e (10 passed, 10:52): pass"
+    },
+    {
+      "phaseId": "validate-record-files",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-22T18:25:32Z",
+      "baseRef": "16d53c2bc386e81a026dbf861dd5d1254eb7b059",
+      "baseDirty": true,
+      "notes": "Already dirty at start: GLOSSARY.md,docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/accept_schema.py,src/adops/application/ports.py,src/adops/application/run_pipeline.py,src/adops/infrastructure/schema_snapshot_store.py,src/adops/interface/run_command.py,tests/e2e/conftest.py,tests/e2e/demo_project.py,tests/e2e/test_demo_sync.py,tests/unit/application/fakes.py,tests/unit/application/test_run_pipeline.py,tests/unit/infrastructure/test_schema_snapshot_store.py,tests/unit/interface/test_run_command.py,tests/unit/interface/test_server.py,docs/roadmaps/.tmp/,docs/roadmaps/agentic-dataops/horizons/horizon-13-breaking-changes-accepted-through-git-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-13-breaking-changes-accepted-through-git-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-13-breaking-changes-accepted-through-git-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-13-breaking-changes-accepted-through-git-roadmap.status.last_good.json,src/adops/domain/accepted_change_record.py,tests/unit/domain/test_accepted_change_record.py | Changed: src/adops/interface/validate_command.py, tests/unit/interface/test_validate_command.py, tests/unit/interface/test_mcp_server.py. validate_project gains _check_records: parses every pipelines/accepted/*.yaml via _load + load_accepted_record (also flags *.yml, matching load_project_records), then cross-checks pipeline and Sync-Step table only for records of the validated Pipeline(s) that loaded. MCP test added for the shared report.",
+      "unplannedFiles": [
+        "tests/unit/interface/test_mcp_server.py"
+      ],
+      "gateRun": [
+        "uv run ruff check .: pass",
+        "uv run pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass, 1867 passed, 100% line+branch",
+        "uv run pytest tests/unit/interface/test_validate_command.py -k record: pass",
+        "uv run pytest tests/unit -k \"mcp and validate\": pass",
+        "manual: adops validate on an init --demo Project with a good and a bad record: ok / exit 1 naming the bad file",
+        "e2e (g4): not run — phase touches no tests/e2e path and no e2e test calls validate"
+      ],
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-22T18:32:02Z",
+          "gate": "uv run pytest tests/unit --cov",
+          "detail": "FAILED test_validate_command.py::test_target_missing_from_an_environment_is_reported_by_environment_and_key (assert 0 == 1)",
+          "resolvedBy": "gate-fix",
+          "resolution": "a str.replace in the new tests also rewrote an existing test settings line; restored REVERSE_SETTINGS there"
+        }
+      ],
+      "completedAt": "2026-11-22T18:33:20Z",
+      "gradeResult": {
+        "phaseId": "validate-record-files",
+        "dimensionScores": [
+          {
+            "dimensionId": "one-problem-per-error-kind",
+            "score": 9,
+            "pass": true,
+            "evidence": "15 record tests pass: one per kind (bad YAML, unknown pipeline, unknown table, empty changes, malformed change) plus a valid record with no problems; prefixes asserted; two bad files reported in one run; reverse-sync-only table still unknown; failed-to-load Pipeline keeps only its own error. Not 10: bad-YAML/empty tests check prefix only; unloadable keyed by file stem, not Pipeline name."
+          },
+          {
+            "dimensionId": "sanitized-and-offline",
+            "score": 9,
+            "pass": true,
+            "evidence": "Sentinel tests for a malformed change and an extra field; unreachable hosts, unset passwords and no_network fixture still report; sed/grep over _check_records prints nothing."
+          },
+          {
+            "dimensionId": "pipeline-argument-scoping",
+            "score": 9,
+            "pass": true,
+            "evidence": "Scoped run skips 'unknown Pipeline' for other Pipelines' records but still reports their parse errors; MCP test asserts the record problem in structuredContent; 'mcp and validate' tests pass."
+          }
+        ],
+        "overallPass": true
+      }
+    }
+  ]
+}
