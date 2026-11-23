@@ -1,0 +1,231 @@
+{
+  "phases": [
+    {
+      "id": "add-skill-checks-and-setup-skill",
+      "order": 0,
+      "name": "Add the setup Skill and the Skill checks",
+      "goal": "`adops init` and `adops init --demo` write `.claude/skills/adops-setup/SKILL.md` into the new Project. A new test module checks every shipped Skill's structure: front matter, MCP tool names, the never-stage-or-prod rule, and that the demo and plain copies are the same.",
+      "rationale": "A Skill is a Markdown file (SKILL.md) that Claude Code reads from `.claude/skills/<name>/`. It tells the user's Assistant how to carry out one workflow in plain words. Every later Skill relies on the same checks, so the test module is built here together with the first Skill and proves it against a real file. adops-setup comes first because every other Skill assumes its Prerequisite check (Docker, ports, .env, git, gh) has passed. The init code already copies dot-folders as they are (`_copy_tree` in src/adops/interface/init_command.py), so no production code changes.",
+      "filesAffected": [
+        "src/adops/templates/demo/.claude/skills/adops-setup/SKILL.md",
+        "src/adops/templates/plain/.claude/skills/adops-setup/SKILL.md",
+        "tests/unit/interface/test_assistant_skills.py",
+        "tests/unit/interface/test_init_command.py",
+        ".github/workflows/ci.yml",
+        "GLOSSARY.md"
+      ],
+      "changes": [
+        "Write adops-setup/SKILL.md with YAML front matter: `name: adops-setup`, plus a `description` that says when to use it (first-time setup of a new adops Project, or when Docker or the database won't start).",
+        "In the body, write numbered steps in plain words. Each step says what it checks and why. (1) Check Docker is installed (`docker --version`) and running (`docker info`). (2) Read the port variables from `.env`, or from `.env.example` if `.env` is missing, and check that nothing is already using those ports. Never hard-code port numbers. (3) If `.env` is missing, copy `.env.example` to `.env` with the shell, then ask the user to fill in the secret values. Say that the MCP `edit_file` tool cannot edit `.env`. (4) Check that git and gh are installed and that `gh auth status` shows a logged-in user. (5) If the folder is not a git repository, run `git init -b main`. (6) Run `docker compose up --wait`. (7) Call `mcp__adops__test_connection` with environment \"dev\" and `mcp__adops__validate`, and explain the results.",
+        "State in the Skill that a plain Project's dev Warehouse (localhost:5432) does not come from docker compose, so the user must provide it. Never tell the user to re-run `adops init` (init refuses a folder that is not empty).",
+        "Make the plain copy a byte-identical copy of the demo file. Write the text so it works in both templates: the Skill reads `adops.yaml` and `.env.example` at run time and never assumes demo-only files.",
+        "Create tests/unit/interface/test_assistant_skills.py. It finds Skills by globbing `src/adops/templates/{demo,plain}/.claude/skills/*/SKILL.md` and runs every check once per Skill (pytest parametrization).",
+        "Add a test that the set of shipped Skill folder names equals a module constant EXPECTED_SKILLS. Set it to {\"adops-setup\"} for now; later phases add names.",
+        "Add a test that demo and plain have the same Skill folders and that each pair of SKILL.md files is byte-identical.",
+        "Add a front-matter test. The file starts with a `---` block; parse it with `yaml.safe_load` and assert that `name` equals the folder name and that `description` is a non-empty string.",
+        "Add a tool-name test. In the Skill text, an MCP tool is written as a backticked `mcp__adops__<tool>`. Collect every such name and assert each one is in the names returned by `build_server(project)` plus `list_tools()`. Build the project with `write_project` from tests/unit/interface/mcp_harness.py. Do not keep a second hard-coded list of all tools. Also fail on a backticked hyphenated form such as `read-logs`, and on any `mcp__<other>__` prefix.",
+        "Add a per-Skill scope test: a dict REQUIRED_TOOLS from Skill name to the tools that Skill must mention. For now it holds adops-setup -> {test_connection, validate}.",
+        "Add a never-stage-or-prod test using one module-level list of regexes over call and command patterns: environment set to \"stage\" or \"prod\" (`=` or `:`), `--env stage|prod`, `run --all`, `gh release`, and `gh workflow run`. Prose mentions of stage and prod remain allowed. Also add a self-test that runs the regex list over a few known-bad sample lines and asserts each one is caught, so the rule cannot pass when it matches nothing.",
+        "In tests/unit/interface/test_init_command.py, add `.claude/skills/adops-setup/SKILL.md` to DEMO_FILES. Add `.claude`, `.claude/skills`, `.claude/skills/adops-setup` and the SKILL.md path to the exact listing that the plain-init test expects.",
+        "In .github/workflows/ci.yml, step 'Project templates ship in the wheel': add `.claude/skills/adops-setup/SKILL.md` to the demo loop and `plain/.claude/skills/adops-setup/SKILL.md` to the second loop.",
+        "Add a **Skill** entry to GLOSSARY.md under Actors, next to Assistant: a SKILL.md file that `adops init` writes to `.claude/skills/<name>/` and that tells the Assistant how to carry out one workflow step by step in plain words. _Avoid_: playbook, prompt.",
+        "Write the never-stage-or-prod and forbidden-git-command patterns so they match commands, not prohibitions: Skills phrase warnings without quoting the banned command (e.g. 'stage only the named folders, never everything at once'), and the self-test includes known-good warning and explanation lines (e.g. 'merging sends the change to stage') that must NOT be caught, next to the known-bad lines that must be caught."
+      ],
+      "boundedContext": "Assistant Skills",
+      "layer": "interface",
+      "blastRadius": "medium",
+      "inputs": [
+        "Discovery: _copy_tree copies .claude as is (init_command.py:30-39,59-66)",
+        "Discovery: build_server registers 11 tools; list_tools helper exists (test_mcp_server.py:601-609)",
+        "Discovery: init tests assert exact file listings (test_init_command.py:43-62,125-128,451-464)",
+        "Discovery: compose ports and .env.example variables per template"
+      ],
+      "expectedResult": "`uv run pytest tests/unit/interface/test_assistant_skills.py tests/unit/interface/test_init_command.py` passes. The checks run against a shipped adops-setup SKILL.md, which is byte-identical in the demo and plain templates.",
+      "dependsOn": [],
+      "guardNotes": [
+        "g1: the new test module stays within ruff E,F,W,I,B,UP and 100 columns; the regex list is split across lines.",
+        "g2: no src/adops code changes. Skill check logic lives only in tests/, so src coverage stays at 100%.",
+        "g3: the same phase adds both adops-setup template paths (demo and plain) to the ci.yml wheel listing.",
+        "g5: no pragma and no src change."
+      ]
+    },
+    {
+      "id": "add-build-and-dev-test-skills",
+      "order": 1,
+      "name": "Add the Skills for building and testing in dev",
+      "goal": "Init writes the two dev-journey Skills. adops-build edits and validates Pipelines and dbt models through the MCP file tools. adops-test-in-dev runs and previews in dev and explains failures in plain words.",
+      "rationale": "After setup, a user builds a Pipeline and then tries it in the dev Environment. Both Skills only call MCP tools on dev, with no Git and no Branch Environment, so they form one coherent group to review. The checks from the first phase already exist, so this phase only adds the Markdown files and extends the listings.",
+      "filesAffected": [
+        "src/adops/templates/demo/.claude/skills/adops-build/SKILL.md",
+        "src/adops/templates/plain/.claude/skills/adops-build/SKILL.md",
+        "src/adops/templates/demo/.claude/skills/adops-test-in-dev/SKILL.md",
+        "src/adops/templates/plain/.claude/skills/adops-test-in-dev/SKILL.md",
+        "tests/unit/interface/test_assistant_skills.py",
+        "tests/unit/interface/test_init_command.py",
+        ".github/workflows/ci.yml"
+      ],
+      "changes": [
+        "Write adops-build/SKILL.md (front matter `name: adops-build`, with a description saying when to use it). Steps: get an overview with `mcp__adops__project_view`; find files with `mcp__adops__list_files`; read them with `mcp__adops__read_file`; change them with `mcp__adops__edit_file`; check them with `mcp__adops__validate`, and explain each problem in plain words.",
+        "State in adops-build that edit_file writes only under `pipelines/` and `dbt/`. `adops.yaml`, `.env` and `.github/` are changed by the user or the shell, never through edit_file. dbt models are covered only when a `dbt/` folder exists (a plain Project has none).",
+        "Write adops-test-in-dev/SKILL.md. Steps: check the connection with `mcp__adops__test_connection` environment \"dev\"; try one Pipeline with `mcp__adops__preview` and `mcp__adops__run`, always passing environment \"dev\"; when a Step fails, read `steps[].error` and `checks` from the reply and explain them plainly; get details with `mcp__adops__read_logs`.",
+        "Tell the user in adops-test-in-dev that a long run may time out in the Assistant even though it keeps running, and that `read_logs` shows how it ended. If the reply reports a Breaking Change, point the user to the adops-breaking-change Skill.",
+        "Make each plain copy byte-identical to its demo copy.",
+        "In test_assistant_skills.py, add adops-build and adops-test-in-dev to EXPECTED_SKILLS. Add REQUIRED_TOOLS entries: adops-build -> {list_files, read_file, project_view, edit_file, validate}; adops-test-in-dev -> {run, preview, read_logs, test_connection}.",
+        "Add the 2 SKILL.md paths to DEMO_FILES and the 2 folders plus 2 files to the plain expected listing in test_init_command.py.",
+        "Add the 4 template paths (2 demo, 2 plain) to the two loops in ci.yml's 'Project templates ship in the wheel' step."
+      ],
+      "boundedContext": "Assistant Skills",
+      "layer": "interface",
+      "blastRadius": "small",
+      "inputs": [
+        "Phase add-skill-checks-and-setup-skill: test_assistant_skills.py and its EXPECTED_SKILLS/REQUIRED_TOOLS",
+        "Discovery: MCP argument shapes, environment \"dev\" or branch required (mcp_server.py:252-392)",
+        "Discovery: RunReply/ValidateReply shapes (mcp_server.py:117-160)",
+        "Discovery: edit_file writes only under pipelines/ and dbt/ (assistant_access.py:21-28,82-85)"
+      ],
+      "expectedResult": "The adops-build and adops-test-in-dev SKILL.md pairs ship in both templates, and `uv run pytest tests/unit/interface/test_assistant_skills.py tests/unit/interface/test_init_command.py` passes with both Skills in EXPECTED_SKILLS.",
+      "dependsOn": [
+        "add-skill-checks-and-setup-skill"
+      ],
+      "guardNotes": [
+        "g1: test edits stay within ruff rules and 100 columns.",
+        "g2: no src/adops code changes.",
+        "g3: the same phase adds all 4 new template paths to the ci.yml wheel listing.",
+        "g5: no src/adops code and no pragma; only template Markdown under src/adops/templates."
+      ]
+    },
+    {
+      "id": "add-share-and-promote-skills",
+      "order": 2,
+      "name": "Add the Skills for sharing and promoting changes",
+      "goal": "Init writes adops-share and adops-promote. adops-share puts a change on a branch, opens a Pull Request and runs its Branch Environment. adops-promote, after the merge, drops the Branch Environment and explains that a merge goes to stage and a release goes to prod.",
+      "rationale": "Sharing a change and promoting it are the two ends of one Git journey. Both need a stage Environment, which a plain Project does not have, and both must explain Promotion without ever performing it. Reviewing them together keeps that shared rule consistent. The Skills do the Git work in the Assistant's shell because the MCP server has no Git tools.",
+      "filesAffected": [
+        "src/adops/templates/demo/.claude/skills/adops-share/SKILL.md",
+        "src/adops/templates/plain/.claude/skills/adops-share/SKILL.md",
+        "src/adops/templates/demo/.claude/skills/adops-promote/SKILL.md",
+        "src/adops/templates/plain/.claude/skills/adops-promote/SKILL.md",
+        "tests/unit/interface/test_assistant_skills.py",
+        "tests/unit/interface/test_init_command.py",
+        ".github/workflows/ci.yml"
+      ],
+      "changes": [
+        "Write adops-share/SKILL.md. First, check that `adops.yaml` has a stage Environment and that `.env` holds its Warehouse password variable. A Branch Environment uses the stage Warehouse. If either is missing, as in a plain Project, stop and explain in plain words that a stage Environment must be added first.",
+        "Continue adops-share: create a branch with `git checkout -b <name>` before any commit; run `git status` and stage only named paths (`pipelines/`, `dbt/`, `adops.yaml`), never `git add -A`, `.env` or `.adops/`; commit; if no remote exists, ask the user, then `gh repo create`; push with `git push -u origin <name>`; open the Pull Request with `gh pr create`.",
+        "Finish adops-share: run the Branch Environment with `mcp__adops__preview` and `mcp__adops__run` with branch=\"<name>\", and explain the replies. Explain that the Pull Request workflow also runs the branch on the Server. Describe what the workflow does in prose without quoting its commands.",
+        "Write adops-promote/SKILL.md. Run it after the Pull Request is merged. Call `mcp__adops__drop_branch` with the branch name to remove the Branch Environment (its br_<branch>__ schemas in the stage Warehouse), and explain that these are the same schemas the Pull Request workflow drops when the Pull Request closes, so dropping by hand only does that cleanup early and is safe to repeat. Explain in prose that merging goes to stage and that publishing a release goes to prod through the generated GitHub Actions, which the user starts from GitHub. The Skill never runs them. Repeat the stage-Environment-missing explanation for plain Projects.",
+        "Make each plain copy byte-identical to its demo copy.",
+        "In test_assistant_skills.py, add adops-share and adops-promote to EXPECTED_SKILLS. Add REQUIRED_TOOLS entries: adops-share -> {run, preview}; adops-promote -> {drop_branch}. Add a test that every Skill text containing `git commit` also contains `git checkout -b` before it, and never contains `git add -A`, `git add .` or `.env` as a `git add` argument.",
+        "Add the 2 SKILL.md paths to DEMO_FILES and the 2 folders plus 2 files to the plain expected listing in test_init_command.py.",
+        "Add the 4 template paths to the two loops in ci.yml's wheel step."
+      ],
+      "boundedContext": "Assistant Skills",
+      "layer": "interface",
+      "blastRadius": "medium",
+      "inputs": [
+        "Phase add-skill-checks-and-setup-skill: test_assistant_skills.py",
+        "Discovery: plain adops.yaml has only dev; a Branch Environment needs stage settings and the stage Warehouse password (mcp_server.py:401-447)",
+        "Discovery: adops-pull-request.yml drops the branch on PR close and runs run --all --branch (lines 56,64-82)",
+        "Analysis risk: secret leakage through git add -A"
+      ],
+      "expectedResult": "The adops-share and adops-promote SKILL.md pairs ship in both templates, and `uv run pytest tests/unit/interface/test_assistant_skills.py tests/unit/interface/test_init_command.py` passes, including the never-stage-or-prod rule on adops-promote's Promotion explanation.",
+      "dependsOn": [
+        "add-skill-checks-and-setup-skill"
+      ],
+      "guardNotes": [
+        "g1: test edits stay within ruff rules and 100 columns.",
+        "g2: no src/adops code changes.",
+        "g3: the same phase adds all 4 new template paths to the ci.yml wheel listing.",
+        "g5: no src/adops code and no pragma; only template Markdown under src/adops/templates."
+      ]
+    },
+    {
+      "id": "add-breaking-change-skill",
+      "order": 3,
+      "name": "Add the Skill for accepting a Breaking Change",
+      "goal": "Init writes adops-breaking-change. It accepts a Breaking Change in dev with accept_schema, commits the accepted-change record at the returned record_path on a branch, and opens the Pull Request that carries the record to stage and prod.",
+      "rationale": "A Breaking Change (a dropped or retyped Source column) halts a Pipeline until someone accepts it. Stage and prod accept it only when its accepted-change record file arrives through a reviewed Pull Request. Getting the order wrong (committing on main, or skipping the branch) would let the change reach stage unreviewed, so this Skill gets its own reviewed phase.",
+      "filesAffected": [
+        "src/adops/templates/demo/.claude/skills/adops-breaking-change/SKILL.md",
+        "src/adops/templates/plain/.claude/skills/adops-breaking-change/SKILL.md",
+        "tests/unit/interface/test_assistant_skills.py",
+        "tests/unit/interface/test_init_command.py",
+        ".github/workflows/ci.yml"
+      ],
+      "changes": [
+        "Write adops-breaking-change/SKILL.md. Explain in plain words what a Breaking Change is and what accepting it means (adops stops expecting the dropped or old-typed column). Ask the user to confirm before accepting.",
+        "Steps: create the branch with `git checkout -b <name>` first; call `mcp__adops__accept_schema` with pipeline, table and environment \"dev\" (dev only); read `record_path` from the reply and stage exactly that file under `pipelines/accepted/`; commit, push and `gh pr create`, explaining that merging this Pull Request lets stage, and later prod, accept the change.",
+        "Handle a reply where `record_path` is null: nothing new needs committing because the files listed in `covered_by` already cover the change. Check those files with `git status` or `git log`, and commit them on the branch if they were never committed.",
+        "For a Branch Environment, tell the user to run `adops accept-schema --branch <name>` themselves. Never suggest `--env stage` or `--env prod`.",
+        "Make the plain copy byte-identical to the demo copy. Write it so that a missing `pipelines/accepted/` folder (plain Project) is fine, because accept_schema creates it.",
+        "In test_assistant_skills.py, add adops-breaking-change to EXPECTED_SKILLS and add the REQUIRED_TOOLS entry adops-breaking-change -> {accept_schema}. Also assert that this Skill names `record_path` and `covered_by`.",
+        "Add the SKILL.md path to DEMO_FILES and the folder plus file to the plain expected listing in test_init_command.py.",
+        "Add the 2 template paths to the two loops in ci.yml's wheel step."
+      ],
+      "boundedContext": "Assistant Skills",
+      "layer": "interface",
+      "blastRadius": "small",
+      "inputs": [
+        "Phase add-skill-checks-and-setup-skill: test_assistant_skills.py",
+        "Discovery: AcceptedSchemaReply has record_path (str|None) and covered_by (mcp_server.py:146-155,301-314)",
+        "Discovery: record format pipelines/accepted/<id>.yaml (accepted_change_record.py:30-80)",
+        "Discovery: MCP accept_schema is dev only; a Branch Environment uses the hand-run CLI command"
+      ],
+      "expectedResult": "The adops-breaking-change SKILL.md pair ships in both templates, and `uv run pytest tests/unit/interface/test_assistant_skills.py tests/unit/interface/test_init_command.py` passes with all six Skills in EXPECTED_SKILLS.",
+      "dependsOn": [
+        "add-skill-checks-and-setup-skill"
+      ],
+      "guardNotes": [
+        "g1: test edits stay within ruff rules and 100 columns.",
+        "g2: no src/adops code changes.",
+        "g3: the same phase adds both new template paths to the ci.yml wheel listing, completing all 12.",
+        "g5: no src/adops code and no pragma; only template Markdown under src/adops/templates."
+      ]
+    },
+    {
+      "id": "test-share-and-breaking-change-git-steps",
+      "order": 4,
+      "name": "Test the share and Breaking Change Git steps",
+      "goal": "One test without Docker or an LLM replays the Git steps of adops-share and adops-breaking-change on a demo Project, pushes both branches to a local bare repository, and proves that only the named paths were committed and that the branch carrying the accepted-change record passes `adops validate`.",
+      "rationale": "The structural tests check the Skill text but not whether the Git steps it describes actually work. This test runs the same commands the Skills tell the Assistant to run, against a real git repository, so a wrong command order or a missing record fails CI. It lives in tests/unit because unit tests already run git, and it uses a hand-written record instead of a live accept_schema run. That keeps Docker and the 20-minute end-to-end budget out of it.",
+      "filesAffected": [
+        "tests/unit/interface/test_skill_git_steps.py"
+      ],
+      "changes": [
+        "Create tests/unit/interface/test_skill_git_steps.py. Reuse the hermetic GIT_ENV and git(*args, cwd) pattern from test_init_command.py (lines 292-300), either by importing it or by moving it into a shared helper in tests/unit/interface/ if importing a test module is awkward.",
+        "Steps: run `adops init --demo` into tmp_path; `git init -b main`; commit everything as the initial commit; `git checkout -b accept-orders`; write a prepared record `pipelines/accepted/20261123T000000Z-shop_sync-orders.yaml` with `{pipeline: shop_sync, table: orders, changes: ['customer_id dropped']}`, using a column that really exists in the demo Source; `git add` only that named path; commit; create a bare repo with `git init --bare`; add it as origin; `git push -u origin accept-orders`.",
+        "Before the record, replay adops-share's own steps: on branch share-change edit a Pipeline file under pipelines/, `git add` only the named paths (pipelines/, dbt/, adops.yaml), commit and push; assert the pushed commit touches only those paths and that .env and .adops/ are absent even though both exist in the working folder.",
+        "Clone the bare repo at branch accept-orders into a new folder. Assert that the record file is present and byte-equal to what was written, and that `.env` and `.adops/` are not in the clone.",
+        "Run validate on the clone (the CLI's validate command, via typer CliRunner or `validate_project`) and assert that it passes with no problems.",
+        "Tie the replay to the Skill text: assert the shipped adops-share and adops-breaking-change SKILL.md files contain the replayed commands (`git checkout -b`, `git add`, `git commit`, `git push -u origin`, `gh pr create`) in the same order the test runs them, so a Skill that reorders or drops a step fails."
+      ],
+      "boundedContext": "Assistant Skills",
+      "layer": "interface",
+      "blastRadius": "small",
+      "inputs": [
+        "Phase add-share-and-promote-skills: shipped adops-share SKILL.md",
+        "Phase add-breaking-change-skill: shipped adops-breaking-change SKILL.md",
+        "Discovery: git already used in unit tests with GIT_ENV helper (test_init_command.py:292-300,706-740)",
+        "Discovery: adops validate checks records offline (validate_command.py:58-117)"
+      ],
+      "expectedResult": "`uv run pytest tests/unit/interface/test_skill_git_steps.py` passes offline, with no Docker and no network, proving the share and Breaking Change Git steps (in the Skills' own order) push only named paths and a record that passes `adops validate`.",
+      "dependsOn": [
+        "add-share-and-promote-skills",
+        "add-breaking-change-skill"
+      ],
+      "guardNotes": [
+        "g1: the new test file stays within ruff rules and 100 columns.",
+        "g2: no src/adops code changes; the test only adds coverage.",
+        "g4: the replay lives in tests/unit, not tests/e2e, so it adds nothing to the Docker end-to-end job or its 20-minute timeout."
+      ]
+    }
+  ],
+  "deferredFromPhases": [
+    "A Docker end-to-end test that runs a real dev accept_schema before the Git replay: fails gate 2 (needed now). The existing Docker E2E already covers dev accept-schema -> record -> validate (tests/e2e/test_demo_sync.py:270-306), and a prepared record proves the Git steps without adding to the 20-minute budget.",
+    "Splitting the Skill test module into its own phase with no Skill: fails gate 4 (ceremony). With no Skill file, the checks would only run against an empty set, so the module grows with the first Skill instead.",
+    "A new ADR for shipping Skills: fails gate 1 (asked for). The existing decisions on no Git or Docker knowledge (ADR-0011), dev and Branch only (ADR-0009) and Breaking Changes through Git (ADR-0015) already decide this; only the GLOSSARY Skill entry is missing, and it is a step in the first phase.",
+    "A src/adops constant listing Skill names, or a Skill validator in production code: fails gate 3 (speculative abstraction). Nothing in the product reads Skills at run time, and keeping check logic in tests keeps src coverage unaffected.",
+    "An `adops init` next-step hint that names the shipped Skills: fails gate 1 (not asked for).",
+    "Separate Skill text for the plain and demo templates: fails gate 3. One byte-identical file that checks adops.yaml at run time covers both templates, and the test enforces that the copies are identical."
+  ]
+}

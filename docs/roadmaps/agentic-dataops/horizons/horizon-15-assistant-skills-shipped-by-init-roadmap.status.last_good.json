@@ -1,0 +1,260 @@
+{
+  "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-15-assistant-skills-shipped-by-init-roadmap.json",
+  "roadmapTask": "Horizon 15 of agentic-dataops: The six Assistant skills shipped by adops init: SKILL.md skills that check prerequisites, do the Git work themselves (branch, commit, open a PR, including the PR that carries an accepted-change record), use the MCP tools (run, preview, validate, edit, read-logs, test-connection, accept-schema, drop-branch) and explain each step in plain words",
+  "createdAt": "2026-11-23T10:07:08Z",
+  "updatedAt": "2026-11-23T13:28:30Z",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "add-skill-checks-and-setup-skill",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-23T10:07:08Z",
+      "baseRef": "4d7b6a836edde4a4fc499580844efbbb8a830ffe",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/,docs/roadmaps/agentic-dataops/horizons/horizon-15-assistant-skills-shipped-by-init-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-15-assistant-skills-shipped-by-init-roadmap.md | changed: src/adops/templates/{demo,plain}/.claude/skills/adops-setup/SKILL.md (byte-identical), tests/unit/interface/test_assistant_skills.py (new), tests/unit/interface/test_init_command.py, .github/workflows/ci.yml, GLOSSARY.md — ships the adops-setup Skill and the per-Skill structural checks (front matter, registered tool names, required tools, never-stage-or-prod with self-tests).",
+      "unplannedFiles": [],
+      "completedAt": "2026-11-23T10:24:50Z",
+      "gradeResult": {
+        "phaseId": "add-skill-checks-and-setup-skill",
+        "dimensionScores": [
+          {
+            "dimensionId": "skill-checks-catch-real-violations",
+            "score": 8,
+            "pass": true,
+            "evidence": "Glob + per-Skill parametrization; tool names from build_server+list_tools; yaml.safe_load front matter; self-tests for 6 bad and good prose lines; scratch mutations caught. Below 9: prose form 'environment set to \"prod\"' and 'env: prod' slip past stage_or_prod_lines."
+          },
+          {
+            "dimensionId": "setup-prerequisites-before-action",
+            "score": 9,
+            "pass": true,
+            "evidence": "docker --version L20, docker info L22, port check L34, .env L49, gh auth status L63 all before compose up L80; every step has a plain reason and a stop-and-fix instruction; git init conditional."
+          },
+          {
+            "dimensionId": "setup-respects-env-and-template-facts",
+            "score": 9,
+            "pass": true,
+            "evidence": "Ports read from .env/.env.example, only port mention is the plain-Project note; shell cp with edit_file caveat; test_connection with environment dev; no 'adops init'; no demo-only names."
+          },
+          {
+            "dimensionId": "interface-layer-only-and-init-listing",
+            "score": 9,
+            "pass": true,
+            "evidence": "No src/adops Python diff; templates identical; exact listings extended in both init tests; ci.yml both loops; GLOSSARY Skill entry with _Avoid_."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": "ADOPS_TEST_POSTGRES_DSN=… uv run pytest tests/unit --cov: pass (1946, 100%); uv run ruff check: pass; uv build --wheel + listing grep for both SKILL.md: pass; uv run pytest tests/e2e -m e2e: pass (10)"
+    },
+    {
+      "phaseId": "add-build-and-dev-test-skills",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-23T12:15:37Z",
+      "baseRef": "4d7b6a836edde4a4fc499580844efbbb8a830ffe",
+      "baseDirty": true,
+      "notes": "already dirty at start: .github/workflows/ci.yml GLOSSARY.md docs/roadmaps/agentic-dataops/* tests/unit/interface/test_init_command.py src/adops/templates/{demo,plain}/.claude/ tests/unit/interface/test_assistant_skills.py (phase 1 work, uncommitted) | changed: demo+plain .claude/skills/adops-build/SKILL.md and adops-test-in-dev/SKILL.md (new, byte-identical pairs); test_assistant_skills.py EXPECTED_SKILLS/REQUIRED_TOOLS; test_init_command.py DEMO_FILES + plain listing; ci.yml 4 wheel paths. Build Skill: project_view, list_files, read_file, edit_file, validate; edits only under pipelines/ and dbt/. Dev-test Skill: test_connection/preview/run/read_logs, each with environment=\"dev\".",
+      "unplannedFiles": [],
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-23T12:21:17Z",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "ERROR tests/unit/infrastructure/test_connection_probe.py::test_a_reachable_postgres_connects_without_creating_anything (no ADOPS_TEST_POSTGRES_DSN set locally; coverage 98.53%)",
+          "resolvedBy": "gate-fix",
+          "resolution": "re-ran with ADOPS_TEST_POSTGRES_DSN pointing at the local adops-test-pg container, as CI sets it; no code change; 1962 passed, 100% coverage"
+        }
+      ],
+      "gradeResult": {
+        "phaseId": "add-build-and-dev-test-skills",
+        "dimensions": [
+          {
+            "dimensionId": "build-respects-edit-file-scope",
+            "score": 9,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "edit_file scope stated at :15 and :65; adops.yaml/.env/.github routed to the person; dbt conditional :27-29; order project_view->list_files->read_file->edit_file->validate. Not 10: no guidance while validate fails pending a user edit to adops.yaml."
+          },
+          {
+            "dimensionId": "dev-test-always-explicit-dev",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "environment=\"dev\" on every call incl. repeat read_logs calls; reason at :8-11; no git command. Rubric -k test_in_dev selects 0 (hyphenated ids); -k test-in-dev 8 passed."
+          },
+          {
+            "dimensionId": "failure-explanation-from-reply-fields",
+            "score": 10,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "steps/status/error and checks table/check/status/message match StepReply/CheckReply; timeout paragraph forbids re-run; Breaking Change sent to adops-breaking-change; two worked plain-word examples."
+          },
+          {
+            "dimensionId": "build-test-listings-complete",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "cmp identical; EXPECTED_SKILLS/REQUIRED_TOOLS exact; both init listings incl. folders; ci.yml 4 paths; no src/adops Python diff; 182 passed."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": [
+        "uv run ruff check: pass",
+        "uv run pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass, 1962 passed, 100%",
+        "cmp demo/plain: identical",
+        "src/adops non-template diff: empty",
+        "uv run pytest tests/e2e -m e2e: pass"
+      ],
+      "completedAt": "2026-11-23T12:33:17Z"
+    },
+    {
+      "phaseId": "add-share-and-promote-skills",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-23T12:36:20Z",
+      "baseRef": "4d7b6a836edde4a4fc499580844efbbb8a830ffe",
+      "baseDirty": true,
+      "notes": "already dirty at start: phases 1-2 work (uncommitted) in ci.yml, GLOSSARY.md, docs/roadmaps/agentic-dataops/*, test_init_command.py, templates/{demo,plain}/.claude/, test_assistant_skills.py | changed: demo+plain .claude/skills/adops-share/SKILL.md and adops-promote/SKILL.md (new, byte-identical); test_assistant_skills.py EXPECTED_SKILLS/REQUIRED_TOOLS + unsafe_git_lines rule (branch-before-commit, no stage-all/.env/.adops) with self-tests; test_init_command.py DEMO_FILES + plain listing; ci.yml 4 wheel paths. Amendment 1: adops-share makes a starting commit on main (fixed message \"Start the adops Project\") in a repo with no history; the git rule allows only that commit before git checkout -b. | post-grade: adops-share retry wording fixed (no second gh pr create); skill tests re-run 219 pass.",
+      "amendments": [
+        {
+          "phaseId": "add-share-and-promote-skills",
+          "at": "2026-11-23T12:39:15Z",
+          "reason": "A brand-new Project has no commit: adops-setup only runs git init -b main, and staging only pipelines/, dbt/, adops.yaml would never commit .github/.gitignore/.claude, so no PR base and no PR workflow on GitHub. User chose (AskUserQuestion) to have adops-share make a starting commit on main. Goal unchanged.",
+          "changes": [
+            {
+              "field": "changes",
+              "before": "Continue adops-share: create a branch with `git checkout -b <name>` before any commit; ... stage only named paths (pipelines/, dbt/, adops.yaml) ...",
+              "after": "Same, plus: when `git rev-parse --verify HEAD` fails (no history), first save the starting files adops init wrote (every path except pipelines/, dbt/, adops.yaml, .env, .adops) on main by name with the fixed message \"Start the adops Project\", push main once the remote exists, then branch; pipelines/, dbt/, adops.yaml go in the pull request."
+            },
+            {
+              "field": "changes",
+              "before": "Add a test that every Skill text containing `git commit` also contains `git checkout -b` before it ...",
+              "after": "Same, except a commit line carrying the fixed starting message \"Start the adops Project\" is allowed before `git checkout -b`."
+            }
+          ]
+        }
+      ],
+      "unplannedFiles": [],
+      "completedAt": "2026-11-23T12:57:24Z",
+      "gateRun": [
+        "uv run ruff check: pass",
+        "uv run pytest tests/unit --cov: pass (1999, 100%)",
+        "uv run pytest tests/e2e -m e2e: pass (10)",
+        "uv run pytest test_assistant_skills.py test_init_command.py: pass (219)"
+      ],
+      "gradeResult": {
+        "phaseId": "add-share-and-promote-skills",
+        "overallPass": true,
+        "dimensions": [
+          {
+            "dimensionId": "plain-project-stops-without-stage",
+            "score": 10,
+            "minScore": 7,
+            "passed": true
+          },
+          {
+            "dimensionId": "share-git-order-and-safe-staging",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "issues": [
+              "retry loop said repeat step 6 (gh pr create) — fixed after grade: push and repeat step 7"
+            ]
+          },
+          {
+            "dimensionId": "branch-environment-explicit-and-promotion-explained-not-done",
+            "score": 9,
+            "minScore": 8,
+            "passed": true
+          },
+          {
+            "dimensionId": "share-promote-registration",
+            "score": 9,
+            "minScore": 8,
+            "passed": true
+          }
+        ],
+        "summary": "Both Skills byte-identical, stage check first, safe named staging after branching, Promotion explained not done."
+      }
+    },
+    {
+      "phaseId": "add-breaking-change-skill",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-23T13:02:43Z",
+      "baseRef": "4d7b6a836edde4a4fc499580844efbbb8a830ffe",
+      "baseDirty": true,
+      "notes": "already dirty at start: .github/workflows/ci.yml,GLOSSARY.md,docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,tests/unit/interface/test_init_command.py,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/,docs/roadmaps/agentic-dataops/horizons/horizon-15-assistant-skills-shipped-by-init-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-15-assistant-skills-shipped-by-init-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-15-assistant-skills-shipped-by-init-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-15-assistant-skills-shipped-by-init-roadmap.status.last_good.json,src/adops/templates/demo/.claude/,src/adops/templates/plain/.claude/,tests/unit/interface/test_assistant_skills.py | changed: src/adops/templates/{demo,plain}/.claude/skills/adops-breaking-change/SKILL.md (new, byte-identical), tests/unit/interface/test_assistant_skills.py (EXPECTED_SKILLS/REQUIRED_TOOLS + record_path/covered_by test), tests/unit/interface/test_init_command.py (DEMO_FILES + plain listing), .github/workflows/ci.yml (2 wheel paths). Skill: explain + confirm, branch, accept_schema environment=\"dev\", git add <record_path> or check covered_by, commit, push, gh pr create; Branch Environment = user-run adops accept-schema <pipeline> <table> --branch <name>. Note: CLI needs pipeline+table, so the literal string is not adops accept-schema --branch.",
+      "unplannedFiles": [],
+      "completedAt": "2026-11-23T13:21:23Z",
+      "gradeResult": {
+        "phaseId": "add-breaking-change-skill",
+        "dimensions": [
+          {
+            "dimensionId": "branch-before-accept-and-dev-only",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "git checkout -b at line 54 precedes mcp__adops__accept_schema at line 62 with environment=\"dev\"; confirmation step at line 35; Branch Environment is a user-run `adops accept-schema <pipeline> <table> --branch <name>`; no --env stage|prod; -k breaking 11 passed. Not 10: no check that the branch is checked out before accepting."
+          },
+          {
+            "dimensionId": "record-path-and-covered-by-handled",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "git add <record_path> by name; folder staging forbidden with reason; null record_path is not an error, covered_by files checked with git status/log and staged only if never committed; missing pipelines/accepted/ is fine. Not 10: 'already committed' does not tell main apart from an unmerged branch."
+          },
+          {
+            "dimensionId": "pr-carries-record-explained",
+            "score": 9,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "push and gh pr create after commit; prose explains merge -> stage accepts, release -> prod accepts, with halts expected until then; no Promotion command; cmp identical; six EXPECTED_SKILLS; ci.yml:52,61. Not 10: no guidance on confirming stage accepted."
+          }
+        ],
+        "overallPass": true,
+        "summary": "Branch before dev-only accept after confirmation, exact record_path staging, null via covered_by, PR rationale explained; templates identical, tests and CI updated."
+      },
+      "gateRun": [
+        "uv run ruff check: pass",
+        "ADOPS_TEST_POSTGRES_DSN=… uv run pytest tests/unit --cov: pass (2010, 100%)",
+        "uv run pytest test_assistant_skills.py test_init_command.py: pass (230)",
+        "uv build --wheel + listing grep for both new SKILL.md: pass",
+        "cmp demo/plain: identical",
+        "uv run pytest tests/e2e -m e2e: pass (10)"
+      ]
+    },
+    {
+      "phaseId": "test-share-and-breaking-change-git-steps",
+      "status": "awaiting-verification",
+      "attempts": 1,
+      "startedAt": "2026-11-23T13:22:39Z",
+      "baseRef": "4d7b6a836edde4a4fc499580844efbbb8a830ffe",
+      "baseDirty": true,
+      "notes": "already dirty at start: .github/workflows/ci.yml,GLOSSARY.md,docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,tests/unit/interface/test_init_command.py,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/,docs/roadmaps/agentic-dataops/horizons/horizon-15-assistant-skills-shipped-by-init-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-15-assistant-skills-shipped-by-init-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-15-assistant-skills-shipped-by-init-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-15-assistant-skills-shipped-by-init-roadmap.status.last_good.json,src/adops/templates/demo/.claude/,src/adops/templates/plain/.claude/,tests/unit/interface/test_assistant_skills.py | changed: tests/unit/interface/test_skill_git_steps.py (new), tests/unit/interface/git_harness.py (new: GIT_ENV + git() moved out of test_init_command.py, as the contract allows), tests/unit/interface/test_init_command.py (imports them). Replays adops-share and adops-breaking-change Git steps from one SKILL_GIT_SEQUENCE against a bare origin, checks pushed paths, clone contents, validate on the clone (plus a negative record), and the command order in both Skills in both templates.",
+      "unplannedFiles": [
+        "tests/unit/interface/git_harness.py",
+        "tests/unit/interface/test_init_command.py"
+      ],
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-23T13:26:06Z",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "54 errors: ADOPS_TEST_POSTGRES_DSN is not set (infrastructure tests need the test Postgres)",
+          "resolvedBy": "gate-fix",
+          "resolution": "Set ADOPS_TEST_POSTGRES_DSN to the already-running test Postgres on :55432; no code change"
+        }
+      ],
+      "gateRun": [
+        "uv run ruff check: pass",
+        "ADOPS_TEST_POSTGRES_DSN=... uv run pytest tests/unit --cov: pass (2020 passed, 100%)",
+        "uv build --wheel + Skill template grep (g3): pass",
+        "git diff --stat HEAD -- src/adops: empty",
+        "g4 e2e: not run (needs Docker stack; phase adds no tests/e2e file)"
+      ]
+    }
+  ]
+}

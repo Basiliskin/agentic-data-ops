@@ -9,6 +9,7 @@ import pytest
 import yaml
 from dagster import DagsterInstance, QueuedRunCoordinator
 from dotenv import dotenv_values
+from git_harness import GIT_ENV, git
 from typer.testing import CliRunner
 
 import adops
@@ -41,6 +42,12 @@ SERVER_COMPOSE_RUN = (
 )
 
 DEMO_FILES = SERVER_FILES | WORKFLOW_FILES | {
+    ".claude/skills/adops-breaking-change/SKILL.md",
+    ".claude/skills/adops-build/SKILL.md",
+    ".claude/skills/adops-promote/SKILL.md",
+    ".claude/skills/adops-setup/SKILL.md",
+    ".claude/skills/adops-share/SKILL.md",
+    ".claude/skills/adops-test-in-dev/SKILL.md",
     ".env.example",
     ".gitignore",
     ".mcp.json",
@@ -450,6 +457,20 @@ def test_demo_seed_has_no_time_or_randomness_dependent_values(demo):
 
 def test_plain_init_writes_settings_server_files_and_an_empty_pipelines_folder(plain):
     assert listing(plain) == SERVER_FILES | WORKFLOW_FILES | {
+        ".claude",
+        ".claude/skills",
+        ".claude/skills/adops-breaking-change",
+        ".claude/skills/adops-breaking-change/SKILL.md",
+        ".claude/skills/adops-build",
+        ".claude/skills/adops-build/SKILL.md",
+        ".claude/skills/adops-promote",
+        ".claude/skills/adops-promote/SKILL.md",
+        ".claude/skills/adops-setup",
+        ".claude/skills/adops-setup/SKILL.md",
+        ".claude/skills/adops-share",
+        ".claude/skills/adops-share/SKILL.md",
+        ".claude/skills/adops-test-in-dev",
+        ".claude/skills/adops-test-in-dev/SKILL.md",
         ".env.example",
         ".github",
         ".github/workflows",
@@ -706,15 +727,6 @@ def test_workflows_carry_the_installed_adops_version(project):
 
 
 FOLDER_UPDATE = 'git -C "$ADOPS_SERVER_DIR" checkout --detach FETCH_HEAD'
-GIT_ENV = {
-    **os.environ,
-    "GIT_CONFIG_GLOBAL": os.devnull,
-    "GIT_CONFIG_NOSYSTEM": "1",
-    "GIT_AUTHOR_NAME": "adops",
-    "GIT_AUTHOR_EMAIL": "adops@example.com",
-    "GIT_COMMITTER_NAME": "adops",
-    "GIT_COMMITTER_EMAIL": "adops@example.com",
-}
 
 
 def deploy_job(project, environment):
@@ -729,13 +741,6 @@ def step_index(job, text):
 
 def step_script(job, text):
     return job["steps"][step_index(job, text)]["run"]
-
-
-def git(*args, cwd):
-    result = subprocess.run(
-        ["git", *args], cwd=cwd, env=GIT_ENV, check=True, capture_output=True, text=True
-    )
-    return result.stdout.strip()
 
 
 @pytest.mark.parametrize(

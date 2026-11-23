@@ -106,3 +106,8 @@
 - 2026-11-23 | horizon 14 | accept-schema --branch <name> shipped (CLI only, stage's lock, no record); supersedes the horizon-6 lines 'accept-schema --branch is a known gap' and ADR-0006 '--branch gap' — ADR-0006 Clarification 2026-11-23
 - 2026-11-23 | horizon 14 | accept-schema with any non-dev --env is read-only and writes only the record file; supersedes the horizon-13 line's 'until horizon 14 it still writes directly (accepted gap)' — ADR-0015 Clarification 2026-11-23
 - 2026-11-23 | horizon 14 | The horizon-13 line 'accept-schema --branch ... scheduled for horizon 14' is done: --branch shipped in horizon 14 as decided — ADR-0006 Clarification 2026-11-23
+- 2026-11-23 | horizon 15 | adops init ships six Skills: adops-setup, adops-build, adops-test-in-dev, adops-share, adops-breaking-change, adops-promote — user choice; no repo file named them before
+- 2026-11-23 | horizon 15 | Skills are Claude Code only, at .claude/skills/<name>/SKILL.md, byte-identical in the plain and demo templates — user choice, matches the horizon-9 .mcp.json-only decision
+- 2026-11-23 | horizon 15 | Skills name MCP tools as backticked mcp__adops__<tool>; tests read valid names from build_server, never a second hard-coded list — so a renamed tool fails the Skill checks
+- 2026-11-23 | horizon 15 | Skill checks live in tests/ only; Skills never quote a banned command (git add -A, --env stage/prod, gh release) even inside a warning — so text checks stay strict
+- 2026-11-23 | horizon 15 | The Skills' Git replay is an offline test in tests/unit with a hand-written record, not a Docker E2E — user choice; the Docker E2E already covers real dev accept-schema

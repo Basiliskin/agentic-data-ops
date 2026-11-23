@@ -158,6 +158,10 @@ _Avoid_: credential, secret (when meaning the name)
 The user's own AI coding tool (e.g. Claude Code) that operates the product through its MCP server and skills.
 _Avoid_: agent (ambiguous), bot
 
+**Skill**:
+A SKILL.md file that `adops init` writes to `.claude/skills/<name>/` and that tells the Assistant how to carry out one workflow step by step in plain words.
+_Avoid_: playbook, prompt
+
 **Analytics Agent**:
 The optional built-in AI that answers business questions about warehouse data; it can read, never write.
 _Avoid_: agent (unqualified), chatbot

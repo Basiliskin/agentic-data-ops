@@ -45,11 +45,20 @@ jobs:
                       dbt/dbt_project.yml \
                       dbt/models/sources.yml dbt/models/schema.yml dbt/models/customers.sql \
                       dbt/models/orders.sql dbt/models/customer_orders.sql \
-                      dbt/models/customer_stats.sql warehouse_init/01_stage.sql; do
+                      dbt/models/customer_stats.sql warehouse_init/01_stage.sql \
+                      .claude/skills/adops-setup/SKILL.md .claude/skills/adops-build/SKILL.md \
+                      .claude/skills/adops-test-in-dev/SKILL.md .claude/skills/adops-share/SKILL.md \
+                      .claude/skills/adops-promote/SKILL.md \
+                      .claude/skills/adops-breaking-change/SKILL.md; do
             grep -qF "adops/templates/demo/$file" <<< "$listing" || { echo "missing $file"; exit 1; }
           done
           for file in plain/adops.yaml plain/docker-compose.yml plain/.env.example plain/.mcp.json \
-                      plain/gitignore \
+                      plain/gitignore plain/.claude/skills/adops-setup/SKILL.md \
+                      plain/.claude/skills/adops-build/SKILL.md \
+                      plain/.claude/skills/adops-test-in-dev/SKILL.md \
+                      plain/.claude/skills/adops-share/SKILL.md \
+                      plain/.claude/skills/adops-promote/SKILL.md \
+                      plain/.claude/skills/adops-breaking-change/SKILL.md \
                       server/Dockerfile server/workspace.yaml server/dagster.yaml \
                       github/workflows/adops-pull-request.yml github/workflows/adops-stage.yml \
                       github/workflows/adops-prod.yml; do
