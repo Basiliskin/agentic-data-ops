@@ -1,8 +1,10 @@
 import os
+import re
 import subprocess
 import sys
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 
 import psycopg
 import pytest
@@ -37,7 +39,6 @@ DBT_CHECKS = (
 )
 ORPHAN_CUSTOMER_ID = "999"
 REVERSE_SYNC = "reverse_sync_customer_stats"
-STAGE_RECORD = "2026-03-15-shop_sync-orders"
 REVERSE_SYNC_CHECKS = (
     "target_columns_exist",
     "key_unique",
@@ -283,6 +284,13 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
     assert "in Environment dev." in output
     assert "may now be NULL in the Warehouse: customer_id" in output
     assert_no_secret_or_row_value(output, env)
+    record = Path(re.search(r"Wrote accepted-change record (\S+\.yaml) ", output)[1])
+    assert record.parent == Path("pipelines", "accepted")
+    assert sorted((project / record.parent).iterdir()) == [project / record]
+
+    code, output = adops_run(project, "validate")
+
+    assert code == 0, output
 
     code, output = adops_run(project, *RUN)
 
@@ -292,16 +300,10 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
     assert_no_secret_or_row_value(output, env)
     assert counts(demo) == {"customers": 20, "orders": 103}
 
-    accepted = project / "pipelines" / "accepted"
-    accepted.mkdir()
-    (accepted / f"{STAGE_RECORD}.yaml").write_text(
-        "pipeline: shop_sync\ntable: orders\nchanges: [customer_id dropped]\n"
-    )
-
     code, output = adops_run(project, *RUN, "--env", "stage")
 
     assert code == 0, output
-    assert f"  Applied accepted-change record {STAGE_RECORD} in stage" in output.splitlines()
+    assert f"  Applied accepted-change record {record.stem} in stage" in output.splitlines()
     assert_no_secret_or_row_value(output, env)
 
     code, output = adops_run(project, *RUN, "--env", "stage")

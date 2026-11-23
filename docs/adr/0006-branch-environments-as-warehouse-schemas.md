@@ -26,3 +26,7 @@ The original text named a single `env_<branch>` schema created by CI and dropped
 
 - **Dropping now runs from CI.** The generated `adops-pull-request.yml` runs `adops drop-branch <branch>` on the stage Server when a pull request is closed or merged (ADR-0016). `adops drop-branch` by hand still works.
 - **Branch names that sanitize to the same name collide.** Two branches such as `feature/new-orders` and `feature-new/orders` both become `feature_new_orders` and share one Branch Environment: each run overwrites the other's tables, and closing either pull request drops both. This is recorded, not fixed; `docs/playbooks/promotion.md` gives the recovery steps.
+
+## Clarification (2026-11-23)
+
+- **The `--branch` known gap is closed.** `adops accept-schema <pipeline> <table> --branch <branch>` accepts a table's current shape as that Branch Environment's baseline in `br_<name>__adops`, under stage's Warehouse lock, and writes no accepted-change record. It cannot be combined with `--env` and is CLI only: the Assistant's `accept_schema` tool stays dev only. A committed accepted-change record is still applied by Branch runs as it is by stage (ADR-0015).

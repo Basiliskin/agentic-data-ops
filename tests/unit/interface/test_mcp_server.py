@@ -1073,6 +1073,8 @@ async def test_accept_schema_in_dev_records_the_shape_without_a_lock(
         "environment": "dev",
         "column_count": 2,
         "nullable_columns": [],
+        "record_path": None,
+        "covered_by": [],
     }
     assert accepted.arguments == [(project, "shop_sync", "customers", "dev")]
     assert seams.snapshots.shapes == {("shop_sync", "shop", "customers"): TableShape(CUSTOMERS)}
@@ -1091,6 +1093,66 @@ async def test_accept_schema_names_the_columns_that_may_now_be_null(
 
     assert result.structuredContent["nullable_columns"] == ["phone"]
     assert seams.sync.nullable == ["phone"]
+
+
+def seed_dropped_phone(seams) -> None:
+    seams.snapshots.shapes[("shop_sync", "shop", "customers")] = TableShape(
+        {**CUSTOMERS, "phone": "text"}
+    )
+
+
+DROPPED_PHONE_RECORD = "pipelines/accepted/20261122T093000Z-shop_sync-customers.yaml"
+
+
+async def test_accept_schema_writes_a_record_and_returns_its_project_path_without_a_lock(
+    project, seams, locks, accepted
+):
+    seed_dropped_phone(seams)
+
+    result = await accept_schema_tool(project, table="customers", environment="dev")
+
+    assert result.structuredContent["record_path"] == DROPPED_PHONE_RECORD
+    assert result.structuredContent["covered_by"] == []
+    assert (project / DROPPED_PHONE_RECORD).exists()
+    [record] = run_command.load_project_records(project)
+    assert (record.pipeline, record.table) == ("shop_sync", "customers")
+    assert [change.message for change in record.changes] == ["phone dropped"]
+    assert locks.events == []
+    assert locks.timeouts == []
+
+
+async def test_accept_schema_names_the_record_that_already_covers_the_change(
+    project, seams, locks, accepted
+):
+    seed_dropped_phone(seams)
+    first = await accept_schema_tool(project, table="customers", environment="dev")
+    seed_dropped_phone(seams)
+
+    second = await accept_schema_tool(project, table="customers", environment="dev")
+
+    assert second.structuredContent["record_path"] is None
+    assert second.structuredContent["covered_by"] == [first.structuredContent["record_path"]]
+    assert [path.name for path in (project / "pipelines" / "accepted").iterdir()] == [
+        Path(DROPPED_PHONE_RECORD).name
+    ]
+
+
+async def test_accept_schema_refuses_to_overwrite_a_record_with_the_same_name(
+    project, seams, locks, accepted
+):
+    seed_dropped_phone(seams)
+    clashing = project / DROPPED_PHONE_RECORD
+    clashing.parent.mkdir(parents=True)
+    clashing.write_text("pipeline: shop_sync\ntable: orders\nchanges: [id dropped]\n")
+
+    result = await accept_schema_tool(project, table="customers", environment="dev")
+
+    assert result.isError
+    assert error_text(result) == (
+        f"Error executing tool accept_schema: {DROPPED_PHONE_RECORD}: "
+        "a record with this name already exists; nothing accepted"
+    )
+    assert seams.sync.nullable == []
 
 
 @pytest.mark.parametrize(
@@ -1121,8 +1183,8 @@ async def test_accept_schema_refuses_a_branch_before_anything_runs(project, seam
 
     assert error_text(result) == (
         "Error executing tool accept_schema: the Assistant accepts a Breaking Change only in "
-        "`dev`; a Branch Environment records its accepted shapes afresh, so there is nothing "
-        "to accept there"
+        "`dev`; to accept one in a Branch Environment, ask the user to run "
+        "`adops accept-schema --branch <name>` by hand"
     )
     assert_nothing_accepted(seams, locks, accepted)
 

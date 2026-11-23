@@ -593,6 +593,7 @@ def test_real_adapters_are_built_for_the_project(tmp_path, monkeypatch):
         "_pipelines_dir": tmp_path / ".adops" / "dlt" / "stage",
         "_warehouse_kind": "postgres",
         "_layout": SchemaLayout.default(),
+        "_read_only": False,
     }
     assert vars(sync) == {
         "_project_dir": tmp_path,

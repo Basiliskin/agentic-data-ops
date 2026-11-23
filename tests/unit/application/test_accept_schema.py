@@ -1,3 +1,5 @@
+from datetime import UTC, datetime, timedelta, timezone
+
 import pytest
 from fakes import (
     DUCKDB_PATH,
@@ -14,13 +16,24 @@ from fakes import (
     facts_with_types,
 )
 
-from adops.application.accept_schema import AcceptedSchema, accept_schema
+from adops.application.accept_schema import (
+    AcceptedSchema,
+    AlreadyCovered,
+    FoundSchemaChanges,
+    NewRecord,
+    NothingToRecord,
+    accept_schema,
+    apply_schema_acceptance,
+    find_schema_changes,
+    plan_accepted_record,
+)
 from adops.application.ports import ResolvedDuckDb
 from adops.application.run_pipeline import StepError, run_pipeline
 from adops.application.secrets import MissingSecretError
+from adops.domain.accepted_change_record import AcceptedChangeRecord
 from adops.domain.checks import SourceFacts
 from adops.domain.errors import PipelineValidationError
-from adops.domain.schema_snapshot import TableShape
+from adops.domain.schema_snapshot import BreakingChange, BreakingChangeKind, TableShape
 
 ORDERS_BEFORE = {"id": "integer", "updated_at": "timestamptz", "customer_id": "integer"}
 CHANGED_ORDERS = {"id": "integer", "updated_at": "timestamptz", "note": "text"}
@@ -237,3 +250,180 @@ def test_a_duckdb_warehouse_needs_no_warehouse_secret():
     assert store.shapes[("shop", "shop", "orders")] == TableShape(CHANGED_ORDERS)
     assert store.warehouses == [duckdb, duckdb]
     assert sync.connections[1:] == [duckdb]
+
+
+STAGE_SETTINGS = SETTINGS.replace(
+    "  prod:\n",
+    """  stage:
+    warehouse:
+      type: postgres
+      host: warehouse-stage.internal
+      port: 5432
+      database: warehouse
+      user: adops
+      password_env: WAREHOUSE_PASSWORD
+    sources:
+      shop:
+        type: postgres
+        host: shop-stage.internal
+        port: 5432
+        database: shop
+        user: shop
+        password_env: SHOP_DB_PASSWORD
+  prod:
+""",
+)
+
+CUSTOMER_ID_DROPPED = BreakingChange("customer_id", BreakingChangeKind.DROPPED, "integer")
+UPDATED_AT_RETYPED = BreakingChange(
+    "updated_at", BreakingChangeKind.RETYPED, "timestamp", "timestamptz"
+)
+NOW = datetime(2026, 11, 22, 9, 30, 5, tzinfo=UTC)
+
+
+def find(store, sync, environment="dev", settings=SETTINGS, environment_name=None):
+    return find_schema_changes(
+        PIPELINE, settings, environment, "orders", ENV, sync, store, environment_name
+    )
+
+
+def test_find_reports_the_changes_and_changes_nothing():
+    store = FakeSnapshotStore({("shop", "shop", "orders"): TableShape(ORDERS_BEFORE)})
+    sync = RecordingSync(source_facts={"orders": facts_with_types(CHANGED_ORDERS)})
+
+    found = find(store, sync)
+
+    assert found.had_previous_snapshot
+    assert found.changes == (CUSTOMER_ID_DROPPED,)
+    assert (found.pipeline, found.environment, found.step.name, found.source, found.table) == (
+        "shop",
+        "dev",
+        "orders",
+        "shop",
+        "orders",
+    )
+    assert [t.name for t in found.step.tables] == ["orders"]
+    assert found.shape == TableShape(CHANGED_ORDERS)
+    assert found.warehouse.password == WAREHOUSE_PASSWORD
+    assert store.saves == []
+    assert sync.nullable == []
+
+
+def test_find_without_a_previous_snapshot_reports_no_changes():
+    found = find(FakeSnapshotStore(), RecordingSync())
+
+    assert not found.had_previous_snapshot
+    assert found.changes == ()
+
+
+def test_found_changes_are_frozen():
+    found = find(FakeSnapshotStore(), RecordingSync())
+
+    with pytest.raises(AttributeError):
+        found.changes = (CUSTOMER_ID_DROPPED,)  # type: ignore[misc]
+    assert isinstance(found, FoundSchemaChanges)
+
+
+def test_apply_relaxes_and_saves_what_find_found():
+    store = FakeSnapshotStore({("shop", "shop", "orders"): TableShape(ORDERS_BEFORE)})
+    sync = RecordingSync(source_facts={"orders": facts_with_types(CHANGED_ORDERS)})
+    found = find(store, sync)
+
+    accepted = apply_schema_acceptance(found, sync, store)
+
+    assert accepted == AcceptedSchema(
+        "shop",
+        "dev",
+        "orders",
+        "orders",
+        TableShape(CHANGED_ORDERS),
+        ("customer_id",),
+        (CUSTOMER_ID_DROPPED,),
+    )
+    assert sync.nullable == [("orders", "orders", ("customer_id",))]
+    assert store.shapes[("shop", "shop", "orders")] == TableShape(CHANGED_ORDERS)
+
+
+def test_a_branch_is_reported_under_its_name_with_stage_settings():
+    store = FakeSnapshotStore({("shop", "shop", "orders"): TableShape(ORDERS_BEFORE)})
+    sync = RecordingSync(source_facts={"orders": facts_with_types(CHANGED_ORDERS)})
+
+    accepted = accept_schema(
+        PIPELINE,
+        STAGE_SETTINGS,
+        "stage",
+        "orders",
+        ENV,
+        sync,
+        store,
+        environment_name="br_feat",
+    )
+
+    assert accepted.environment == "br_feat"
+    assert accepted.changes == (CUSTOMER_ID_DROPPED,)
+    assert sync.connections[0].host == "shop-stage.internal"
+    assert [w.host for w in store.warehouses] == ["warehouse-stage.internal"] * 2
+
+
+def record(record_id, *changes, pipeline="shop", table="orders"):
+    return AcceptedChangeRecord(record_id, pipeline, table, changes)
+
+
+def test_no_changes_need_no_record():
+    existing = [record("old", CUSTOMER_ID_DROPPED)]
+
+    assert plan_accepted_record("shop", "orders", (), existing, NOW) == NothingToRecord()
+
+
+def test_changes_a_record_already_accepts_need_no_new_record():
+    existing = [
+        record("a", CUSTOMER_ID_DROPPED),
+        record("b", UPDATED_AT_RETYPED),
+        record("c", BreakingChange("note", BreakingChangeKind.DROPPED, "text")),
+    ]
+
+    plan = plan_accepted_record(
+        "shop", "orders", (CUSTOMER_ID_DROPPED, UPDATED_AT_RETYPED), existing, NOW
+    )
+
+    assert plan == AlreadyCovered(("a", "b"))
+
+
+def test_a_new_record_lists_every_found_change_even_when_some_are_covered():
+    found = (CUSTOMER_ID_DROPPED, UPDATED_AT_RETYPED)
+
+    plan = plan_accepted_record("shop", "orders", found, [record("a", CUSTOMER_ID_DROPPED)], NOW)
+
+    assert plan == NewRecord(record("20261122T093005Z-shop-orders", *found))
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        record("other-table", CUSTOMER_ID_DROPPED, table="order_items"),
+        record("other-pipeline", CUSTOMER_ID_DROPPED, pipeline="crm"),
+    ],
+    ids=["other-table", "other-pipeline"],
+)
+def test_a_record_for_another_table_does_not_cover(other):
+    plan = plan_accepted_record("shop", "orders", (CUSTOMER_ID_DROPPED,), [other], NOW)
+
+    assert plan == NewRecord(record("20261122T093005Z-shop-orders", CUSTOMER_ID_DROPPED))
+
+
+def test_the_record_id_uses_utc_time():
+    local = NOW.astimezone(timezone(timedelta(hours=2)))
+
+    plan = plan_accepted_record("shop", "orders", (CUSTOMER_ID_DROPPED,), [], local)
+
+    assert isinstance(plan, NewRecord)
+    assert plan.record.id == "20261122T093005Z-shop-orders"
+
+
+def test_a_table_name_that_is_not_plain_cannot_name_a_record():
+    with pytest.raises(PipelineValidationError) as error:
+        plan_accepted_record("shop", "../orders", (CUSTOMER_ID_DROPPED,), [], NOW)
+
+    assert error.value.problems == (
+        "../orders: an accepted-change record needs a plain table name (a-z, 0-9, _)",
+    )

@@ -13,7 +13,6 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.stdio import stdio_server
 
-from adops.application.accept_schema import AcceptedSchema
 from adops.application.connection_check import (
     ConnectionProbe,
     ConnectionResult,
@@ -58,7 +57,11 @@ from adops.infrastructure.connection_probe import DriverConnectionProbe
 from adops.infrastructure.dlt_sync import duckdb_file
 from adops.infrastructure.run_log_store import run_log_dir
 from adops.interface import run_command
-from adops.interface.accept_schema_command import accept_project_schema
+from adops.interface.accept_schema_command import (
+    SchemaAcceptance,
+    accept_project_schema,
+    record_file,
+)
 from adops.interface.assistant_files import (
     list_project_files,
     read_capped_text,
@@ -148,6 +151,8 @@ class AcceptedSchemaReply(TypedDict):
     environment: str
     column_count: int
     nullable_columns: list[str]
+    record_path: str | None
+    covered_by: list[str]
 
 
 class ValidateReply(TypedDict):
@@ -589,7 +594,9 @@ def dropped_branch_reply(dropped: DroppedBranch) -> DroppedBranchReply:
     return {"environment": dropped.environment, "dropped_schemas": list(dropped.schemas)}
 
 
-def accepted_schema_reply(accepted: AcceptedSchema) -> AcceptedSchemaReply:
+def accepted_schema_reply(acceptance: SchemaAcceptance) -> AcceptedSchemaReply:
+    accepted = acceptance.accepted
+    record_path = acceptance.record_path
     return {
         "pipeline": accepted.pipeline,
         "table": accepted.table,
@@ -597,6 +604,8 @@ def accepted_schema_reply(accepted: AcceptedSchema) -> AcceptedSchemaReply:
         "environment": accepted.environment,
         "column_count": len(accepted.shape.columns),
         "nullable_columns": list(accepted.nullable_columns),
+        "record_path": None if record_path is None else record_path.as_posix(),
+        "covered_by": [record_file(i).as_posix() for i in acceptance.covering_record_ids],
     }
 
 

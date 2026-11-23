@@ -32,7 +32,8 @@ WRITES_ONLY_UNDER_ROOTS = (
 
 ACCEPT_SCHEMA_DEV_ONLY = (
     "the Assistant accepts a Breaking Change only in `dev`; "
-    "a Branch Environment records its accepted shapes afresh, so there is nothing to accept there"
+    "to accept one in a Branch Environment, ask the user to run "
+    "`adops accept-schema --branch <name>` by hand"
 )
 
 

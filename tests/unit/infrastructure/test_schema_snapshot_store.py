@@ -16,7 +16,11 @@ from adops.application.ports import (
 from adops.domain.branch_environment import SchemaLayout
 from adops.domain.schema_snapshot import TableShape
 from adops.infrastructure.dlt_sync import warehouse_destination
-from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
+from adops.infrastructure.schema_snapshot_store import (
+    ReadOnlySnapshotStoreError,
+    WarehouseSnapshotStore,
+)
+from adops.interface.run_command import build_snapshot_store
 
 ORDERS = TableShape({"id": "integer", "amount": "numeric(10, 2)"})
 ORDERS_RETYPED = TableShape({"id": "bigint", "amount": "numeric(12, 2)", "note": "text"})
@@ -134,6 +138,7 @@ def test_stored_row_holds_only_names_and_types_and_no_connection_details(tmp_pat
         "_pipelines_dir": tmp_path / ".adops" / "dlt" / "dev",
         "_warehouse_kind": "duckdb",
         "_layout": SchemaLayout.default(),
+        "_read_only": False,
     }
 
 
@@ -442,3 +447,136 @@ def test_applied_record_ids_from_an_unreachable_warehouse_raise_warehouse_unreac
         store.applied_record_ids(UNREACHABLE)
 
     assert_holds_no_driver_text(raised.value)
+
+
+ADOPS_TABLES = "SELECT table_name FROM information_schema.tables WHERE table_schema LIKE '%adops%'"
+
+
+def reader(project: Path, kind: str, layout: SchemaLayout = STAGE) -> WarehouseSnapshotStore:
+    environment = "stage" if layout == STAGE else "br_x"
+    return WarehouseSnapshotStore(
+        project, kind, environment=environment, layout=layout, read_only=True
+    )
+
+
+@pytest.fixture
+def temp_root(tmp_path, monkeypatch) -> Path:
+    root = tmp_path / "system-tmp"
+    root.mkdir()
+    monkeypatch.setattr("tempfile.tempdir", str(root))
+    return root
+
+
+def test_read_only_load_of_a_missing_duckdb_file_finds_nothing_and_creates_no_file(warehouse):
+    store = reader(warehouse.project, "duckdb")
+
+    assert store.load(warehouse.connection, "shop", "shop", "orders") is None
+    assert store.applied_record_ids(warehouse.connection) == frozenset()
+    assert not warehouse.path.exists()
+    assert not (warehouse.project / ".adops").exists()
+
+
+def test_read_only_load_of_an_empty_duckdb_file_writes_nothing(warehouse, temp_root):
+    duckdb.connect(str(warehouse.path)).close()
+    store = reader(warehouse.project, "duckdb")
+
+    assert store.load(warehouse.connection, "shop", "shop", "orders") is None
+    assert store.applied_record_ids(warehouse.connection) == frozenset()
+    assert warehouse.rows(ADOPS_SCHEMAS) == []
+    assert warehouse.rows(ADOPS_TABLES) == []
+    assert not (warehouse.project / ".adops" / "dlt" / "stage").exists()
+    assert list(temp_root.iterdir()) == []
+
+
+def test_read_only_load_of_an_adops_schema_without_tables_finds_nothing(warehouse):
+    with duckdb.connect(str(warehouse.path)) as db:
+        db.execute("CREATE SCHEMA adops")
+    store = reader(warehouse.project, "duckdb")
+
+    assert store.load(warehouse.connection, "shop", "shop", "orders") is None
+    assert store.applied_record_ids(warehouse.connection) == frozenset()
+    assert warehouse.rows(ADOPS_TABLES) == []
+
+
+@pytest.mark.parametrize("layout", [STAGE, BRANCH])
+def test_read_only_load_reads_what_a_writable_store_saved(engine, temp_root, layout):
+    engine.store(layout).save(
+        engine.connection, "shop", "shop", "orders", ORDERS, applied_record_ids=["r1"]
+    )
+    store = reader(engine.project, engine.kind, layout)
+
+    assert store.load(engine.connection, "shop", "shop", "orders") == ORDERS
+    assert store.load(engine.connection, "shop", "shop", "refunds") is None
+    assert store.applied_record_ids(engine.connection) == frozenset({"r1"})
+    assert list(temp_root.iterdir()) == []
+
+
+def test_read_only_save_refuses_before_connecting_and_leaves_the_warehouse_unchanged(engine):
+    engine.store().save(engine.connection, "shop", "shop", "orders", ORDERS)
+    store = reader(engine.project, engine.kind)
+
+    with pytest.raises(ReadOnlySnapshotStoreError, match="read-only"):
+        store.save(engine.connection, "shop", "shop", "orders", ORDERS_RETYPED)
+
+    assert store.load(engine.connection, "shop", "shop", "orders") == ORDERS
+
+
+def test_read_only_save_refuses_even_for_an_unreachable_warehouse(tmp_path):
+    with pytest.raises(ReadOnlySnapshotStoreError):
+        reader(tmp_path, "postgres").save(UNREACHABLE, "shop", "shop", "orders", ORDERS)
+
+
+def test_read_only_load_on_postgres_creates_no_adops_schema_or_local_state(
+    tmp_path, postgres_warehouse, temp_root
+):
+    store = reader(tmp_path, "postgres")
+
+    assert store.load(postgres_warehouse.connection, "shop", "shop", "orders") is None
+    assert store.applied_record_ids(postgres_warehouse.connection) == frozenset()
+    assert {name for name in postgres_warehouse.schemas() if "adops" in name} == set()
+    assert not (tmp_path / ".adops").exists()
+    assert list(temp_root.iterdir()) == []
+
+
+def test_read_only_load_from_an_unreachable_warehouse_raises_warehouse_unreachable(tmp_path):
+    with pytest.raises(WarehouseUnreachable) as raised:
+        reader(tmp_path, "postgres").load(UNREACHABLE, "shop", "shop", "orders")
+
+    assert_holds_no_driver_text(raised.value)
+
+
+def test_read_only_load_of_a_duckdb_file_locked_by_a_writer_is_unreachable(
+    warehouse, duckdb_held_by_another_process
+):
+    warehouse.store().save(warehouse.connection, "shop", "shop", "orders", ORDERS)
+
+    with (
+        duckdb_held_by_another_process(warehouse.path),
+        pytest.raises(WarehouseUnreachable),
+    ):
+        reader(warehouse.project, "duckdb").load(warehouse.connection, "shop", "shop", "orders")
+
+
+def test_read_only_load_keeps_the_duckdb_file_open_read_only(warehouse, monkeypatch):
+    warehouse.store().save(warehouse.connection, "shop", "shop", "orders", ORDERS)
+    opened: list[bool] = []
+    real_connect = duckdb.connect
+
+    def recording(database, *args, read_only=False, **kwargs):
+        opened.append(read_only)
+        return real_connect(database, *args, read_only=read_only, **kwargs)
+
+    monkeypatch.setattr(duckdb, "connect", recording)
+
+    assert (
+        reader(warehouse.project, "duckdb").load(warehouse.connection, "shop", "shop", "orders")
+        == ORDERS
+    )
+    assert opened and all(opened)
+
+
+def test_build_snapshot_store_passes_read_only_through(tmp_path):
+    store = build_snapshot_store(tmp_path, "stage", "duckdb", read_only=True)
+
+    with pytest.raises(ReadOnlySnapshotStoreError):
+        store.save(ResolvedDuckDb("wh.duckdb"), "shop", "shop", "orders", ORDERS)

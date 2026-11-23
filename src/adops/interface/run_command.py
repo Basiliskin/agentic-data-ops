@@ -78,6 +78,7 @@ DAGSTER_FILE = "dagster.yaml"
 
 
 DEFAULT_LAYOUT = SchemaLayout.default()
+BRANCH_WITH_ENV = "cannot be combined with --env: a Branch Environment always derives from stage"
 
 
 class ProjectFileError(Exception):
@@ -113,9 +114,16 @@ def build_sync(
 
 
 def build_snapshot_store(
-    project: Path, environment: str, kind: str, *, layout: SchemaLayout = DEFAULT_LAYOUT
+    project: Path,
+    environment: str,
+    kind: str,
+    *,
+    layout: SchemaLayout = DEFAULT_LAYOUT,
+    read_only: bool = False,
 ) -> SchemaSnapshotStore:
-    return WarehouseSnapshotStore(project, kind, environment=environment, layout=layout)
+    return WarehouseSnapshotStore(
+        project, kind, environment=environment, layout=layout, read_only=read_only
+    )
 
 
 def build_clock() -> Clock:
@@ -238,10 +246,7 @@ def run(
     Variables in the Project's .env are used unless the same name is set in your shell.
     """
     if env is not None and branch is not None:
-        raise typer.BadParameter(
-            "cannot be combined with --env: a Branch Environment always derives from stage",
-            param_hint="'--branch'",
-        )
+        raise typer.BadParameter(BRANCH_WITH_ENV, param_hint="'--branch'")
     root = project.resolve()
     if run_all:
         if pipeline is not None:

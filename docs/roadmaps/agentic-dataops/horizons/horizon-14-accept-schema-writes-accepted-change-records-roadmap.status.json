@@ -1,0 +1,418 @@
+{
+  "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.json",
+  "roadmapTask": "Horizon 14: finish the accepted-change record loop. adops accept-schema (CLI and the dev-only MCP tool) writes the pipelines/accepted/ record file in dev; --env stage|prod becomes read-only and writes only the record file; add CLI-only accept-schema --branch <name> under stage's Warehouse lock; extend the demo E2E so stage halts, dev writes the record, stage applies it once and not again; update ADR-0015/0014 and supersede the old decisions.md lines.",
+  "createdAt": "2026-11-22T19:09:00Z",
+  "updatedAt": "2026-11-23T09:06:34Z",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "split-accept-schema-find-and-save",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-22T19:09:00Z",
+      "completedAt": "2026-11-22T19:25:22Z",
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/{MAP,blockers,decisions,discoveries,state}.md, horizon-14 roadmap .json/.md\nChanged: src/adops/application/accept_schema.py, tests/unit/application/test_accept_schema.py. Split accept_schema into find_schema_changes (read-only, returns frozen FoundSchemaChanges incl. had_previous_snapshot and changes) + apply_schema_acceptance (relax + save); accept_schema = both; optional environment_name reports a Branch name while settings_environment_name (stage) supplies Sources/secrets; AcceptedSchema gains changes; plan_accepted_record returns NothingToRecord | AlreadyCovered(ids) | NewRecord(record with every found change, id <UTC TIMESTAMP_FORMAT>-<pipeline>-<table>), refusing a non-plain table only when a new record is needed. fakes.py not changed (stage settings defined in the test file).",
+      "failures": [],
+      "baseRef": "1687b46a1aa008d739133edcb49db5792c168cf5",
+      "baseDirty": true,
+      "unplannedFiles": [],
+      "gradeResult": {
+        "phaseId": "split-accept-schema-find-and-save",
+        "dimensionScores": [
+          {
+            "dimensionId": "find-is-side-effect-free",
+            "score": 8,
+            "pass": true,
+            "evidence": "find_schema_changes calls only preflight+load; relax/save only in apply_schema_acceptance; test asserts no save and no nullable on a dropped column. Not 10: no-snapshot branch does not assert zero writes."
+          },
+          {
+            "dimensionId": "record-plan-decisions",
+            "score": 10,
+            "pass": true,
+            "evidence": "All outcomes asserted with ==; the covered test includes a non-covering record 'c' and proves its id is excluded; the not-covering test is parametrized over other-table and other-pipeline."
+          },
+          {
+            "dimensionId": "record-id-and-table-guard",
+            "score": 9,
+            "pass": true,
+            "evidence": "Id from now.astimezone(UTC).strftime(TIMESTAMP_FORMAT), literal-asserted incl. +02:00 input; '../orders' raises PipelineValidationError with exact text; no .now(."
+          },
+          {
+            "dimensionId": "settings-vs-reported-environment",
+            "score": 9,
+            "pass": true,
+            "evidence": "accept_schema('stage', environment_name='br_feat') reports br_feat and preflights shop-stage.internal; no br_ lookup in the module."
+          },
+          {
+            "dimensionId": "application-layer-purity",
+            "score": 9,
+            "pass": true,
+            "evidence": "Imports only stdlib + adops.domain/application; no open/Path/pathlib/yaml; plan_accepted_record takes existing_records and now as parameters."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": [
+        "ruff check: pass",
+        "pytest tests/unit --cov (fail_under=100, Postgres via ADOPS_TEST_POSTGRES_DSN): pass",
+        "uv build --wheel + template list: pass",
+        "pytest tests/e2e -m e2e: pass (10 passed)"
+      ],
+      "compensationInvoked": false
+    },
+    {
+      "phaseId": "add-read-only-snapshot-store",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-23T06:07:34Z",
+      "completedAt": "2026-11-23T06:24:25Z",
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/accept_schema.py,tests/unit/application/test_accept_schema.py,docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.status.last_good.json | changed: src/adops/infrastructure/schema_snapshot_store.py, src/adops/interface/run_command.py, tests/unit/infrastructure/test_schema_snapshot_store.py, tests/unit/interface/test_run_command.py (vars(store) assert gains _read_only: False). WarehouseSnapshotStore gains keyword-only read_only=False: read-only load/applied_record_ids use a TemporaryDirectory pipelines_dir, issue no create_dataset/CREATE TABLE, check information_schema for the table, skip a missing DuckDB file, open DuckDB read-only; save() raises ReadOnlySnapshotStoreError before connecting. build_snapshot_store forwards read_only. Gates: ruff check ok, unit 1894 passed, coverage 100%. | compensation: read_only defaults to False; removing the option restores prior behaviour, no data effect.",
+      "failures": [],
+      "baseRef": "1687b46a1aa008d739133edcb49db5792c168cf5",
+      "baseDirty": true,
+      "unplannedFiles": [
+        "tests/unit/interface/test_run_command.py"
+      ],
+      "gradeResult": {
+        "phaseId": "add-read-only-snapshot-store",
+        "dimensions": [
+          {
+            "dimensionId": "no-warehouse-writes-on-read",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "missing-file, empty-file and Postgres tests assert absence; extra test records every duckdb.connect uses read_only=True, plus locked-file test"
+          },
+          {
+            "dimensionId": "no-local-state-on-read",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": ".adops/dlt/stage absent; temp_root fixture asserts the TemporaryDirectory is cleaned up in 4 tests"
+          },
+          {
+            "dimensionId": "reads-existing-snapshot-and-refuses-save",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "round trip on duckdb+postgres x stage+branch with ==; refused save leaves stored row == ORDERS; refusal proven before connecting via unreachable warehouse"
+          },
+          {
+            "dimensionId": "port-unchanged-adapter-only",
+            "score": 9,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "port unchanged, keyword-only, factory forwards; two existing vars(store) asserts gained _read_only: False, so not a 10"
+          }
+        ],
+        "overallPass": true,
+        "summary": "All dimensions pass; only flaw is two vars() asserts extended, one in unplanned test_run_command.py."
+      },
+      "gateRun": [
+        "ruff check: pass",
+        "pytest tests/unit --cov (fail_under=100, Postgres via ADOPS_TEST_POSTGRES_DSN): pass (1894)",
+        "uv build --wheel + template list: pass",
+        "pytest tests/e2e -m e2e: pass (10 passed)"
+      ]
+    },
+    {
+      "phaseId": "write-record-from-cli-accept-schema",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-23T06:26:32Z",
+      "completedAt": "2026-11-23T06:46:25Z",
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/accept_schema.py,src/adops/infrastructure/schema_snapshot_store.py,src/adops/interface/run_command.py,tests/unit/application/test_accept_schema.py,tests/unit/infrastructure/test_schema_snapshot_store.py,tests/unit/interface/test_run_command.py,docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.status.last_good.json | changed: src/adops/interface/accept_schema_command.py, tests/unit/interface/test_accept_schema_command.py, src/adops/interface/mcp_server.py (one line: passes .accepted so the MCP tool keeps its reply until phase return-record-path-from-mcp-accept-schema). accept_project_schema returns SchemaAcceptance(found, accepted|None, record_path, covering_record_ids): find_schema_changes with read_only=env!='dev' -> plan_accepted_record(load_project_records, build_clock().now()) -> NewRecord written via resolve_project_file(write=True), mkdir, open 'x' (clash -> RecordExists(ProjectFileError)) -> dev only: apply_schema_acceptance. Prints record path / 'Already accepted by …' / non-dev 'no record written' reason. run_command.py not changed this phase. | E2E fix after grading: tests/e2e/test_demo_sync.py accepted.mkdir(exist_ok=True) because dev accept-schema now creates the folder (its record and STAGE_RECORD coexist until phase use-dev-record-in-demo-e2e removes STAGE_RECORD). | compensation: none declared; git diff 1687b46a1aa008d739133edcb49db5792c168cf5 -- the three files reverts it.",
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-23T06:43:36Z",
+          "gate": "uv run pytest tests/e2e -m e2e",
+          "detail": "test_demo_incremental_breaking_change_and_missing_table[postgres,duckdb]: FileExistsError at tests/e2e/test_demo_sync.py:296 accepted.mkdir() — dev accept-schema now creates pipelines/accepted/ itself",
+          "resolvedBy": "gate-fix",
+          "resolution": "tests/e2e/test_demo_sync.py: accepted.mkdir() -> mkdir(exist_ok=True); both params green"
+        }
+      ],
+      "baseRef": "1687b46a1aa008d739133edcb49db5792c168cf5",
+      "baseDirty": true,
+      "unplannedFiles": [
+        "src/adops/interface/mcp_server.py",
+        "tests/e2e/test_demo_sync.py"
+      ],
+      "gateRun": [
+        "ruff check: pass",
+        "pytest tests/unit --cov (fail_under=100, Postgres via ADOPS_TEST_POSTGRES_DSN): pass (1905)",
+        "uv build --wheel + template list: pass",
+        "pytest tests/e2e -m e2e: 8 passed, 2 failed (FileExistsError) -> fixed; re-run of the failing test (postgres, duckdb): pass"
+      ],
+      "gradeResult": {
+        "phaseId": "write-record-from-cli-accept-schema",
+        "dimensions": [
+          {
+            "dimensionId": "dev-record-written-and-valid",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "asserts printed path, file count 1, loader fields, validate_project; beyond 9: cwd-elsewhere test covers the failure example"
+          },
+          {
+            "dimensionId": "record-before-baseline",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "open x before apply_schema_acceptance; clash test byte-identical, no save, no nullable; beyond 9: non-plain-table refusal also proven"
+          },
+          {
+            "dimensionId": "non-dev-env-read-only",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "read_only=env!=DEV; staging, ci, stage tests; beyond 9: real DuckDB stage test asserts no .adops and unchanged file bytes"
+          },
+          {
+            "dimensionId": "duplicate-and-path-safety",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "duplicate, clash, subclass, missing folder tested; beyond 9: non-dev duplicate also tested"
+          },
+          {
+            "dimensionId": "interface-owns-io-only",
+            "score": 9,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "no cover(/TIMESTAMP_FORMAT/strftime; plan_accepted_record on the shared path"
+          }
+        ],
+        "overallPass": true,
+        "summary": "All pass; mcp_server.py one-liner is outside filesAffected."
+      }
+    },
+    {
+      "phaseId": "add-accept-schema-branch-option",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-23T06:56:19Z",
+      "completedAt": "2026-11-23T07:14:28Z",
+      "notes": "already dirty at start (earlier h14 phases, uncommitted): src/adops/application/accept_schema.py, src/adops/infrastructure/schema_snapshot_store.py, src/adops/interface/{accept_schema_command,mcp_server,run_command}.py, tests/e2e/test_demo_sync.py, tests/unit/{application/test_accept_schema,infrastructure/test_schema_snapshot_store,interface/test_accept_schema_command,interface/test_run_command}.py, docs/roadmaps/agentic-dataops/* | changed: src/adops/interface/accept_schema_command.py (--branch option, accept_branch_schema under stage lock via build_warehouse_lock(..., STAGE, DEFAULT_LOCK_TIMEOUT), Branch layout to both adapters, no record; WarehouseLocked caught), src/adops/interface/run_command.py (BRANCH_WITH_ENV constant shared with run), tests/unit/interface/test_accept_schema_command.py (8 --branch tests). Files were already dirty, so git diff vs baseRef also shows earlier h14 phases.",
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-23T07:14:36Z",
+          "gate": "uv run pytest tests/unit --cov",
+          "detail": "54 errors: ADOPS_TEST_POSTGRES_DSN is not set (postgres-param tests); coverage 98.53%",
+          "resolvedBy": "gate-fix",
+          "resolution": "environment only: re-ran with ADOPS_TEST_POSTGRES_DSN pointing at the local Postgres on 55432; no code change"
+        }
+      ],
+      "baseRef": "1687b46a1aa008d739133edcb49db5792c168cf5",
+      "baseDirty": true,
+      "unplannedFiles": [
+        "src/adops/interface/run_command.py"
+      ],
+      "gradeResult": {
+        "phaseId": "add-accept-schema-branch-option",
+        "dimensions": [
+          {
+            "dimensionId": "branch-under-stage-lock",
+            "score": 10,
+            "minScore": 8,
+            "pass": true,
+            "evidence": "build_warehouse_lock(warehouse, project, STAGE, DEFAULT_LOCK_TIMEOUT) wraps the accept; test asserts enter stage/save/exit stage order, 30-min timeout, stage-db host; WarehouseLocked test: one line, no save. Above 9: save proven inside the lock."
+          },
+          {
+            "dimensionId": "branch-layout-and-settings",
+            "score": 9,
+            "minScore": 8,
+            "pass": true,
+            "evidence": "stage_branch_name + SchemaLayout.for_branch to both factories; test asserts both layouts, stage source/warehouse hosts, br_feat in output, relaxed customer_id, Feat/Login normalised. Not 10: fake store, settings env inferred from hosts."
+          },
+          {
+            "dimensionId": "branch-writes-no-record",
+            "score": 10,
+            "minScore": 8,
+            "pass": true,
+            "evidence": "branch path never reaches plan_accepted_record; raising spy + empty pipelines/accepted + no 'record' in output, with a dropped column."
+          },
+          {
+            "dimensionId": "option-exclusion-and-errors",
+            "score": 10,
+            "minScore": 7,
+            "pass": true,
+            "evidence": "shared BRANCH_WITH_ENV constant; test runs both accept-schema and run with --env+--branch, exit 2 and same text; WarehouseUnreachable exact one line, lock released."
+          }
+        ],
+        "overallPass": true,
+        "notes": "No comment noise; no bug found. Text parity uses normalised 'in' rather than equality."
+      },
+      "gateRun": [
+        "uv run ruff check: pass",
+        "uv run pytest tests/unit --cov --cov-report=term-missing (ADOPS_TEST_POSTGRES_DSN set): pass, 1913 passed, 100% coverage",
+        "template wheel check (uv build --wheel + listing grep): pass",
+        "uv run pytest tests/e2e -m e2e: pass, 10 passed"
+      ]
+    },
+    {
+      "phaseId": "return-record-path-from-mcp-accept-schema",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-23T07:16:31Z",
+      "completedAt": "2026-11-23T07:34:19Z",
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/accept_schema.py,src/adops/infrastructure/schema_snapshot_store.py,src/adops/interface/accept_schema_command.py,src/adops/interface/mcp_server.py,src/adops/interface/run_command.py,tests/e2e/test_demo_sync.py,tests/unit/application/test_accept_schema.py,tests/unit/infrastructure/test_schema_snapshot_store.py,tests/unit/interface/test_accept_schema_command.py,tests/unit/interface/test_run_command.py,docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.status.last_good.json | changed: src/adops/interface/mcp_server.py, src/adops/domain/assistant_access.py, tests/unit/interface/test_mcp_server.py — MCP accept_schema reply gains record_path (project-relative posix str or None) and covered_by (paths of covering records) from SchemaAcceptance; ACCEPT_SCHEMA_DEV_ONLY now points Branch acceptance to adops accept-schema --branch <name>; tests for set/None/covered/clash/refusal text. mcp_server.py was already dirty (one-line .accepted call from write-record-from-cli-accept-schema).",
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-23T07:20:29Z",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "54 errors: ADOPS_TEST_POSTGRES_DSN is not set; coverage 98.53% < 100",
+          "resolvedBy": "gate-fix",
+          "resolution": "env only: ran with ADOPS_TEST_POSTGRES_DSN pointing at the local postgres:17-alpine on 55432; no code change"
+        }
+      ],
+      "baseRef": "1687b46a1aa008d739133edcb49db5792c168cf5",
+      "baseDirty": true,
+      "unplannedFiles": [],
+      "gateRun": [
+        "uv run ruff check: pass",
+        "uv run pytest tests/unit --cov --cov-report=term-missing (ADOPS_TEST_POSTGRES_DSN set): pass, 100%",
+        "uv run pytest tests/e2e -m e2e: pass (10)"
+      ],
+      "gradeResult": {
+        "phaseId": "return-record-path-from-mcp-accept-schema",
+        "dimensions": [
+          {
+            "dimensionId": "record-path-reply-field",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "set-path test also parses the record with load_project_records and checks pipeline/table/change; None, set, covered cases asserted"
+          },
+          {
+            "dimensionId": "clash-error-passes-through",
+            "score": 8,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "RecordExists subclasses ProjectFileError (in RUN_ERRORS); clash test asserts isError and exact message naming the record"
+          },
+          {
+            "dimensionId": "branch-refusal-points-to-cli",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "test compares the full new refusal string exactly; no nothing-to-accept text remains"
+          },
+          {
+            "dimensionId": "each-part-in-its-layer",
+            "score": 10,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "domain diff string-only; record-writing test itself asserts locks.events and locks.timeouts empty"
+          }
+        ],
+        "overallPass": true,
+        "summary": "All dimensions meet minScore; record_path/covered_by relative and tested for set/None/covered/clash."
+      }
+    },
+    {
+      "phaseId": "use-dev-record-in-demo-e2e",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-23T07:36:17Z",
+      "completedAt": "2026-11-23T07:53:23Z",
+      "notes": "already dirty at start (prior phases of this horizon, uncommitted): docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/accept_schema.py,src/adops/domain/assistant_access.py,src/adops/infrastructure/schema_snapshot_store.py,src/adops/interface/accept_schema_command.py,src/adops/interface/mcp_server.py,src/adops/interface/run_command.py,tests/e2e/test_demo_sync.py,tests/unit/application/test_accept_schema.py,tests/unit/infrastructure/test_schema_snapshot_store.py,tests/unit/interface/test_accept_schema_command.py,tests/unit/interface/test_mcp_server.py,tests/unit/interface/test_run_command.py,docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.status.last_good.json | changed: tests/e2e/test_demo_sync.py — drops STAGE_RECORD and the hand-written pipelines/accepted file (and the exist_ok bridge); parses the record path from dev accept-schema stdout, asserts it is the only file in pipelines/accepted, runs adops validate, asserts stage applies <record.stem> then a second stage run applies nothing.",
+      "failures": [
+        {
+          "at": "2026-11-23T07:52:54Z",
+          "attempt": 1,
+          "by": "verify",
+          "kind": "gate",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "54 setup errors: ADOPS_TEST_POSTGRES_DSN is not set; coverage 98.53% < 100",
+          "resolvedBy": "gate-fix",
+          "resolution": "environment only: re-ran with ADOPS_TEST_POSTGRES_DSN=postgresql://postgres:adops@localhost:55432/postgres (adops-test-pg container already up); 1916 passed, 100%"
+        }
+      ],
+      "baseRef": "1687b46a1aa008d739133edcb49db5792c168cf5",
+      "baseDirty": true,
+      "unplannedFiles": [],
+      "gateRun": [
+        "uv run ruff check: pass",
+        "uv run ruff format --check tests/e2e/test_demo_sync.py: pass",
+        "uv run pytest tests/unit --cov (with ADOPS_TEST_POSTGRES_DSN): pass, 1916 passed, 100%",
+        "uv run pytest tests/e2e -m e2e -k breaking_change: pass, 2 passed",
+        "uv run pytest tests/e2e -m e2e: pass, 10 passed in 666s"
+      ],
+      "gradeResult": {
+        "phaseId": "use-dev-record-in-demo-e2e",
+        "dimensionScores": [
+          {
+            "dimensionId": "no-hand-written-record",
+            "score": 10,
+            "pass": true,
+            "evidence": "no write into pipelines/accepted remains; path parsed from dev stdout; asserts the parsed file is the only file in pipelines/accepted before the apply run; validate exits 0"
+          },
+          {
+            "dimensionId": "applies-once-by-id",
+            "score": 10,
+            "pass": true,
+            "evidence": "exact whole-line match on Applied <record.stem> in stage; next stage run has no Applied line; one parametrized test, postgres+duckdb both pass"
+          },
+          {
+            "dimensionId": "budget-unchanged",
+            "score": 10,
+            "pass": true,
+            "evidence": "no new test function; 4 stage invocations before and after; full e2e 10 passed in 666s < 20 min"
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "document-accept-schema-record-loop",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-23T08:50:13Z",
+      "completedAt": "2026-11-23T09:06:34Z",
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/accept_schema.py,src/adops/domain/assistant_access.py,src/adops/infrastructure/schema_snapshot_store.py,src/adops/interface/accept_schema_command.py,src/adops/interface/mcp_server.py,src/adops/interface/run_command.py,tests/e2e/test_demo_sync.py,tests/unit/application/test_accept_schema.py,tests/unit/infrastructure/test_schema_snapshot_store.py,tests/unit/interface/test_accept_schema_command.py,tests/unit/interface/test_mcp_server.py,tests/unit/interface/test_run_command.py,docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-14-accept-schema-writes-accepted-change-records-roadmap.status.last_good.json | changed: docs/adr/0015-breaking-changes-accepted-through-git.md, docs/adr/0014-schedules-run-on-a-pull-based-server.md, docs/adr/0006-branch-environments-as-warehouse-schemas.md, GLOSSARY.md, docs/roadmaps/agentic-dataops/decisions.md (3 appended h14 lines; file was already dirty) — dated 2026-11-23 Clarifications in ADR-0015/0014/0006, new GLOSSARY accept-schema entry, widened Breaking Change + Accepted-change record entries, decisions.md supersession lines",
+      "failures": [
+        {
+          "at": "2026-11-23T08:55:28Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "54 errors: ADOPS_TEST_POSTGRES_DSN is not set (Postgres fixture); coverage 98.53% < 100",
+          "resolvedBy": "retry",
+          "resolution": "re-ran with ADOPS_TEST_POSTGRES_DSN pointing at the running adops-test-pg container; no code change; 1916 passed, 100%"
+        }
+      ],
+      "baseRef": "1687b46a1aa008d739133edcb49db5792c168cf5",
+      "baseDirty": true,
+      "unplannedFiles": [],
+      "gateRun": "uv run ruff check: pass; ADOPS_TEST_POSTGRES_DSN=… uv run pytest tests/unit --cov: pass (1916, 100%); uv run pytest tests/e2e -m e2e: pass (10)",
+      "gradeResult": {
+        "phaseId": "document-accept-schema-record-loop",
+        "dimensionScores": [
+          {
+            "dimensionId": "adr-0015-matches-shipped-code",
+            "score": 10,
+            "pass": true,
+            "evidence": "All six points traced to code; above 9: literal strftime pattern, record-before-baseline ordering and why, NOT NULL relaxation, --branch/--env exclusion"
+          },
+          {
+            "dimensionId": "stale-pointers-closed",
+            "score": 9,
+            "pass": true,
+            "evidence": "Both dated Clarifications present; ADR-0014 one names the command but not a lock rule"
+          },
+          {
+            "dimensionId": "glossary-terms",
+            "score": 10,
+            "pass": true,
+            "evidence": "New accept-schema entry names dev-only MCP tool and stage Warehouse lock; both existing entries widened"
+          }
+        ],
+        "overallPass": true
+      }
+    }
+  ]
+}

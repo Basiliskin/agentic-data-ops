@@ -27,3 +27,5 @@
 - 2026-11-22 | horizon 12 | completed | 3 phases, 1 amendment — Server stale-run recovery: adops server-recover before dagster-daemon, run_monitoring on, one stale-run webhook alert; crash E2E green on Postgres and DuckDB
 - 2026-11-22 | horizon 13 | planned | 5 phases (accepted-change records: record type + coverage rule, Sync Steps apply records, applied-records table, records loaded into stage/prod/Branch runs + stage E2E, — see horizon-13 roadmap.md
 - 2026-11-22 | horizon 13 | completed | 5 phases, 1 amendment — ADR-0015 accepted-change records: domain + cover(), applied in stage/prod/Branch Sync Steps, _adops_applied_records per Environment, loaded in runs, checked by adops validate
+- 2026-11-22 | horizon 14 | planned | 7 phases (accept-schema find/save split, read-only snapshot store, dev+non-dev record writing, --branch under stage lock, MCP record_path, E2E uses dev record, ADR docs); — see horizon-14 roadmap.md
+- 2026-11-23 | horizon 14 | completed | 7 phases; accept-schema writes the record in dev, other --env read-only record only, CLI --branch under stage lock, MCP returns record_path, demo E2E uses the dev record; ADRs 0015/0014/0006 clarified

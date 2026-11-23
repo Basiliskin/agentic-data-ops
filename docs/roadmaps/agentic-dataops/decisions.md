@@ -96,3 +96,13 @@
 - 2026-11-22 | horizon 13 | accept-schema --env stage|prod reads that Environment's snapshot and Source read-only and writes only the record file — user choice; until horizon 14 it still writes directly (accepted gap)
 - 2026-11-22 | horizon 13 | accept-schema --branch <name> is added for hand use, CLI only, under stage's Warehouse lock — user choice; closes the horizon-6 gap, scheduled for horizon 14
 - 2026-11-22 | horizon 13 | The Step result (CLI output and Run Log) names each accepted-change record a run applied — user choice, so a stale record silently accepting a later change is visible
+- 2026-11-22 | horizon 14 | accept-schema --branch <name> reuses dev's accept logic (detection, NOT NULL relaxation, baseline save in br_<name>__adops) under stage's lock and writes no record — user choice
+- 2026-11-22 | horizon 14 | Every Environment except dev named with --env (stage, prod, ci, any name) is read-only for accept-schema and writes only the record file — user choice
+- 2026-11-22 | horizon 14 | accept-schema writes no record when existing records already cover the found changes (prints their paths); new records are created exclusively and a name clash refuses, never overwrites — user choice
+- 2026-11-22 | horizon 14 | A new accepted-change record lists every change found, even when an existing record covers some — user choice, so each record stands on its own
+- 2026-11-22 | horizon 14 | Record id is <UTC %Y%m%dT%H%M%SZ>-<Pipeline name>-<table>; a non-plain table name is refused — because ids are file stems inside pipelines/accepted/
+- 2026-11-22 | horizon 14 | Dev accept-schema plans and creates the record file before relaxing and saving dev's baseline — so a refused record leaves dev unchanged and a re-run can still record
+- 2026-11-22 | horizon 14 | Read-only snapshot loads use a read_only option on WarehouseSnapshotStore, not a new port — because widening the runtime-checkable port breaks every fake
+- 2026-11-23 | horizon 14 | accept-schema --branch <name> shipped (CLI only, stage's lock, no record); supersedes the horizon-6 lines 'accept-schema --branch is a known gap' and ADR-0006 '--branch gap' — ADR-0006 Clarification 2026-11-23
+- 2026-11-23 | horizon 14 | accept-schema with any non-dev --env is read-only and writes only the record file; supersedes the horizon-13 line's 'until horizon 14 it still writes directly (accepted gap)' — ADR-0015 Clarification 2026-11-23
+- 2026-11-23 | horizon 14 | The horizon-13 line 'accept-schema --branch ... scheduled for horizon 14' is done: --branch shipped in horizon 14 as decided — ADR-0006 Clarification 2026-11-23

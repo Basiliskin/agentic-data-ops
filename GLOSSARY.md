@@ -67,12 +67,16 @@ A Sync that reads the Source database's own change log, so it also captures dele
 _Avoid_: replication, streaming sync
 
 **Breaking Change**:
-A change to a Source table's shape (renamed or dropped column, changed type) since the last successful run. It halts the whole Sync Step before any table loads, and every later Step, until resolved. In dev it is resolved by running `accept-schema` by hand; in stage, prod and Branch Environments, by a committed Accepted-change record. An added column is not a Breaking Change.
+A change to a Source table's shape (renamed or dropped column, changed type) since the last successful run. It halts the whole Sync Step before any table loads, and every later Step, until resolved. In dev it is resolved by running `accept-schema` by hand; in stage, prod and Branch Environments, by a committed Accepted-change record, which dev's `accept-schema` writes. A Branch Environment can also be hand-accepted with `accept-schema --branch <name>`, which writes no record. An added column is not a Breaking Change.
 _Avoid_: schema drift (covers harmless changes too), schema error
 
 **Accepted-change record**:
-A YAML file in `pipelines/accepted/`, committed through Git, that names one Pipeline table and the Breaking Changes accepted for it, written as `<column> dropped` or `<column> retyped (<from> -> <to>)`. Its id is the file name. Each Environment applies a record at most once, and records are never removed.
+A YAML file in `pipelines/accepted/`, committed through Git, that names one Pipeline table and the Breaking Changes accepted for it, written as `<column> dropped` or `<column> retyped (<from> -> <to>)`. Its id is the file name. Each Environment applies a record at most once, and records are never removed. `accept-schema` in dev writes one (as does any other `--env`, read-only); it can also be written by hand and checked with `adops validate`.
 _Avoid_: schema approval, migration, waiver
+
+**accept-schema**:
+The command (`adops accept-schema <pipeline> <table>`) that accepts an intended Breaking Change. In dev it writes an Accepted-change record and saves the table's current shape as dev's baseline. With any other `--env` it only reads that Environment and writes the record. With `--branch <name>` it saves the Branch Environment's baseline under stage's Warehouse lock and writes no record. The Assistant's `accept_schema` tool runs it in dev only.
+_Avoid_: approve schema, schema migrate
 
 **Transform**:
 Turning Warehouse data into new tables using dbt models and their tests.
