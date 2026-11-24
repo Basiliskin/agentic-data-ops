@@ -311,7 +311,8 @@ def test_every_variable_the_demo_reads_is_in_env_example(project):
         )
     )
 
-    assert used - defined == set()
+    # adops itself sets this one for each host run (run_command), so .env never needs it.
+    assert used - defined == {"ADOPS_COMPUTE_LOG_DIR"} & used
     assert {
         "WAREHOUSE_PASSWORD",
         "DAGSTER_PG_PASSWORD",
@@ -470,7 +471,14 @@ def test_server_dagster_instance_runs_one_run_at_a_time_on_postgres(project):
 
     assert getattr(module, coordinator["class"]) is QueuedRunCoordinator
     assert coordinator["config"] == {"max_concurrent_runs": 1}
-    assert set(config) == {"storage", "run_coordinator", "run_monitoring", "telemetry"}
+    assert set(config) == {
+        "storage",
+        "run_coordinator",
+        "run_monitoring",
+        "compute_logs",
+        "telemetry",
+    }
+    assert config["compute_logs"]["config"] == {"base_dir": "/project/.adops/dagster/compute_logs"}
     assert config["run_monitoring"] == {
         "enabled": True,
         "start_timeout_seconds": 180,
@@ -501,7 +509,25 @@ def test_demo_keeps_its_host_dagster_storage_unchanged(demo):
     host = yaml.safe_load((demo / "dagster.yaml").read_text())
     server = yaml.safe_load((demo / "server" / "dagster.yaml").read_text())
 
-    assert host == {"storage": server["storage"], "telemetry": server["telemetry"]}
+    assert set(host) == {"storage", "compute_logs", "telemetry"}
+    assert host["storage"] == server["storage"]
+    assert host["telemetry"] == server["telemetry"]
+    assert host["compute_logs"]["class"] == server["compute_logs"]["class"]
+    assert host["compute_logs"]["config"] == {"base_dir": {"env": "ADOPS_COMPUTE_LOG_DIR"}}
+
+
+def test_demo_run_output_lands_inside_the_git_ignored_adops_folder(demo, tmp_path, monkeypatch):
+    config = yaml.safe_load((demo / "dagster.yaml").read_text())
+    del config["storage"]
+    home = tmp_path / "dagster_home"
+    home.mkdir()
+    (home / "dagster.yaml").write_text(yaml.safe_dump(config))
+    monkeypatch.setenv("ADOPS_COMPUTE_LOG_DIR", str(demo / ".adops/dagster/compute_logs"))
+
+    with DagsterInstance.from_config(str(home)) as instance:
+        base_dir = Path(instance.compute_log_manager._base_dir)
+    assert base_dir == demo / ".adops/dagster/compute_logs"
+    assert ".adops/" in (demo / ".gitignore").read_text().splitlines()
 
 
 @pytest.mark.parametrize("config_file", ["dagster.yaml", "server/dagster.yaml"])

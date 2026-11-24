@@ -110,10 +110,10 @@ only on this branch's own schemas.
 
 - Call `mcp__adops__test_connection` with `branch="<name>"`. If a connection fails, explain
   which database it is and stop until it is fixed.
-- Call `mcp__adops__preview` with the Pipeline's name and `branch="<name>"`. For each entry in
-  `previews`, say in plain numbers how many rows would be inserted, updated and deleted.
-- Call `mcp__adops__run` with the Pipeline's name and `branch="<name>"`. If `succeeded` is
-  true, say which Steps ran and how many rows each loaded. If not, explain the failed Step's
+- Call `mcp__adops__run` with the Pipeline's name and `branch="<name>"`, once; do not also call
+  `mcp__adops__preview`, which would run the whole Pipeline again. If `succeeded` is true, say
+  which Steps ran and how many rows each loaded, and for each Step with a `preview`, how many
+  rows it would insert, update and delete in the target. If not, explain the failed Step's
   `error` and each failed check in plain words, as the adops-test-in-dev Skill does, then fix
   the change, save it again as in step 4, send it with `git push`, and repeat this step. The
   new commit updates the same pull request, so do not open another one.

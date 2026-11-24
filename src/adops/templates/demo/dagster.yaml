@@ -12,6 +12,14 @@ storage:
       password:
         env: DAGSTER_PG_PASSWORD
 
+# Step output that Dagster captures stays in .adops/, which Git ignores; adops sets this variable.
+compute_logs:
+  module: dagster._core.storage.local_compute_log_manager
+  class: LocalComputeLogManager
+  config:
+    base_dir:
+      env: ADOPS_COMPUTE_LOG_DIR
+
 # No usage statistics are sent to Dagster, and its first-run notice about them is not shown.
 telemetry:
   enabled: false

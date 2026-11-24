@@ -438,6 +438,7 @@ def test_dagster_yaml_scopes_dagster_home_and_dotenv_to_the_run(project, orchest
     assert result.exit_code == 0, result.output
     [during] = orchestrator.environ
     assert during["DAGSTER_HOME"] == str(project.resolve())
+    assert during["ADOPS_COMPUTE_LOG_DIR"] == str(project.resolve() / ".adops/dagster/compute_logs")
     assert during["ADOPS_TEST_DAGSTER_PG_HOST"] == "from_dotenv"
     assert dict(os.environ) == before
 
@@ -451,6 +452,7 @@ def test_dagster_home_unset_without_dagster_yaml(project, orchestrator):
     assert result.exit_code == 0, result.output
     [during] = orchestrator.environ
     assert "DAGSTER_HOME" not in during
+    assert "ADOPS_COMPUTE_LOG_DIR" not in during
     assert dict(os.environ) == before
 
 

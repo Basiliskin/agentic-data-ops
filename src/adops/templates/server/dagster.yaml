@@ -27,6 +27,13 @@ run_monitoring:
   poll_interval_seconds: 120
   max_resume_run_attempts: 0
 
+# Step output that Dagster captures stays in the Project's .adops/, which Git ignores.
+compute_logs:
+  module: dagster._core.storage.local_compute_log_manager
+  class: LocalComputeLogManager
+  config:
+    base_dir: /project/.adops/dagster/compute_logs
+
 # No usage statistics are sent to Dagster, and its first-run notice about them is not shown.
 telemetry:
   enabled: false

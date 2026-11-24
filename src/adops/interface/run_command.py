@@ -75,6 +75,7 @@ PIPELINES_DIR = Path("pipelines")
 ACCEPTED_RECORDS_DIR = "accepted"
 DOTENV_FILE = ".env"
 DAGSTER_FILE = "dagster.yaml"
+COMPUTE_LOG_DIR = Path(".adops") / "dagster" / "compute_logs"
 
 
 DEFAULT_LAYOUT = SchemaLayout.default()
@@ -396,7 +397,11 @@ def _dagster_environ(project: Path) -> dict[str, str]:
     if not (project / DAGSTER_FILE).is_file():
         return {}
     # Dagster resolves dagster.yaml's `env:` values from the process environment.
-    return {**project_env(project), "DAGSTER_HOME": str(project)}
+    return {
+        **project_env(project),
+        "DAGSTER_HOME": str(project),
+        "ADOPS_COMPUTE_LOG_DIR": str(project / COMPUTE_LOG_DIR),
+    }
 
 
 def run_in_environment(

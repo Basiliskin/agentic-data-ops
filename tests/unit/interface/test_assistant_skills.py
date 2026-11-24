@@ -26,8 +26,8 @@ EXPECTED_SKILLS = {
 REQUIRED_TOOLS = {
     "adops-setup": {"test_connection", "validate"},
     "adops-build": {"list_files", "read_file", "project_view", "edit_file", "validate"},
-    "adops-test-in-dev": {"run", "preview", "read_logs", "test_connection"},
-    "adops-share": {"run", "preview"},
+    "adops-test-in-dev": {"run", "read_logs", "test_connection"},
+    "adops-share": {"run"},
     "adops-promote": {"drop_branch"},
     "adops-breaking-change": {"accept_schema"},
 }

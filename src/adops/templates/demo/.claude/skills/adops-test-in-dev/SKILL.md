@@ -1,6 +1,6 @@
 ---
 name: adops-test-in-dev
-description: Try a Pipeline in the dev Environment - checks the dev connections, previews what it would change, runs it and explains any failure in plain words using the Run Logs. Use it after building or changing a Pipeline, or when someone asks why a dev run failed.
+description: Try a Pipeline in the dev Environment - checks the dev connections, runs it once, shows what it would change in its targets and explains any failure in plain words using the Run Logs. Use it after building or changing a Pipeline, or when someone asks why a dev run failed.
 ---
 
 # Try a Pipeline in dev
@@ -24,25 +24,23 @@ the Pipeline and not about a stopped database."
   the likely fix: the database is not running (`docker compose up --wait`), a wrong password in
   `.env`, or a host or port in `adops.yaml` that does not match. Stop here until it passes.
 
-## 2. Preview what the Pipeline would change
+## 2. Run the Pipeline in dev
 
-Say: "Now I'm previewing what this Pipeline would write to the target systems, without writing
-it."
+Say: "Now I'm running the Pipeline in dev. This loads the dev Warehouse and runs every Step. In
+dev, a Step that writes back to another database only shows what it would change, without
+writing it."
 
-- Call `mcp__adops__preview` with the Pipeline's name and `environment="dev"`.
-- For each entry in `previews`, tell the person in plain numbers how many rows would be
-  inserted, updated and deleted, and show a few of the sample keys.
-- If `errors` is not empty, explain each one as in step 4.
-
-## 3. Run the Pipeline in dev
-
-Say: "Now I'm running the Pipeline in dev. This loads the dev Warehouse and runs every Step."
-
-- Call `mcp__adops__run` with the Pipeline's name and `environment="dev"`.
+- Call `mcp__adops__run` with the Pipeline's name and `environment="dev"`, once. Do not also
+  call `mcp__adops__preview`: it runs the whole Pipeline again and its reply holds nothing the
+  run's reply does not.
 - If `succeeded` is true, tell the person which Steps ran and how many rows each loaded
-  (`rows_loaded`), and that the change is ready to share with the adops-share Skill.
+  (`rows_loaded`).
+- For each Step with a `preview`, tell the person in plain numbers how many rows it would
+  insert, update and delete in the target, and show a few of the sample keys.
+- Then say the change is ready to share with the adops-share Skill.
 
-## 4. Explain a failure
+## 3. Explain a failure
+
 
 When `succeeded` is false, do not just say "it failed". Read the reply and explain it:
 
@@ -60,7 +58,7 @@ When `succeeded` is false, do not just say "it failed". Read the reply and expla
   try to fix it here. Explain which table and column changed, and point the person to the
   adops-breaking-change Skill, which handles that change.
 - If the fix is in a Pipeline file, go back to the adops-build Skill, then come back and run
-  step 3 again.
+  step 2 again.
 
 ## When a run takes a long time
 

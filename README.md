@@ -154,8 +154,17 @@ ask:
 
 > *Add a dbt model with the top 10 customers by total spent, and test it in dev.*
 
-It writes the model, runs the Pipeline in dev and explains the result in plain words. It acts only
-in dev and in Branch Environments. Changes reach stage and prod only through a reviewed pull request.
+It writes a new model with tests (in our try, `dbt/models/top_customers.sql`), runs the
+Pipeline in dev and tells you in plain words whether everything passed. It can't read Warehouse
+tables itself, so look at the rows yourself, using the model name it reports:
+
+```sh
+docker compose exec warehouse psql -U warehouse -d warehouse \
+  -c 'select * from analytics.top_customers'
+```
+
+The Assistant acts only in dev and in Branch Environments. Changes reach stage and prod only through
+a reviewed pull request.
 
 | Skill | What it does |
 |---|---|
