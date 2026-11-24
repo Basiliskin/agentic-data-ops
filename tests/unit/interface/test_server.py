@@ -3,6 +3,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 from dagster import Definitions
 from typer.testing import CliRunner
 
@@ -62,6 +63,10 @@ def test_only_stage_or_prod_may_be_served(project, environment):
 
 
 def test_an_environment_missing_from_adops_yaml_is_refused(project):
+    settings = yaml.safe_load((project / "adops.yaml").read_text())
+    del settings["environments"]["prod"]
+    (project / "adops.yaml").write_text(yaml.safe_dump(settings))
+
     with pytest.raises(ServerConfigError, match=r"^ADOPS_ENVIRONMENT: .* not in adops\.yaml$"):
         load_definitions(environ(project, "prod"))
 

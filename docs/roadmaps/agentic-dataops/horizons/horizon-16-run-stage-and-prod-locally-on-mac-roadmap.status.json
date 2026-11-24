@@ -1,0 +1,186 @@
+{
+  "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.json",
+  "roadmapTask": "Horizon 16 of agentic-dataops: Run stage and prod locally on a Mac against Docker databases: the demo ships a real prod Environment with its own local Warehouse database (created by warehouse_init) and its own Reverse Sync target, ",
+  "roadmapRevision": 0,
+  "createdAt": "2026-11-23T17:29:01Z",
+  "updatedAt": "2026-11-23T19:12:13Z",
+  "phases": [
+    {
+      "phaseId": "p1-demo-prod-environment",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-23T17:29:01Z",
+      "baseRef": "1bd55d3f69723ec2a3923e458de78f13d8fa9d8c",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/.tmp/assistant-skills-shipped-by-init/roadmap-iteration-0.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/roadmap-iteration-1.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage0-guards.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage1-analysis.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage1.5-discovery.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage3-kept-phases.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage3-phases.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage3.4-concerns.json,docs/roadmaps/.tmp/h13-skills-draft/stage0-guards.json,docs/roadmaps/.tmp/h13-skills-draft/stage1-analysis.json,docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,docs/roadmaps/agentic-dataops/archive/,docs/roadmaps/agentic-dataops/horizons/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.md || changed: src/adops/templates/demo/{adops.yaml,.env.example,warehouse_init/02_prod.sql,seed/03_shop_prod.sql}, src/adops/templates/github/workflows/adops-prod.yml, .github/workflows/ci.yml, tests/unit/interface/test_init_command.py, tests/unit/interface/test_server.py, decisions.md (+1 line). Demo now ships a live prod (warehouse_prod/shop_prod, Source shop) with init scripts and tests; test_server.py refusal test now deletes prod from adops.yaml first because the demo has prod. Gates: ruff clean; unit 2025 passed, 100% coverage (needs ADOPS_TEST_POSTGRES_DSN). Fresh-volume compose created both DBs; adops run shop_sync --env prod inserted 20 rows into shop_prod, shop untouched. || compensation known: revert template+test changes; extra empty warehouse_prod/shop_prod DBs removed by docker compose down -v.",
+      "unplannedFiles": [
+        "tests/unit/interface/test_server.py"
+      ],
+      "failures": [
+        {
+          "at": "2026-11-23T17:37:11Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "FAILED tests/unit/interface/test_server.py::test_an_environment_missing_from_adops_yaml_is_refused — it used prod as the Environment missing from the demo adops.yaml",
+          "resolvedBy": "gate-fix",
+          "resolution": "the test now deletes prod from the demo adops.yaml before asserting the refusal; src unchanged"
+        }
+      ],
+      "gateRun": "g1 uv run ruff check: pass; g2 uv run pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass, 2025 passed, 100%; g3 uv build --wheel + ci.yml wheel-content loop: pass; g4 uv run pytest tests/e2e -m e2e: pass, 10 passed in 12m04s",
+      "completedAt": "2026-11-23T17:50:36Z",
+      "gradeResult": {
+        "phaseId": "p1-demo-prod-environment",
+        "dimensionScores": [
+          {
+            "dimensionId": "prod-points-only-at-its-own-databases",
+            "score": 10,
+            "pass": true,
+            "evidence": "Environments {dev,stage,prod}; prod warehouse_prod/shop_prod, no shared tuples; 10: new test pins prod keys/dicts equal to stage except database."
+          },
+          {
+            "dimensionId": "fresh-volume-creates-prod-databases",
+            "score": 9,
+            "pass": true,
+            "evidence": "02_prod.sql single statement; 03_shop_prod.sql follows 02_shop_dev.sql, DDL equal to 01_shop.sql by parametrized test; Docker fresh-volume run not re-run by grader."
+          },
+          {
+            "dimensionId": "plain-template-and-dev-guard-unaffected",
+            "score": 10,
+            "pass": true,
+            "evidence": "Plain still {dev} with commented prod, test limited not deleted; no src .py; 10: dedicated negative test proves refusal fires if prod targets shop_dev."
+          },
+          {
+            "dimensionId": "demo-prod-shape-and-operator-warnings",
+            "score": 10,
+            "pass": true,
+            "evidence": "DuckDB alt for prod, edit-before-real-machine comment, .env.example stage-or-prod note, workflow header both cases; 10: each of the four is asserted by a test."
+          },
+          {
+            "dimensionId": "new-files-ship-and-are-pinned",
+            "score": 10,
+            "pass": true,
+            "evidence": "Both files in DEMO_FILES and ci.yml demo loop; 10: built wheel confirmed to contain both."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "p2-prod-isolation-e2e",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-23T18:23:07Z",
+      "baseRef": "1bd55d3f69723ec2a3923e458de78f13d8fa9d8c",
+      "baseDirty": true,
+      "notes": "already dirty at start: .github/workflows/ci.yml,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/roadmap-iteration-0.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/roadmap-iteration-1.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage0-guards.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage1-analysis.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage1.5-discovery.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage3-kept-phases.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage3-phases.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage3.4-concerns.json,docs/roadmaps/.tmp/h13-skills-draft/stage0-guards.json,docs/roadmaps/.tmp/h13-skills-draft/stage1-analysis.json,docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,src/adops/templates/demo/.env.example,src/adops/templates/demo/adops.yaml,src/adops/templates/github/workflows/adops-prod.yml,tests/unit/interface/test_init_command.py,tests/unit/interface/test_server.py,docs/roadmaps/agentic-dataops/archive/,docs/roadmaps/agentic-dataops/horizons/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.status.json.last_good.json,src/adops/templates/demo/seed/03_shop_prod.sql,src/adops/templates/demo/warehouse_init/02_prod.sql | changed: tests/e2e/demo_project.py, tests/e2e/test_demo_sync.py. Adds warehouse_prod to WAREHOUSE_DATABASES, truncates shop_prod.customer_stats in reseed_shop; generalizes stage_schemas/stage_contents to warehouse_schemas/warehouse_contents(demo, environment); adds postgres-only (indirect parametrize) test_prod_runs_write_only_to_prod_warehouse_and_target: runs dev+stage first, edits shop.customer_stats row 1 so a misdirected prod write shows, snapshots full contents of dev+stage Warehouses and shop/shop_dev targets, asserts unchanged after run --env prod and run --all --env prod. Mutation checks (prod warehouse->warehouse_stage, prod target->shop) both fail on the isolation assertion. Full e2e 11 passed, wall 781s.",
+      "unplannedFiles": [],
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-23T18:43:58Z",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "54 errors at setup: ADOPS_TEST_POSTGRES_DSN is not set (coverage 98.53%)",
+          "resolvedBy": "gate-fix",
+          "resolution": "environment only: reran with ADOPS_TEST_POSTGRES_DSN pointing at the local test Postgres on 55432; no code change"
+        }
+      ],
+      "gateRun": [
+        "uv run ruff check: pass",
+        "uv run ruff format --check tests/e2e: pass",
+        "uv run pytest tests/e2e/test_demo_sync.py -m e2e -k prod (x2): pass",
+        "uv run pytest tests/e2e -m e2e: pass (11 passed, wall 781s)",
+        "uv run pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass (2025 passed)",
+        "mutation: prod warehouse->warehouse_stage fails on isolation assert; prod target->shop fails on isolation assert"
+      ],
+      "completedAt": "2026-11-23T18:47:58Z",
+      "gradeResult": {
+        "phaseId": "p2-prod-isolation-e2e",
+        "dimensionScores": [
+          {
+            "dimensionId": "asserts-absence-of-writes-elsewhere",
+            "score": 10,
+            "minScore": 8,
+            "pass": true,
+            "evidence": "Full-content snapshot of dev+stage Warehouses and shop/shop_dev targets, non-empty, compared after both commands; above-the-bar: shop.customer_stats row 1 edited before snapshot so a misdirected prod write of identical seed values is detected; both mutations fail on the isolation assert."
+          },
+          {
+            "dimensionId": "prod-positive-outcomes",
+            "score": 9,
+            "minScore": 8,
+            "pass": true,
+            "evidence": "Single run asserts write line, shop_prod == SEED, analytics 100; --all asserts passed line and prod data; --all does not assert its own write/check lines."
+          },
+          {
+            "dimensionId": "repeatable-and-order-independent",
+            "score": 9,
+            "minScore": 8,
+            "pass": true,
+            "evidence": "warehouse_prod in WAREHOUSE_DATABASES, shop_prod truncated in reseed_shop, passes twice back to back and in the full suite."
+          },
+          {
+            "dimensionId": "scoped-to-postgres-within-budget",
+            "score": 9,
+            "minScore": 7,
+            "pass": true,
+            "evidence": "Indirect parametrize selects postgres only (no duckdb case even skipped); full e2e 781s vs 20-minute timeout, moderate headroom."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "p3-mac-stage-prod-guide",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-23T18:49:26Z",
+      "baseRef": "1bd55d3f69723ec2a3923e458de78f13d8fa9d8c",
+      "baseDirty": true,
+      "notes": "already dirty at start: .github/workflows/ci.yml,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/roadmap-iteration-0.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/roadmap-iteration-1.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage0-guards.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage1-analysis.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage1.5-discovery.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage3-kept-phases.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage3-phases.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage3.4-concerns.json,docs/roadmaps/.tmp/h13-skills-draft/stage0-guards.json,docs/roadmaps/.tmp/h13-skills-draft/stage1-analysis.json,docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,src/adops/templates/demo/.env.example,src/adops/templates/demo/adops.yaml,src/adops/templates/github/workflows/adops-prod.yml,tests/e2e/demo_project.py,tests/e2e/test_demo_sync.py,tests/unit/interface/test_init_command.py,tests/unit/interface/test_server.py,docs/roadmaps/agentic-dataops/archive/,docs/roadmaps/agentic-dataops/horizons/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.status.json.last_good.json,docs/roadmaps/agentic-dataops/horizons/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.status.last_good.json,src/adops/templates/demo/seed/03_shop_prod.sql,src/adops/templates/demo/warehouse_init/02_prod.sql | changed: docs/playbooks/run-stage-and-prod-on-a-mac.md (new), docs/playbooks/promotion.md, docs/adr/0016-promotion-runs-on-a-self-hosted-runner-per-server.md (added clarification only), docs/roadmaps/agentic-dataops/decisions.md (one superseding line). Manual OrbStack 2.2.5 / Engine 29.8.2 trial succeeded: host prod run wrote 20 to shop_prod; stage Server scheduled run 430c7981 SUCCESS; clean stop, switch to prod, prod scheduled run 7ccea034 SUCCESS writing 20 to shop_prod; prod webserver lists stage + CLI runs untagged; server-recover marked nothing. Webserver port 3300 (3000 taken on this Mac). Linux rule narrowed to DuckDB-Warehouse Servers. | post-grade wording fixes only: Schedule-toggle carry-over now labelled not tried; one promotion.md line rewrapped.",
+      "unplannedFiles": [],
+      "gateRun": [
+        "uv run ruff check: pass",
+        "uv run pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass (2025 passed)",
+        "uv run pytest tests/e2e -m e2e: pass (11 passed, 689s)",
+        "relative links in promotion.md and the new guide: all resolve",
+        "manual OrbStack Server trial: stage and prod scheduled runs SUCCESS"
+      ],
+      "completedAt": "2026-11-23T19:12:13Z",
+      "gradeResult": {
+        "phaseId": "p3-mac-stage-prod-guide",
+        "dimensionScores": [
+          {
+            "dimensionId": "trial-recorded-reproducibly",
+            "score": 8,
+            "minScore": 8,
+            "pass": true,
+            "evidence": "Recorded trial has date, macOS/OrbStack 2.2.5/Engine 29.8.2, commands incl. wheel --build-arg build and stage then prod Server starts, run IDs 430c7981/7ccea034 SUCCESS; outputs summarized and verification queries (psql counts, GraphQL, shop_prod truncate) not in the command list."
+          },
+          {
+            "dimensionId": "switch-behavior-observed-not-assumed",
+            "score": 9,
+            "minScore": 7,
+            "pass": true,
+            "evidence": "Shared untagged run history, schedule carried over, server-recover marked nothing — each observed; crash caveat matches clear_stale_runs; separate DAGSTER_PG_DB only an option. Toggle carry-over was unlabeled inference (labelled untried after grading)."
+          },
+          {
+            "dimensionId": "operator-steps-runnable-and-bounded",
+            "score": 9,
+            "minScore": 8,
+            "pass": true,
+            "evidence": "down -v with reason, --env prod, --all --env prod, Server start/switch, both-services wheel build, port override; DuckDB flock limit, OrbStack tried / Docker Desktop 4.34+ not tried, Assistant on dev/Branch, demo prod local, promotion.md linked."
+          },
+          {
+            "dimensionId": "linux-rule-narrowed-only-on-success",
+            "score": 9,
+            "minScore": 8,
+            "pass": true,
+            "evidence": "No blocker; ADR-0016 diff adds a dated clarification only; promotion.md narrows to DuckDB-Warehouse Servers with flock reason and link; step 6 split plain vs demo; decisions.md superseding line."
+          }
+        ],
+        "overallPass": true
+      }
+    }
+  ]
+}

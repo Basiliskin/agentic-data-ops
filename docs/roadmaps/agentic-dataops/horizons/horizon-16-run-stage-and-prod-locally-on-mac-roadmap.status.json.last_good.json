@@ -1,0 +1,44 @@
+{
+  "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.json",
+  "roadmapTask": "Horizon 16 of agentic-dataops: Run stage and prod locally on a Mac against Docker databases: the demo ships a real prod Environment with its own local Warehouse database (created by warehouse_init) and its own Reverse Sync target, ",
+  "roadmapRevision": 0,
+  "createdAt": "2026-11-23T17:29:01Z",
+  "updatedAt": "2026-11-23T17:49:14Z",
+  "phases": [
+    {
+      "phaseId": "p1-demo-prod-environment",
+      "status": "awaiting-verification",
+      "attempts": 1,
+      "startedAt": "2026-11-23T17:29:01Z",
+      "baseRef": "1bd55d3f69723ec2a3923e458de78f13d8fa9d8c",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/.tmp/assistant-skills-shipped-by-init/roadmap-iteration-0.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/roadmap-iteration-1.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage0-guards.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage1-analysis.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage1.5-discovery.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage3-kept-phases.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage3-phases.json,docs/roadmaps/.tmp/assistant-skills-shipped-by-init/stage3.4-concerns.json,docs/roadmaps/.tmp/h13-skills-draft/stage0-guards.json,docs/roadmaps/.tmp/h13-skills-draft/stage1-analysis.json,docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,docs/roadmaps/agentic-dataops/archive/,docs/roadmaps/agentic-dataops/horizons/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.md || changed: src/adops/templates/demo/{adops.yaml,.env.example,warehouse_init/02_prod.sql,seed/03_shop_prod.sql}, src/adops/templates/github/workflows/adops-prod.yml, .github/workflows/ci.yml, tests/unit/interface/test_init_command.py, tests/unit/interface/test_server.py, decisions.md (+1 line). Demo now ships a live prod (warehouse_prod/shop_prod, Source shop) with init scripts and tests; test_server.py refusal test now deletes prod from adops.yaml first because the demo has prod. Gates: ruff clean; unit 2025 passed, 100% coverage (needs ADOPS_TEST_POSTGRES_DSN). Fresh-volume compose created both DBs; adops run shop_sync --env prod inserted 20 rows into shop_prod, shop untouched.",
+      "unplannedFiles": [
+        "tests/unit/interface/test_server.py"
+      ],
+      "failures": [
+        {
+          "at": "2026-11-23T17:37:11Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "FAILED tests/unit/interface/test_server.py::test_an_environment_missing_from_adops_yaml_is_refused — it used prod as the Environment missing from the demo adops.yaml",
+          "resolvedBy": "gate-fix",
+          "resolution": "the test now deletes prod from the demo adops.yaml before asserting the refusal; src unchanged"
+        }
+      ],
+      "gateRun": "g1 uv run ruff check: pass; g2 uv run pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass, 2025 passed, 100%; g3 uv build --wheel + ci.yml wheel-content loop: pass; g4 uv run pytest tests/e2e -m e2e: pass, 10 passed in 12m04s"
+    },
+    {
+      "phaseId": "p2-prod-isolation-e2e",
+      "status": "not-started",
+      "attempts": 0
+    },
+    {
+      "phaseId": "p3-mac-stage-prod-guide",
+      "status": "not-started",
+      "attempts": 0
+    }
+  ]
+}

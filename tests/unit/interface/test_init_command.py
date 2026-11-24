@@ -13,7 +13,7 @@ from git_harness import GIT_ENV, git
 from typer.testing import CliRunner
 
 import adops
-from adops.domain.assistant_access import refuse_shared_dev_connection
+from adops.domain.assistant_access import AssistantRefusal, refuse_shared_dev_connection
 from adops.domain.loader import (
     ensure_sources_defined,
     ensure_targets_defined,
@@ -64,7 +64,9 @@ DEMO_FILES = SERVER_FILES | WORKFLOW_FILES | {
     "pipelines/shop_sync.yaml",
     "seed/01_shop.sql",
     "seed/02_shop_dev.sql",
+    "seed/03_shop_prod.sql",
     "warehouse_init/01_stage.sql",
+    "warehouse_init/02_prod.sql",
 }
 
 
@@ -139,7 +141,7 @@ def test_demo_pipeline_and_settings_pass_the_domain_loaders(demo):
     settings = load_project_settings((demo / "adops.yaml").read_text())
     pipeline = load_pipeline((demo / "pipelines" / "shop_sync.yaml").read_text())
 
-    assert set(settings.environments) == {"dev", "stage"}
+    assert set(settings.environments) == {"dev", "stage", "prod"}
     for environment in settings.environments.values():
         ensure_sources_defined(pipeline, environment)
         ensure_targets_defined(pipeline, environment)
@@ -177,46 +179,91 @@ def test_demo_customer_stats_carries_no_personal_data(demo):
     assert "customer_id integer PRIMARY KEY" in table
 
 
-def test_demo_stage_keeps_its_own_warehouse(demo):
+def test_demo_stage_and_prod_keep_their_own_warehouses(demo):
     settings_text = (demo / "adops.yaml").read_text()
     environments = yaml.safe_load(settings_text)["environments"]
     compose = yaml.safe_load((demo / "docker-compose.yml").read_text())
 
     assert environments["dev"]["warehouse"]["database"] == "warehouse"
     assert environments["stage"]["warehouse"]["database"] == "warehouse_stage"
-    assert "#   path: .adops/warehouse.duckdb" in settings_text
-    assert "#   path: .adops/warehouse_stage.duckdb" in settings_text
+    assert environments["prod"]["warehouse"]["database"] == "warehouse_prod"
+    for name in ("warehouse", "warehouse_stage", "warehouse_prod"):
+        assert f"    # warehouse:\n    #   type: duckdb\n    #   path: .adops/{name}.duckdb" in (
+            settings_text
+        )
     volumes = compose["services"]["warehouse"]["volumes"]
     assert "./warehouse_init:/docker-entrypoint-initdb.d:ro" in volumes
     init = (demo / "warehouse_init" / "01_stage.sql").read_text()
     assert "CREATE DATABASE warehouse_stage;" in init
+    prod_init = (demo / "warehouse_init" / "02_prod.sql").read_text()
+    statements = [line for line in prod_init.splitlines() if not line.startswith("--")]
+    assert statements == ["CREATE DATABASE warehouse_prod;"]
+
+
+def test_demo_prod_reads_shop_and_writes_only_its_own_databases(demo):
+    text = (demo / "adops.yaml").read_text()
+    environments = yaml.safe_load(text)["environments"]
+    prod = environments["prod"]
+
+    assert prod.keys() == environments["stage"].keys()
+    assert prod["sources"] == environments["stage"]["sources"]
+    assert prod["warehouse"] == {**environments["stage"]["warehouse"], "database": "warehouse_prod"}
+    assert prod["targets"] == {
+        "shop": {**environments["stage"]["targets"]["shop"], "database": "shop_prod"}
+    }
+
+    def written(environment):
+        connections = [environment["warehouse"], *environment["targets"].values()]
+        return {(c["host"], c["port"], c["database"]) for c in connections}
+
+    for name in ("dev", "stage"):
+        assert written(prod).isdisjoint(written(environments[name])), name
+    assert "uncomment" not in text.lower()
+    assert "edit host, port and database" in text
 
 
 def test_demo_dev_previews_against_its_own_target_database(demo):
     settings = load_project_settings((demo / "adops.yaml").read_text())
     dev, stage = settings.environments["dev"], settings.environments["stage"]
+    prod = settings.environments["prod"]
 
     assert dev.targets["shop"].database == "shop_dev"
     assert dev.sources["shop"].database == "shop"
     assert stage.targets["shop"].database == "shop"
     assert stage.sources["shop"].database == "shop"
+    assert prod.targets["shop"].database == "shop_prod"
+    assert prod.sources["shop"].database == "shop"
     refuse_shared_dev_connection(settings.environments, str)
 
 
-def test_demo_seeds_shop_dev_with_the_same_target_table(demo):
+def test_demo_dev_would_be_refused_if_prod_wrote_into_its_target(demo):
+    text = (demo / "adops.yaml").read_text()
+    environments = yaml.safe_load(text)["environments"]
+    environments["prod"]["targets"]["shop"]["database"] = "shop_dev"
+    settings = load_project_settings(yaml.safe_dump({"environments": environments}))
+
+    with pytest.raises(AssistantRefusal, match="same database as prod"):
+        refuse_shared_dev_connection(settings.environments, str)
+
+
+@pytest.mark.parametrize(
+    ("seed", "database"), [("02_shop_dev.sql", "shop_dev"), ("03_shop_prod.sql", "shop_prod")]
+)
+def test_demo_seeds_each_target_database_with_the_same_target_table(demo, seed, database):
     table = re.compile(r"CREATE TABLE customer_stats \(.*?\);", re.DOTALL)
     shop = (demo / "seed" / "01_shop.sql").read_text()
-    shop_dev = (demo / "seed" / "02_shop_dev.sql").read_text()
+    target = (demo / "seed" / seed).read_text()
 
     assert sorted(path.name for path in (demo / "seed").iterdir()) == [
         "01_shop.sql",
         "02_shop_dev.sql",
+        "03_shop_prod.sql",
     ]
-    assert shop_dev.index("CREATE DATABASE shop_dev OWNER shop;") < shop_dev.index(
-        "\\connect shop_dev"
+    assert target.index(f"CREATE DATABASE {database} OWNER shop;") < target.index(
+        f"\\connect {database}"
     )
-    assert shop_dev.index("\\connect shop_dev") < shop_dev.index("CREATE TABLE")
-    assert table.findall(shop_dev) == table.findall(shop)
+    assert target.index(f"\\connect {database}") < target.index("CREATE TABLE")
+    assert table.findall(target) == table.findall(shop)
 
 
 def test_demo_dbt_project_reads_raw_shop_and_ships_no_profile(demo):
@@ -366,6 +413,19 @@ def test_webserver_listens_only_on_localhost_by_default(project):
     assert "SSH tunnel" in text
     assert env["ADOPS_ENVIRONMENT"] == "stage"
     assert env["ALERT_WEBHOOK_URL"] == ""
+
+
+def test_demo_env_example_says_the_server_runs_stage_or_prod_one_at_a_time(demo):
+    text = (demo / ".env.example").read_text()
+
+    assert "stage or prod. One Server runs per machine at a time" in text
+
+
+def test_prod_workflow_says_how_to_point_prod_at_its_machine_in_either_project(project):
+    header = (project / PROD_WORKFLOW).read_text().split("\nname:")[0]
+
+    assert "in a demo Project, edit" in header
+    assert "in a plain Project, uncomment the prod block" in header
 
 
 def test_settings_name_the_alert_webhook_variable(project):
@@ -970,12 +1030,15 @@ def uncomment_prod(text):
     return "\n".join([*lines[:start], *block, *lines[end:]])
 
 
-def test_settings_carry_the_prod_environment_the_release_workflow_needs_commented_out(project):
+def test_plain_settings_carry_the_prod_environment_the_release_workflow_needs_commented_out(
+    plain,
+):
+    project = plain
     text = (project / "adops.yaml").read_text()
     environments = yaml.safe_load(text)["environments"]
-    reference = "stage" if "stage" in environments else "dev"
+    reference = "dev"
 
-    assert "prod" not in environments
+    assert set(environments) == {"dev"}
     assert "adops-prod.yml" in text
     assert "uncomment this block" in text
     uncommented = uncomment_prod(text)

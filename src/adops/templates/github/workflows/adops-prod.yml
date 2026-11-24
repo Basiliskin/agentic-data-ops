@@ -1,8 +1,9 @@
 # Every published release deploys to the prod Server through a self-hosted runner labelled adops-prod.
 # Create a GitHub environment named prod with required reviewers, and set its variable
 # ADOPS_SERVER_DIR to the Server's Project folder on that machine; it must be a git clone of this
-# repository. Uncomment the prod block in adops.yaml first. A failing validate leaves that folder
-# untouched.
+# repository. First point adops.yaml's prod Environment at that machine: in a demo Project, edit
+# its host, port and database; in a plain Project, uncomment the prod block. A failing validate
+# leaves that folder untouched.
 name: adops prod
 
 on:

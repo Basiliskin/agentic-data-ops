@@ -111,3 +111,9 @@
 - 2026-11-23 | horizon 15 | Skills name MCP tools as backticked mcp__adops__<tool>; tests read valid names from build_server, never a second hard-coded list — so a renamed tool fails the Skill checks
 - 2026-11-23 | horizon 15 | Skill checks live in tests/ only; Skills never quote a banned command (git add -A, --env stage/prod, gh release) even inside a warning — so text checks stay strict
 - 2026-11-23 | horizon 15 | The Skills' Git replay is an offline test in tests/unit with a hand-written record, not a Docker E2E — user choice; the Docker E2E already covers real dev accept-schema
+- 2026-11-23 | horizon 16 | Demo prod has its own Warehouse warehouse_prod and Reverse Sync target shop_prod, reads the shared shop Source; stage is unchanged — user choice
+- 2026-11-23 | horizon 16 | One Server per machine at a time, switched by changing ADOPS_ENVIRONMENT and restarting; no second Dagster DB or port — user choice
+- 2026-11-23 | horizon 16 | Mac proof is a manual trial on OrbStack recorded in the guide; Docker Desktop is named but marked not tried; CI proves prod on Linux — user choice
+- 2026-11-23 | horizon 16 | The prod isolation E2E runs on the Postgres Warehouse only, with no prod Server E2E — protects the 20-minute e2e job
+- 2026-11-23 | horizon 16 | The demo template ships a live local prod Environment (warehouse_prod, shop_prod); the plain template keeps prod commented — supersedes horizon 8's 'templates ship a commented prod block' for the demo
+- 2026-11-23 | horizon 16 | Only a DuckDB-Warehouse Server must be a Linux host (flock); a Postgres-Warehouse Server may run on macOS, tried on OrbStack — supersedes horizon 8's 'A Server must be a Linux host'

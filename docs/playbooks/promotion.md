@@ -31,10 +31,12 @@ good version.
 
 You need:
 
-- **One Linux machine per Server**: one for stage and, when you add prod, a separate one for prod. A
-  Server must run Linux. The Warehouse lock (see below) uses file locks, and these are not reliably
-  shared between macOS and a Docker container through a Docker Desktop for macOS folder mount, so two
-  runs could write to a DuckDB Warehouse at once.
+- **One machine per Server**: one for stage and, when you add prod, a separate one for prod. A
+  Server whose Warehouse is a DuckDB file must run Linux. Its Warehouse lock (see below) uses file
+  locks, and these are not reliably shared between macOS and a Docker container through a Docker
+  Desktop for macOS folder mount, so two runs could write to a DuckDB Warehouse at once. A Server
+  with a Postgres Warehouse may run on a Mac: this was tried on OrbStack, not on Docker Desktop. See
+  [Run stage and prod on a Mac](run-stage-and-prod-on-a-mac.md).
 - Docker with the `docker compose` command on each machine.
 - Admin rights on the GitHub repository that holds your Project.
 - A **private** GitHub repository. GitHub's own advice is that self-hosted runners "should almost
@@ -209,10 +211,12 @@ only people with write access to the repository can.
 
 ## Step 6 — Turn on prod in adops.yaml
 
-`adops.yaml` ships with the prod Environment commented out. Before the first release, uncomment the
-`# prod:` block (remove the `# ` at the start of each of its lines), point it at the prod machine's
-Warehouse, Sources and Targets, and merge that change. The prod machine's `.env` holds the matching
-passwords.
+A plain Project's `adops.yaml` ships with the prod Environment commented out. Before the first
+release, uncomment the `# prod:` block (remove the `# ` at the start of each of its lines), point it
+at the prod machine's Warehouse, Sources and Targets, and merge that change. A demo Project ships a
+prod that runs against the local Docker databases instead: point its `host`, `port` and `database`
+lines at the prod machine before the first release, and merge that change. The prod machine's
+`.env` holds the matching passwords.
 
 ## Step 7 — Try it
 

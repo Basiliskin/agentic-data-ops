@@ -1,0 +1,486 @@
+# Horizon 16 — Run stage and prod locally on a Mac
+
+## 🎯 What are we trying to achieve?
+
+The demo Project gets a real, working prod Environment (a named place Pipelines run, with its own databases) that runs against local Docker databases: its own Warehouse `warehouse_prod` and its own Reverse Sync target `shop_prod`. `adops run --env prod` and `adops run --all --env prod` work right after `adops init --demo`. A CI test proves prod writes nowhere else, and a short guide, backed by a real trial on this Mac (OrbStack), explains running and scheduling stage and prod on a Mac.
+
+## 🧠 Why does this change need to happen?
+
+Today the demo ships prod commented out, and the commented block points at dev's Warehouse and stage's target, so it cannot run and would share data with other Environments. The docs also say a Server (the scheduler started by `docker compose --profile server up`) must run on Linux, which nobody has checked for a Postgres Warehouse on a Mac. The user wants to manage stage and prod from a Mac against local Docker databases before any real production machine exists.
+
+## At a glance
+
+- **Phases:** 3
+- **Complexity:** Low–Medium (templates, one E2E test, one guide; no Python changes)
+- **Main risk:** existing Docker volumes don't get the new databases until `docker compose down -v`; a host-networking surprise on the Mac could block the trial
+- **Testing focus:** prod touches only its own databases; fresh-volume setup; recorded, repeatable Mac trial
+
+## Order of work
+```
+Phase 1 — Add a local prod Environment to the demo template
+        ↓  (phase 2 tests the prod Environment phase 1 adds)
+Phase 2 — Test prod isolation on the Postgres Warehouse
+        ↓  (phase 3 tries the same prod by hand on a Mac; it needs only phase 1)
+Phase 3 — Document running stage and prod on a Mac
+```
+```mermaid
+graph TD
+  p1_demo_prod_environment["Add a local prod Environment to the demo template (p1-demo-prod-environment)"]
+  p2_prod_isolation_e2e["Test prod isolation on the Postgres Warehouse (p2-prod-isolation-e2e)"]
+  p3_mac_stage_prod_guide["Document running stage and prod on a Mac (p3-mac-stage-prod-guide)"]
+  p1_demo_prod_environment --> p2_prod_isolation_e2e
+  p1_demo_prod_environment --> p3_mac_stage_prod_guide
+```
+
+### Phase 1 — Add a local prod Environment to the demo template
+
+Technical ID: `p1-demo-prod-environment` · demo project template · cross-cutting · medium
+
+**Goal** — `adops init --demo` writes a working, uncommented prod Environment whose Warehouse is the Postgres database warehouse_prod and whose Reverse Sync target is the shop_prod database, both created by the demo's Docker init scripts on a fresh volume, so `adops run shop_sync --env prod` and `adops run --all --env prod` work out of the box.
+
+**Why** — This is one small slice across templates, their unit tests and the CI wheel list (about 150 changed lines, 8 files). An Environment is a named run target in adops.yaml with its own Warehouse (the analytical database a Pipeline loads into) and Reverse Sync target (the operational database a Reverse Sync writes back into). Today the demo ships prod commented out and pointed at dev's Warehouse and stage's target, so `--env prod` cannot run and would share databases with dev. Reverse Sync already writes in any Environment named exactly stage or prod (WRITING_ENVIRONMENTS in src/adops/domain/reverse_sync_diff.py), so no Python changes: the work is template files, their tests, and the wheel list CI checks.
+
+**Changes**
+- In src/adops/templates/demo/adops.yaml replace the commented prod block with a live prod Environment: Source `shop` (the shared demo shop Postgres on localhost:15432, same as stage), Warehouse Postgres on localhost:15433 database warehouse_prod with password_env WAREHOUSE_PASSWORD, Reverse Sync target key `shop` pointing at localhost:15432 database shop_prod with password_env SHOP_PASSWORD. Use the same keys (sources.shop, targets.shop) stage uses so the port and variable tests keep iterating it.
+- Give prod a commented DuckDB Warehouse alternative (`    # warehouse:` block with path .adops/warehouse_prod.duckdb), same shape as dev and stage, so the e2e helper use_shipped_duckdb_warehouse switches all Environments consistently.
+- Replace the old 'uncomment this block' comment with a short comment saying this prod runs against local Docker databases and that pointing it at a real prod machine means editing host, port and database here before running anything.
+- Add src/adops/templates/demo/warehouse_init/02_prod.sql containing only `CREATE DATABASE warehouse_prod;` (sibling of 01_stage.sql; Postgres runs these only on an empty warehouse_data volume).
+- Add src/adops/templates/demo/seed/03_shop_prod.sql following 02_shop_dev.sql: CREATE DATABASE shop_prod OWNER shop; \connect shop_prod; CREATE TABLE customer_stats with text byte-identical to the one in 01_shop.sql (adops never creates tables in an operational database).
+- Leave stage unchanged (reads shop, writes back into shop) and leave the plain template with only dev.
+- In src/adops/templates/github/workflows/adops-prod.yml reword the header comment 'Uncomment the prod block in adops.yaml first.' to cover both cases: point the demo's prod at the prod machine, or uncomment prod in a plain project. Workflow steps unchanged.
+- In src/adops/templates/demo/.env.example extend the Server comment to say ADOPS_ENVIRONMENT may be stage or prod and that one Server runs per machine at a time; keep the value ADOPS_ENVIRONMENT=stage (pinned by an existing test).
+- In tests/unit/interface/test_init_command.py: add warehouse_init/02_prod.sql and seed/03_shop_prod.sql to DEMO_FILES; change the demo environments assertion to {dev, stage, prod}; change the seed file list assertion to include 03_shop_prod.sql; restrict test_settings_carry_the_prod_environment_the_release_workflow_needs_commented_out to the plain template; add a demo test that prod uses warehouse_prod and shop_prod and reads the shop Source; add a test that 03_shop_prod.sql's CREATE TABLE text matches 01_shop.sql's; extend the DuckDB-comment check to prod; extend test_demo_dev_previews_against_its_own_target_database so dev is still not refused as sharing a database with prod (refuse_shared_dev_connection in src/adops/domain/assistant_access.py).
+- In .github/workflows/ci.yml add warehouse_init/02_prod.sql and seed/03_shop_prod.sql to the demo loop of the 'Project templates ship in the wheel' step.
+- Bookkeeping step: append to docs/roadmaps/agentic-dataops/decisions.md one line superseding the horizon-8 decision 'adops.yaml ships prod commented' for the demo (demo ships a local prod; plain template keeps only dev).
+- Run uv run ruff check and uv run pytest tests/unit --cov --cov-report=term-missing; both must pass at 100% coverage.
+
+**Files / areas**
+- `src/adops/templates/demo/adops.yaml`
+- `src/adops/templates/demo/warehouse_init/02_prod.sql`
+- `src/adops/templates/demo/seed/03_shop_prod.sql`
+- `src/adops/templates/demo/.env.example`
+- `src/adops/templates/github/workflows/adops-prod.yml`
+- `tests/unit/interface/test_init_command.py`
+- `.github/workflows/ci.yml`
+- `docs/roadmaps/agentic-dataops/decisions.md`
+
+**How to verify**
+- **Generated prod Environment uses its own Warehouse and Reverse Sync target** — In a scratch dir run `uv run adops init --demo` and load adops.yaml with a YAML parser. The environments keys are exactly {dev, stage, prod}.
+- **Docker init scripts create warehouse_prod and shop_prod with the right table** — src/adops/templates/demo/warehouse_init/02_prod.sql contains only `CREATE DATABASE warehouse_prod;`.
+- **Plain template and dev's safety check keep their behavior** — Run `uv run adops init` (not --demo) in a scratch dir. adops.yaml parses with environments == {dev}, and the commented prod block is still present.
+- **Prod shape matches dev and stage, with honest comments** — The generated demo adops.yaml has a `    # warehouse:` block under prod whose path is .adops/warehouse_prod.duckdb, indented the same way as dev's and stage's.
+- **New template files are in the wheel check and in the tests** — `grep -n '02_prod.sql\|03_shop_prod.sql' .github/workflows/ci.yml tests/unit/interface/test_init_command.py` finds each file in both places.
+
+**Done when** — A freshly built wheel's `adops init --demo` writes an adops.yaml with a live prod Environment (warehouse_prod / shop_prod, Source shop), and the unit suite in tests/unit/interface/test_init_command.py proves it, passing with 100% coverage. Every check under *How to verify* passes its bar.
+
+**Depends on** — nothing — can start immediately
+
+**Guards**
+- g1: run uv run ruff check after editing test_init_command.py
+- g2: no src/adops Python changes; the unit suite still runs at 100% line+branch coverage
+- g3: the two new template files are added to the demo loop in ci.yml's wheel-content step in this same phase
+- g5: no domain/application code touched; no Environment special-casing added
+
+**Rollback** — Revert the template and test changes; users who already ran `docker compose up` with the new init scripts keep extra empty databases warehouse_prod and shop_prod, which are harmless and removed by `docker compose down -v`.
+
+<details><summary>Reference — full rubric</summary>
+
+#### Generated prod Environment uses its own Warehouse and Reverse Sync target (`prod-points-only-at-its-own-databases`, min 8)
+
+The adops.yaml written by `adops init --demo` contains a live (uncommented) prod Environment whose Warehouse is Postgres database warehouse_prod on localhost:15433, whose Reverse Sync target `shop` is database shop_prod on localhost:15432, and whose Source is `shop`. No database name is shared with dev or stage. 10 = all of that holds and the keys and password_env names match stage exactly; 8 = correct and live, with small cosmetic differences from stage's layout; below minScore = prod is still commented, or it shares any Warehouse or target database with another Environment.
+
+Pass:
+- In a scratch dir run `uv run adops init --demo` and load adops.yaml with a YAML parser. The environments keys are exactly {dev, stage, prod}.
+- environments.prod.warehouse has database == 'warehouse_prod', port 15433 and password_env WAREHOUSE_PASSWORD.
+- environments.prod.targets.shop has database == 'shop_prod', port 15432 and password_env SHOP_PASSWORD. environments.prod.sources has a `shop` key.
+- Collect the (host, port, database) tuples of every Environment's Warehouse and targets. prod's tuples appear in no other Environment.
+- `git diff src/adops/templates/demo/adops.yaml` changes nothing inside the stage block.
+
+Fails when:
+- prod is uncommented but its warehouse.database is still dev's warehouse (the old commented block was copied as-is).
+- prod's target uses a new key such as `shop_prod` instead of `shop`, so the existing port and variable tests skip it and the Reverse Sync cannot find its target.
+- prod.targets.shop.database is 'shop', the same as stage, so a prod run overwrites stage's operational table.
+
+#### Docker init scripts create warehouse_prod and shop_prod with the right table (`fresh-volume-creates-prod-databases`, min 8)
+
+On an empty volume, the demo's Docker stack creates warehouse_prod and shop_prod, and shop_prod.customer_stats is byte-identical to the shop table. 10 = verified on a fresh stack, the DDL is identical, and the scripts follow the sibling files' patterns; 8 = files are correct, with the DDL check done by a unit test; below minScore = either database is missing after `up`, or the table definition differs from the shop one.
+
+Pass:
+- src/adops/templates/demo/warehouse_init/02_prod.sql contains only `CREATE DATABASE warehouse_prod;`.
+- seed/03_shop_prod.sql creates shop_prod OWNER shop, runs `\connect shop_prod`, and has a CREATE TABLE customer_stats statement. That statement's text is identical to the one in seed/01_shop.sql; check with a diff of the extracted statements, or with the new unit test.
+- In a scratch demo run `docker compose down -v && docker compose up -d`. `psql -l` on port 15433 lists warehouse_prod. On port 15432 it lists shop_prod, and `\d customer_stats` works there.
+- Running `docker compose up -d` again on the existing volume starts cleanly, with no init-script errors in `docker compose logs`.
+
+Fails when:
+- 03_shop_prod.sql creates customer_stats with a slightly different column type or order than 01_shop.sql, so the Reverse Sync diff breaks in prod only.
+- 02_prod.sql also creates schemas or tables, which adops is supposed to create itself.
+- The seed file is named 03_prod.sql and sorts before or after the wrong file, so `\connect` runs before the shop role exists.
+
+#### Plain template and dev's safety check keep their behavior (`plain-template-and-dev-guard-unaffected`, min 8)
+
+Only the demo changes: the plain template still ships only dev with prod commented out, and dev is still not refused for sharing a database with the new prod. 10 = both are pinned by unit tests that fail on regression; 8 = both are true and tested, with minor gaps in assertion strength; below minScore = the plain template gains a live prod, or demo dev becomes refused by refuse_shared_dev_connection.
+
+Pass:
+- Run `uv run adops init` (not --demo) in a scratch dir. adops.yaml parses with environments == {dev}, and the commented prod block is still present.
+- test_settings_carry_the_prod_environment_the_release_workflow_needs_commented_out runs against the plain template only and passes.
+- test_demo_dev_previews_against_its_own_target_database passes with prod present. Temporarily set demo prod's target database to shop_dev and confirm the test then fails.
+- `git diff --stat src/adops` lists no .py files.
+
+Fails when:
+- The test about commented prod is deleted instead of being limited to the plain template, so a live prod could slip into the plain template unnoticed.
+- Python is changed in assistant_access.py to special-case prod, instead of keeping the databases separate.
+
+#### Prod shape matches dev and stage, with honest comments (`demo-prod-shape-and-operator-warnings`, min 7)
+
+prod has the same commented DuckDB alternative as dev and stage, the template warns that prod points at local Docker, .env.example says the Server may be stage or prod, and the release workflow header covers both demo and plain projects. 10 = all four are present and tested where possible; 8 = all present, with the DuckDB check extended to prod in tests; below minScore = no DuckDB alternative for prod (this breaks the use_shipped_duckdb_warehouse helper), or a comment still says to uncomment prod in the demo.
+
+Pass:
+- The generated demo adops.yaml has a `    # warehouse:` block under prod whose path is .adops/warehouse_prod.duckdb, indented the same way as dev's and stage's.
+- `grep -n 'Uncomment' adops.yaml` on the generated demo finds no instruction to uncomment prod. A comment near prod says to edit host, port and database before pointing prod at a real machine.
+- The generated .env.example still has `ADOPS_ENVIRONMENT=stage`, and its comment mentions prod and one Server per machine.
+- The header of src/adops/templates/github/workflows/adops-prod.yml covers the demo case (repoint prod) and the plain case (uncomment prod). `git diff` shows no change to its steps.
+
+Fails when:
+- The DuckDB alternative for prod points at warehouse_stage.duckdb (copy-paste), so DuckDB-mode e2e makes prod and stage share one file.
+- .env.example's value is changed to prod, which breaks the existing pinned test and makes the Server default to prod.
+
+#### New template files are in the wheel check and in the tests (`new-files-ship-and-are-pinned`, min 8)
+
+Both new SQL files are listed in DEMO_FILES and in the demo loop of the ci.yml wheel-content step, so a packaging regression fails CI. 10 = both lists are updated and a built wheel contains both files; 8 = both lists are updated; below minScore = either file is missing from the ci.yml loop (guard g3 would not catch a dropped file).
+
+Pass:
+- `grep -n '02_prod.sql\|03_shop_prod.sql' .github/workflows/ci.yml tests/unit/interface/test_init_command.py` finds each file in both places.
+- `uv build && unzip -l dist/*.whl | grep -E 'warehouse_init/02_prod.sql|seed/03_shop_prod.sql'` lists both files.
+- Guard outcome: `uv run ruff check` and `uv run pytest tests/unit --cov --cov-report=term-missing` both pass, with coverage at 100%.
+
+Fails when:
+- The files are added to DEMO_FILES but not to ci.yml's loop, so the wheel step does not check them.
+- The file is added to the plain-template loop in ci.yml instead of the demo loop.
+
+Healer hint: If the unit tests fail after prod is uncommented, change the old assertions that pin {dev, stage}, the seed list, and commented prod so they cover the demo and plain templates separately; do not change src/adops Python to make them pass.
+
+</details>
+
+### Phase 2 — Test prod isolation on the Postgres Warehouse
+
+Technical ID: `p2-prod-isolation-e2e` · end-to-end test suite · cross-cutting · small
+
+**Goal** — An automated end-to-end test runs `adops run shop_sync --env prod` and `adops run --all --env prod` in the demo on the Postgres Warehouse and proves prod's rows land only in warehouse_prod and shop_prod.customer_stats, while warehouse_stage, the dev Warehouse, shop.customer_stats and shop_dev.customer_stats stay as they were.
+
+**Why** — The prod isolation check is the proof that the new prod Environment cannot write into another Environment's databases; a success-only check would miss a wrong database name. It belongs to the e2e test subsystem, which runs the real Docker stack in CI. It is Postgres only to protect the e2e job's 20-minute budget.
+
+**Changes**
+- In tests/e2e/demo_project.py add prod: warehouse_prod to WAREHOUSE_DATABASES so reset_postgres_warehouses also drops prod's schemas between tests.
+- In reseed_shop (same file) also truncate shop_prod.customer_stats so each test starts with an empty prod target.
+- In tests/e2e/test_demo_sync.py add one test that runs only for the postgres case of the demo fixture (skip or select the postgres parameter; do not add a DuckDB case).
+- The test runs adops_run(project, 'run', 'shop_sync', '--env', 'prod'), asserts the output contains the Reverse Sync write line (e.g. 'wrote: inserted 20'), customer_stats(env, 'shop_prod') == SEED_CUSTOMER_STATS and analytics_rows(demo, 'prod') == 100, following test_demo_incremental_breaking_change_and_missing_table.
+- Before the run, record the state of warehouse_stage, the dev Warehouse, shop.customer_stats and shop_dev.customer_stats; after the run assert each is unchanged (absence of writes, not only prod success).
+- Then run adops_run(project, 'run', '--all', '--env', 'prod') and assert it prints 'Pipeline shop_sync passed in Environment prod.' and the isolation assertions still hold.
+- Run the full e2e suite locally (uv run pytest tests/e2e -m e2e) and record its wall-clock time; it must stay well under 20 minutes. Run uv run ruff check.
+
+**Files / areas**
+- `tests/e2e/demo_project.py`
+- `tests/e2e/test_demo_sync.py`
+
+**How to verify**
+- **Test proves nothing outside prod changed** — Read the new test in tests/e2e/test_demo_sync.py. It reads all four locations before `run shop_sync --env prod` and compares them after that command and after `run --all --env prod`.
+- **Both prod commands produce the expected prod data** — The test asserts that the single run's output contains the Reverse Sync write line (e.g. 'wrote: inserted 20').
+- **Prod state is reset between tests** — WAREHOUSE_DATABASES in tests/e2e/demo_project.py includes 'prod': 'warehouse_prod'.
+- **Postgres only and inside the 20-minute budget** — `uv run pytest tests/e2e -m e2e -k prod --collect-only -q` shows no duckdb-parametrized prod test that runs. A skipped one is allowed.
+
+**Done when** — A Postgres-only e2e test in tests/e2e/test_demo_sync.py that passes, proving `--env prod` and `run --all --env prod` write only to warehouse_prod and shop_prod. Every check under *How to verify* passes its bar.
+
+**Depends on** — Add a local prod Environment to the demo template
+
+**Guards**
+- g1: run uv run ruff check on the edited tests
+- g4: one Postgres-only prod test, no prod Server e2e; local full e2e run time is measured and stays inside the 20-minute job timeout
+
+<details><summary>Reference — full rubric</summary>
+
+#### Test proves nothing outside prod changed (`asserts-absence-of-writes-elsewhere`, min 8)
+
+The test takes a snapshot of warehouse_stage, the dev Warehouse, shop.customer_stats and shop_dev.customer_stats before the prod runs and asserts each one is unchanged afterwards. Checking row counts, or only that prod succeeded, is not enough. 10 = the snapshot compares contents (or schema list plus row hashes) for all four, after both commands; 8 = all four are compared after both commands, using row counts plus a schema list; below minScore = one or more of the four is not checked, or it is checked only after the first command.
+
+Pass:
+- Read the new test in tests/e2e/test_demo_sync.py. It reads all four locations before `run shop_sync --env prod` and compares them after that command and after `run --all --env prod`.
+- Mutation check: temporarily set prod's warehouse database in src/adops/templates/demo/adops.yaml to warehouse_stage (or its target to shop), run `uv run pytest tests/e2e/test_demo_sync.py -m e2e -k prod`, confirm it fails on an isolation assertion, then revert.
+- The snapshot of a location that starts empty is still meaningful. For example, the test seeds or runs stage or dev first so the comparison is not empty == empty, or it asserts the schema list as well.
+
+Fails when:
+- The test asserts only customer_stats(env, 'shop_prod') == SEED_CUSTOMER_STATS and the exit code, so a prod run that also wrote into shop would pass.
+- The before-snapshot is taken after reset, when every location is empty, and the after-check is `count == 0`. That passes even if prod wrote a schema with zero rows into warehouse_stage.
+
+#### Both prod commands produce the expected prod data (`prod-positive-outcomes`, min 8)
+
+`run shop_sync --env prod` and `run --all --env prod` both succeed, and their output and data match the expected values. 10 = the output line, row counts and target rows are all asserted for both commands; 8 = all three are asserted after the single run, and --all asserts the passed line; below minScore = the --all run is missing, or prod data is not checked.
+
+Pass:
+- The test asserts that the single run's output contains the Reverse Sync write line (e.g. 'wrote: inserted 20').
+- It asserts customer_stats(env, 'shop_prod') == SEED_CUSTOMER_STATS and analytics_rows(demo, 'prod') == 100.
+- It asserts that `run --all --env prod` output contains 'Pipeline shop_sync passed in Environment prod.'
+- `uv run pytest tests/e2e/test_demo_sync.py -m e2e -k prod` passes locally with Docker running.
+
+Fails when:
+- The test checks only that adops_run did not raise, so a no-op prod run (for example, a Reverse Sync that skipped writing because the Environment name was not recognized) passes.
+
+#### Prod state is reset between tests (`repeatable-and-order-independent`, min 8)
+
+The fixtures reset prod's Warehouse and target, so the test passes on a rerun and does not leak state into other tests. 10 = it passes run alone, run twice, and inside the full suite, and the reset covers both prod databases; 8 = the reset covers both databases and the full suite passes; below minScore = a second run fails or other tests see prod's leftover data.
+
+Pass:
+- WAREHOUSE_DATABASES in tests/e2e/demo_project.py includes 'prod': 'warehouse_prod'.
+- reseed_shop truncates shop_prod.customer_stats.
+- Run `uv run pytest tests/e2e/test_demo_sync.py -m e2e -k prod` twice back to back; both pass.
+- Guard outcome: `uv run pytest tests/e2e -m e2e` passes.
+
+Fails when:
+- warehouse_prod is not added to WAREHOUSE_DATABASES, so the second run finds existing prod schemas and the row-count assertion sees 200.
+
+#### Postgres only and inside the 20-minute budget (`scoped-to-postgres-within-budget`, min 7)
+
+The new test runs only for the postgres demo fixture case and adds no prod Server test. The full e2e run time is measured. 10 = the test is selected rather than skipped, so no DuckDB case appears even as skipped, and the measured wall time leaves wide headroom; 8 = postgres-only via a skip, with the time measured under 20 minutes; below minScore = a DuckDB prod case runs, or the suite time was not measured.
+
+Pass:
+- `uv run pytest tests/e2e -m e2e -k prod --collect-only -q` shows no duckdb-parametrized prod test that runs. A skipped one is allowed.
+- `time uv run pytest tests/e2e -m e2e` reports a wall time well under 20 minutes. The number is quoted in the phase report.
+- No new test in tests/e2e/test_server.py builds an image or waits on a prod schedule.
+
+Fails when:
+- The test uses the parametrized demo fixture without filtering, so it also runs against DuckDB and adds minutes of runtime.
+
+Healer hint: If the isolation assertions pass even after deliberately pointing prod at warehouse_stage, the before-snapshot is being taken on empty databases; seed or run dev and stage first so there is real state to compare.
+
+</details>
+
+### Phase 3 — Document running stage and prod on a Mac
+
+Technical ID: `p3-mac-stage-prod-guide` · operator documentation · interface · medium
+
+**Goal** — A short guide at docs/playbooks/run-stage-and-prod-on-a-mac.md explains how to run and schedule stage and prod locally on a Mac against the demo's Docker databases, and records a manual trial on this Mac (OrbStack) where the Server started with ADOPS_ENVIRONMENT=stage and then prod and a scheduled or launched run succeeded.
+
+**Why** — The Server (the Dagster daemon and webserver started by `docker compose --profile server up`, serving one Environment chosen by ADOPS_ENVIRONMENT) uses host networking (Docker network_mode: host), which on a Mac depends on the Docker runtime's settings and has never been tried. The guide is the deliverable users read; the manual trial is a step inside it because CI only runs Linux. It stays a repo doc, not an Assistant Skill, because the Assistant must never run against stage or prod. The promotion playbook and ADR-0016 currently say every Server must run Linux; once the trial shows a Postgres-Warehouse Server works on a Mac, this phase also narrows that rule to DuckDB-Warehouse Servers so the docs do not contradict each other.
+
+**Changes**
+- Manual trial step on this Mac (OrbStack, Docker Engine 29.8.2): build the wheel (uv build), run `adops init --demo` in a scratch directory, `docker compose down -v` then `docker compose up -d`, run `adops run shop_sync --env prod` and confirm the write into shop_prod.
+- Trial continued: build the Server image from the local wheel with --build-arg ADOPS_PACKAGE=/build/<wheel> (the tests/e2e/test_server.py pattern, since adops 0.1.0 may not be on the package index), start `docker compose --profile server up` with ADOPS_ENVIRONMENT=stage, check a host-networked container reaches ports published on 127.0.0.1 and the Mac browser reaches the webserver on 127.0.0.1:3000, launch or wait for a scheduled run and confirm success; stop cleanly, switch to ADOPS_ENVIRONMENT=prod, restart, repeat.
+- Write the guide sections: prerequisites (Postgres Warehouse only; a DuckDB-Warehouse Server stays Linux-only because the DuckDB file lock (flock) is not shared between the Mac and containers through a bind mount); host networking (tried on OrbStack, which supports network_mode: host; Docker Desktop 4.34+ needs Settings > Resources > Network > Enable host networking and is supported in principle but not tried).
+- Guide: recreate existing volumes with `docker compose down -v` so the init scripts create warehouse_prod and shop_prod; `adops run <pipeline> --env prod` and `adops run --all --env prod`; starting the Server with ADOPS_ENVIRONMENT=stage|prod.
+- Guide: one Server per machine at a time; stop it cleanly before switching ADOPS_ENVIRONMENT and restarting. Both Environments share one Dagster metadata database, so base the switching advice on what the trial observed (see the switch-check step); a separate DAGSTER_PG_DB per Environment is mentioned as an option, not built.
+- Guide: the Assistant stays on dev and Branch Environments; never ask it to run --env stage or --env prod. Note the demo's prod points at local databases and must be edited before pointing at a real prod machine. GitHub self-hosted-runner Promotion is out of scope; link docs/playbooks/promotion.md.
+- Guide: a 'Recorded trial' section with date, OrbStack and Docker Engine versions, commands run and observed results (including any blocker found).
+- Switch check inside the trial: after restarting with ADOPS_ENVIRONMENT=prod, record what the prod Server shows of stage's earlier runs (run history in the webserver) and of the schedule on/off state, and whether server-recover touched any stage run; the guide states what was seen.
+- Final step, only if the recorded trial succeeded: in docs/playbooks/promotion.md narrow 'A Server must run Linux' to DuckDB-Warehouse Servers (the flock reason stays), add that a Postgres-Warehouse Server may run on a Mac (tried on OrbStack; Docker Desktop not tried) and link docs/playbooks/run-stage-and-prod-on-a-mac.md.
+- In docs/playbooks/promotion.md step 6, replace 'adops.yaml ships prod commented' with: a demo project ships a local prod that must be pointed at the prod machine; a plain project ships prod commented.
+- In docs/adr/0016-promotion-runs-on-a-self-hosted-runner-per-server.md add a dated clarification (2026-11) under the Linux-host statement: applies to DuckDB-Warehouse Servers; Postgres-Warehouse Servers may run on macOS (tried on OrbStack). Do not rewrite the original decision text.
+- Bookkeeping step: append to docs/roadmaps/agentic-dataops/decisions.md one line superseding the horizon-8 decision 'A Server must be a Linux host' (now: only DuckDB-Warehouse Servers).
+- If the trial found a blocker, do not narrow the Linux rule in promotion.md, ADR-0016 or decisions.md; record the blocker in the guide and in blockers.md and surface it.
+
+**Files / areas**
+- `docs/playbooks/run-stage-and-prod-on-a-mac.md`
+- `docs/playbooks/promotion.md`
+- `docs/adr/0016-promotion-runs-on-a-self-hosted-runner-per-server.md`
+- `docs/roadmaps/agentic-dataops/decisions.md`
+
+**How to verify**
+- **The Mac trial is recorded in enough detail to repeat** — docs/playbooks/run-stage-and-prod-on-a-mac.md has a 'Recorded trial' section with a 2026-11 date, an OrbStack version and Docker Engine 29.8.2 (or the observed version).
+- **Switching from stage to prod describes what was actually seen** — The guide has a passage on switching ADOPS_ENVIRONMENT that says: stop the Server cleanly first; one Server per machine.
+- **Operator steps are runnable and state their limits** — The guide contains `docker compose down -v`, `adops run <pipeline> --env prod`, `adops run --all --env prod`, and a Server start with ADOPS_ENVIRONMENT=stage|prod.
+- **The Linux-only rule is narrowed only if the trial succeeded** — `git diff docs/adr/0016-promotion-runs-on-a-self-hosted-runner-per-server.md` shows only added lines, including a 2026-11 clarification.
+
+**Done when** — docs/playbooks/run-stage-and-prod-on-a-mac.md exists with a recorded OrbStack trial of the Server as stage and then prod (including what the switch showed), covering host networking, Postgres-only Servers, --env prod, one Server at a time and the Assistant staying on dev/Branch. On success promotion.md and ADR-0016 point to it; on a blocker the guide and blockers.md name the blocker and the Linux rule stays unchanged. Every check under *How to verify* passes its bar.
+
+**Depends on** — Add a local prod Environment to the demo template
+
+<details><summary>Reference — full rubric</summary>
+
+#### The Mac trial is recorded in enough detail to repeat (`trial-recorded-reproducibly`, min 8)
+
+The guide's 'Recorded trial' section gives the date, the OrbStack and Docker Engine versions, the exact commands, and the observed results for stage and then prod. That includes the local-wheel image build, reaching 127.0.0.1:3000, and a successful launched or scheduled run in each Environment. 10 = someone else could repeat it command by command and compare outputs; 8 = all of these elements are present, with the outputs summarized; below minScore = only one Environment was tried, or there are no versions or commands.
+
+Pass:
+- docs/playbooks/run-stage-and-prod-on-a-mac.md has a 'Recorded trial' section with a 2026-11 date, an OrbStack version and Docker Engine 29.8.2 (or the observed version).
+- The section lists the Server image build with `--build-arg ADOPS_PACKAGE=/build/<wheel>` and the `docker compose --profile server up` start, once with ADOPS_ENVIRONMENT=stage and once with prod.
+- For each Environment the section states a run ID or status (from the webserver or `adops` output) showing success.
+- Spot check: following the recorded commands on this Mac reproduces a successful prod run that writes into shop_prod (`psql -p 15432 -d shop_prod -c 'select count(*) from customer_stats'` returns more than 0).
+
+Fails when:
+- The guide says 'tried on OrbStack, works' with no commands, versions or run outcomes.
+- Only stage was started. The prod Server is assumed to work because the code path is the same.
+
+#### Switching from stage to prod describes what was actually seen (`switch-behavior-observed-not-assumed`, min 7)
+
+The guide says what the prod Server showed after the switch: stage's run history, the schedule on/off state, and whether server-recover touched stage runs. It bases the switching advice on those observations. 10 = all three are recorded with concrete observations, and the advice follows from them; 8 = all three are recorded; below minScore = the switching advice is generic, with no observation of the shared Dagster metadata database.
+
+Pass:
+- The guide has a passage on switching ADOPS_ENVIRONMENT that says: stop the Server cleanly first; one Server per machine.
+- It states what the prod webserver showed of stage's earlier runs, the schedule state, and the server-recover effect on stage runs, each as an observed fact.
+- A separate DAGSTER_PG_DB per Environment is mentioned only as an option. `git diff src/` shows no wiring for it.
+
+Fails when:
+- The guide says 'run history is kept separate per Environment' when both Environments actually share one Dagster database. A reader then trusts history that mixes stage and prod.
+
+#### Operator steps are runnable and state their limits (`operator-steps-runnable-and-bounded`, min 8)
+
+The guide is short and its commands work as written. It covers recreating volumes, running prod, starting the Server, and the limits: Postgres Warehouse only, the DuckDB flock limit, host networking on OrbStack (tried) and Docker Desktop 4.34+ (not tried), the Assistant staying on dev and Branch Environments, and the demo prod being local. 10 = every command copy-pastes cleanly and every limit is stated with its reason; 8 = all of these are present, with minor wording gaps; below minScore = Docker Desktop is claimed as working, a DuckDB Server is presented as possible on a Mac, or `down -v` is missing.
+
+Pass:
+- The guide contains `docker compose down -v`, `adops run <pipeline> --env prod`, `adops run --all --env prod`, and a Server start with ADOPS_ENVIRONMENT=stage|prod.
+- It says DuckDB-Warehouse Servers are Linux-only because of flock across the bind mount, and that Docker Desktop needs 'Enable host networking' and was not tried.
+- It says never to ask the Assistant to run --env stage/prod, that the demo prod must be edited before use against a real machine, and it links docs/playbooks/promotion.md for self-hosted-runner Promotion.
+- Run every fenced shell command from the guide in order in a fresh `adops init --demo` dir. None fails because of a typo or a wrong flag.
+
+Fails when:
+- The guide omits `down -v`. A user with an existing volume gets 'database "warehouse_prod" does not exist' on the first prod run.
+- The guide tells users to set ADOPS_ENVIRONMENT=prod in .env and leave it there, which conflicts with the stage default.
+
+#### The Linux-only rule is narrowed only if the trial succeeded (`linux-rule-narrowed-only-on-success`, min 8)
+
+promotion.md and ADR-0016 narrow 'Server must run Linux' to DuckDB-Warehouse Servers only when the recorded trial succeeded. The ADR gets an added, dated clarification and its original text is kept. If there was a blocker, neither file narrows the rule. 10 = the narrowing matches the trial outcome, the ADR diff only adds lines, and the links resolve; 8 = the same with minor wording gaps; below minScore = the rule is narrowed despite a blocker, or the ADR's original decision text is edited.
+
+Pass:
+- `git diff docs/adr/0016-promotion-runs-on-a-self-hosted-runner-per-server.md` shows only added lines, including a 2026-11 clarification.
+- docs/playbooks/promotion.md narrows the Linux rule to DuckDB-Warehouse Servers, keeps the flock reason, and links run-stage-and-prod-on-a-mac.md. Step 6 no longer says the demo ships prod commented.
+- If the guide's recorded trial shows a blocker, `git diff docs/playbooks/promotion.md docs/adr/` contains no narrowing of the Linux rule.
+- Every relative link added in these files points to an existing path (`ls` each target).
+
+Fails when:
+- ADR-0016's 'must run Linux' sentence is rewritten in place instead of getting a dated clarification.
+- promotion.md says any Server may run on macOS and drops the DuckDB exception.
+
+Healer hint: If the host-networked Server cannot reach the Postgres ports or the browser cannot reach 127.0.0.1:3000, check OrbStack's host-network support and the containers' bind addresses before anything else, and record any remaining blocker in the guide instead of narrowing the Linux rule.
+
+</details>
+
+## Discovery Findings
+
+| Area | Finding | File | Implication |
+|---|---|---|---|
+| needs: demo adops.yaml with dev/stage and a commented prod block | present: dev uses warehouse/shop_dev, stage uses warehouse_stage/shop, both on localhost 15433/15432; prod is commented out and points at warehouse and shop (dev's Warehouse, stage's target); each Environment except prod has a commented DuckDB alternative. | src/adops/templates/demo/adops.yaml | Replace the commented block with a real prod using warehouse_prod/shop_prod and the same ports and password_env; rewrite the 'uncomment this block' comment. |
+| needs: warehouse_init creates per-Environment Warehouse DBs | present: warehouse_init/01_stage.sql is only `CREATE DATABASE warehouse_stage;`; compose mounts ./warehouse_init as docker-entrypoint-initdb.d, run only on an empty warehouse_data volume. | src/adops/templates/demo/warehouse_init/01_stage.sql | Add warehouse_init/02_prod.sql; the guide must say to run `docker compose down -v` on existing stacks. |
+| needs: model for creating shop_prod with its target table | present: seed/02_shop_dev.sql does CREATE DATABASE shop_dev OWNER shop; \connect shop_dev; CREATE TABLE customer_stats identical to 01_shop.sql. adops never creates the target table. | src/adops/templates/demo/seed/02_shop_dev.sql | Add seed/03_shop_prod.sql following the same pattern with byte-identical CREATE TABLE text. |
+| conflict: init unit tests pin only dev+stage and the exact seed file list | test_init_command.py asserts set(environments) == {dev, stage} (line 142) and seed/ is exactly 01_shop.sql and 02_shop_dev.sql (line 211); DEMO_FILES (line 44) lists only warehouse_init/01_stage.sql and seed/02_shop_dev.sql. | tests/unit/interface/test_init_command.py | Update these assertions and DEMO_FILES; add tests that prod uses warehouse_prod/shop_prod, reads shop, and that the 03 seed table matches 01. |
+| conflict: commented-prod test is parametrized over demo AND plain | test_settings_carry_the_prod_environment_the_release_workflow_needs_commented_out (line 973) runs for both templates via the project fixture; asserts 'prod' not in environments and text contains 'uncomment this block'. | tests/unit/interface/test_init_command.py | Restrict it to plain; add a demo test that prod is live; keep the .env.example variable check. |
+| guard g3: wheel-content list | ci.yml lines 43-54 list demo files explicitly, including warehouse_init/01_stage.sql and seed/02_shop_dev.sql; new files are unchecked unless added. | .github/workflows/ci.yml | Add warehouse_init/02_prod.sql and seed/03_shop_prod.sql to the demo loop in the phase that adds them. |
+| needs: Reverse Sync writes in prod | present: WRITING_ENVIRONMENTS = frozenset({'stage','prod'}) in domain/reverse_sync_diff.py; SCHEDULED_ENVIRONMENTS in domain/schedule.py includes prod; nothing refuses prod for adops run. | src/adops/domain/reverse_sync_diff.py | No code change for prod to write; the work is templates, tests and docs. |
+| needs: Server picks Environment from ADOPS_ENVIRONMENT | present: server.py load_definitions reads ADOPS_ENVIRONMENT, refuses anything but stage/prod, checks the name is in adops.yaml; .env.example defaults it to stage; compose server profile uses network_mode: host, env_file .env, build: . | src/adops/interface/server.py | A prod Server needs only ADOPS_ENVIRONMENT=prod; optionally reword the .env.example comment. |
+| needs: MCP shared-database refusal stays un-refused for dev | present: refuse_shared_dev_connection compares dev's Warehouse/target keys with stage and prod; prod=warehouse_prod/shop_prod has no overlap with dev (warehouse/shop_dev). The old commented prod used warehouse and would have refused dev. | src/adops/domain/assistant_access.py | Keep prod's database names distinct; extend test_demo_dev_previews_against_its_own_target_database to cover prod. |
+| needs: per-Environment local state | present: dlt state .adops/dlt/<environment>, run logs .adops/logs/<environment>, snapshot store local_state_dir(project, environment); applied records and fingerprints live in each Warehouse. | src/adops/infrastructure/dlt_sync.py | prod gets its own state with no change. |
+| needs: Postgres Warehouse lock works on macOS | present: warehouse_lock.py uses session pg_try_advisory_lock with a constant key; advisory locks are per database, so stage and prod locks are independent; flock only for DuckDB. | src/adops/infrastructure/warehouse_lock.py | No locking change for a Postgres-Warehouse Mac Server; the guide states DuckDB Servers are Linux-only. |
+| conflict: Dagster metadata DB shared between stage and prod Servers | Both Servers use one DAGSTER_PG_DB; job and schedule names are identical in both; runs carry no Environment tag; server-recover fails leftover STARTED runs and alerts under the current ADOPS_ENVIRONMENT; schedule on/off state carries over. | src/adops/infrastructure/dagster_server.py | The guide should tell users to stop cleanly before switching, or use a separate DAGSTER_PG_DB per Environment; run history is mixed otherwise. |
+| needs: Server image buildable on a Mac | unknown: the Dockerfile installs adops=={{ADOPS_VERSION}} (0.1.0) from the package index unless built with ADOPS_PACKAGE=/build/<wheel>; not confirmed that 0.1.0 is published; dist/adops-0.1.0 wheel exists locally. | src/adops/templates/server/Dockerfile | The manual Mac trial and the guide build from a local wheel via ADOPS_PACKAGE, as test_server.py does. |
+| needs: Docker Desktop for macOS host networking verified | unknown: h7 only says 'Docker Desktop on Mac needs host networking'; no trial recorded; unverified whether a host-networked container reaches ports published on 127.0.0.1 and whether the Mac browser reaches the webserver on 127.0.0.1:3000. | docs/roadmaps/agentic-dataops/decisions.md | The manual trial must check both and record the Docker Desktop version and the setting (Resources > Network > Enable host networking). |
+| needs: h12 macOS flock finding | present: discoveries (h12) records that a host flock is not seen by containers through a Docker Desktop bind mount; decisions h8 records 'A Server must be a Linux host'. | docs/roadmaps/agentic-dataops/discoveries.md | Cite in the guide; decisions.md records the two superseded h8 rules. |
+| conflict: promotion playbook and ADR-0016 say a Server must be Linux | promotion.md lines 34-37 say 'A Server must run Linux' and step 6 (line 212) says adops.yaml ships prod commented; ADR-0016 line 7 says 'A Server must be a Linux host'. No README.md in the repo. | docs/playbooks/promotion.md | Narrow both to DuckDB-Warehouse Servers, add a dated ADR-0016 clarification, note the demo ships a local prod; put the new guide under docs/playbooks/. |
+| conflict: adops-prod.yml header says 'Uncomment the prod block' | The shared workflow template (written by demo and plain init) says 'Uncomment the prod block in adops.yaml first.'; no unit test asserts this text. | src/adops/templates/github/workflows/adops-prod.yml | Reword to cover both cases (point prod at the prod machine, or uncomment it); workflow logic unchanged. |
+| needs: E2E fixtures for a prod isolation test | present: module-scoped stack runs compose up on fresh volumes; demo fixture parametrized postgres/duckdb; WAREHOUSE_DATABASES in demo_project.py holds only dev and stage; reset_postgres_warehouses drops schemas only there; reseed_shop resets only shop. | tests/e2e/demo_project.py | Add prod: warehouse_prod to WAREHOUSE_DATABASES; truncate shop_prod.customer_stats on reseed; use a postgres-only case for the prod test. |
+| needs: DuckDB conversion helper with a prod block | present: use_shipped_duckdb_warehouse uncomments every '    # warehouse:' block; if prod has no commented DuckDB block, under [duckdb] prod stays Postgres while others switch. | tests/e2e/demo_project.py | Give prod a commented DuckDB block (.adops/warehouse_prod.duckdb) for consistency; extend the test_init duckdb-comment check. |
+| needs: stage-run assertion pattern to copy | present: test_demo_incremental_breaking_change_and_missing_table runs adops_run(project,'run','shop_sync','--env','stage') and asserts 'wrote: inserted 20', customer_stats(env) == SEED_CUSTOMER_STATS, analytics_rows(demo,'stage') == 100, customer_stats(env,'shop_dev') == []. | tests/e2e/test_demo_sync.py | Reuse customer_stats(env,'shop_prod'), warehouse(demo,sql,'prod'); assert shop, shop_dev, dev Warehouse and warehouse_stage stay unchanged. |
+| guard g4: e2e 20-minute job timeout | e2e job runs uv run pytest tests/e2e -m e2e with timeout-minutes 20; includes Server E2Es (image build, schedule waits up to 240s) on both kinds. | .github/workflows/ci.yml | One Postgres-only prod case (run plus run --all); no prod Server E2E; measure runtime locally. |
+| guard g2: 100% coverage on src/adops | Expected changes are templates, tests and docs; no src/adops Python needs to change for prod. | pyproject.toml | Any Python that does change gets unit tests; no pragma (g5). |
+| guard g1: ruff on tests | ruff check covers tests/ with line-length 100. | pyproject.toml | Run uv run ruff check in every phase that edits tests. |
+| guard g5: no framework imports in domain/application | Planned work adds no domain or application code. | docs/roadmaps/agentic-dataops/decisions.md | Keep new logic in tests or templates; no Environment special-casing in domain. |
+| needs: Skills do not assume only dev/stage exist | present: Skills byte-identical demo/plain; share/promote step 1 check only for stage; prod only in prose; the stage/prod rule bans Assistant commands like --env prod. | src/adops/templates/demo/.claude/skills/adops-promote/SKILL.md | No Skill change; never add --env prod text to a Skill; the guide stays in docs/. |
+| needs: settings ports and variables tests stay green with prod | present: test_settings_ports_match_the_ports_compose_publishes iterates every Environment's shop source/target/Warehouse ports; test_every_variable_the_demo_reads_is_in_env_example checks password_env. | tests/unit/interface/test_init_command.py | prod must use ports 15432/15433, SHOP_PASSWORD/WAREHOUSE_PASSWORD, with sources.shop and targets.shop keys. |
+| needs: adops run --all --env prod | present: run_command.py --all runs every Pipeline in name order; the demo has one Pipeline, so --all equals a single run. | src/adops/interface/run_command.py | The E2E can check run --all --env prod cheaply; output says 'Pipeline shop_sync passed in Environment prod.' |
+| needs: demo .env.example and Server comments | present: .env.example sets ADOPS_ENVIRONMENT=stage with a Server comment; no Mac or host-networking note. | src/adops/templates/demo/.env.example | Optionally mention stage or prod, one Server at a time; keep ADOPS_ENVIRONMENT=stage (test line 367). |
+
+## Repo guards this plan works under
+
+| Id | Enforces | When | Defined in | Phases |
+|---|---|---|---|---|
+| g1 | uv run ruff check (E,F,W,I,B,UP; line-length 100) must pass | on pull request | .github/workflows/ci.yml (unit job, Lint) | Add a local prod Environment to the demo template: run uv run ruff check after editing test_init_command.py; Test prod isolation on the Postgres Warehouse: run uv run ruff check on the edited tests |
+| g2 | unit tests with 100% line+branch coverage on src/adops; only 'if TYPE_CHECKING:' is excluded | on pull request | .github/workflows/ci.yml + pyproject.toml [tool.coverage] | Add a local prod Environment to the demo template: no src/adops Python changes; the unit suite still runs at 100% line+branch coverage |
+| g3 | builds the wheel and greps for an explicit list of template files; a listed file missing from the wheel fails CI, and a new template file not added to the list is not checked | on pull request | .github/workflows/ci.yml 'Project templates ship in the wheel' | Add a local prod Environment to the demo template: the two new template files are added to the demo loop in ci.yml's wheel-content step in this same phase |
+| g4 | uv run pytest tests/e2e -m e2e on ubuntu with Docker must pass within a 20-minute job timeout | on pull request | .github/workflows/ci.yml e2e job | Test prod isolation on the Postgres Warehouse: one Postgres-only prod test, no prod Server e2e; local full e2e run time is measured and stays inside the 20-minute job timeout |
+| g5 | no 'pragma: no cover' except TYPE_CHECKING; domain and application layers import no framework (dlt, dagster, typer, mcp, os.environ) | on review | docs/roadmaps/agentic-dataops/decisions.md horizon 1 | Add a local prod Environment to the demo template: no domain/application code touched; no Environment special-casing added |
+
+## Out of Scope
+
+- GitHub self-hosted-runner Promotion to prod (release->prod on adops-prod): deferred to MAP #16 by user decision.
+- Running stage and prod Servers at the same time on one machine: user decision is one Server per machine, switched by restarting.
+- A DuckDB-Warehouse Server on macOS: flock is not shared through a bind mount, so it stays Linux-only.
+- A prod E2E case on the DuckDB Warehouse: left out to protect the 20-minute CI budget (user decision).
+- A prod Server E2E (image build plus schedule wait): fails YAGNI gate 2 and risks g4's 20-minute budget; stage's Server E2E covers the same code path.
+- Automated CI on macOS runners: Mac proof is the manual OrbStack trial recorded in the guide.
+- A Docker Desktop trial: this Mac runs OrbStack; the guide names the Desktop setting as supported in principle but not tried (user decision).
+- A prod Environment in the plain template: the plain template keeps only dev by decision.
+- Changing stage's data layout: stage keeps reading shop and writing back into shop.
+- Letting the Assistant or MCP tools touch stage or prod, or a seventh Skill for it: the horizon 9 allow-list is unchanged; the guide stays in docs/.
+- A separate prod Source database: prod reads the shared shop Source by decision.
+- Pointing prod at a real remote machine or hardening it: only a comment in adops.yaml and a guide note.
+- Per-Environment DAGSTER_PG_DB wiring: a guide mention only; building it fails YAGNI gate 1 (one Server at a time).
+- Migrating existing Docker volumes automatically: the guide documents `docker compose down -v`.
+- A separate phase for narrowing the Linux-only Server rule: folded into the Mac guide phase at the Stage 3.4 preview (user accepted).
+
+## Required Materials
+
+| Name | Kind | Why | How to get it |
+|---|---|---|---|
+| This Mac's OrbStack runtime (Docker Engine 29.8.2) with network_mode: host support | tool | Phase 3 runs the manual Server trial (stage, then prod) on a Mac; CI only runs Linux. | Already installed on this Mac; confirm with `docker context ls` (orbstack *) and `docker version` before phase 3. Build the Server image from a local wheel (uv build, --build-arg ADOPS_PACKAGE=/build/<wheel>). |
+
+## Success Criteria
+
+- All of these hold: (1) `adops init --demo` produces an adops.yaml with a working, uncommented prod Environment (Postgres Warehouse database `warehouse_prod`, Reverse Sync target `shop_prod`, Source still `shop`) plus a comment on pointing it at a real prod machine later; the plain template still has only dev; stage is unchanged (reads `shop`, writes back into `shop`). (2) On a fresh `docker compose up`, the Warehouse container's warehouse_init scripts create `warehouse_prod`, and the shop container's seed creates the `shop_prod` database with the `customer_stats` target table that the Reverse Sync needs (adops itself never creates tables in an operational database). (3) `adops run <pipeline> --env prod` and `adops run --all --env prod` succeed out of the box in the demo on the Postgres Warehouse, with Sync, Transform and a real Reverse Sync write into `shop_prod.customer_stats`. (4) A new automated E2E test on the Postgres Warehouse only runs `--env prod` and asserts that prod's tables and rows land in `warehouse_prod` and `shop_prod` only: `warehouse_stage`, the dev Warehouse and `shop.customer_stats` are left as they were. The full e2e job still fits its 20-minute timeout (g4), and the unit, lint and coverage gates (g1-g3) pass, including 100% coverage and adding any new template file to the wheel-content list. (5) A short guide in the repo explains: host networking on a Mac (tried on OrbStack; Docker Desktop's setting named but not tried), that a Mac Server needs a Postgres Warehouse (a DuckDB Warehouse Server stays Linux-only because flock is not shared through the bind mount), using `adops run --env prod`, starting the Server with `docker compose --profile server up` and ADOPS_ENVIRONMENT=stage|prod, running one Server per machine at a time (switch by changing ADOPS_ENVIRONMENT and restarting), and that the Assistant stays on dev and Branch Environments. (6) The guide includes the steps and recorded results of a manual trial on this Mac: the Server profile started with ADOPS_ENVIRONMENT=stage and then prod, and a Scheduled or launched run succeeded. (7) decisions.md records the two superseded horizon-8 decisions.
+- Add a local prod Environment to the demo template: A freshly built wheel's `adops init --demo` writes an adops.yaml with a live prod Environment (warehouse_prod / shop_prod, Source shop), and the unit suite in tests/unit/interface/test_init_command.py proves it, passing with 100% coverage.
+- Test prod isolation on the Postgres Warehouse: A Postgres-only e2e test in tests/e2e/test_demo_sync.py that passes, proving `--env prod` and `run --all --env prod` write only to warehouse_prod and shop_prod.
+- Document running stage and prod on a Mac: docs/playbooks/run-stage-and-prod-on-a-mac.md exists with a recorded OrbStack trial of the Server as stage and then prod (including what the switch showed), covering host networking, Postgres-only Servers, --env prod, one Server at a time and the Assistant staying on dev/Branch. On success promotion.md and ADR-0016 point to it; on a blocker the guide and blockers.md name the blocker and the Linux rule stays unchanged.
+
+## Alignment Preview
+
+The first preview showed 4 phases. The concern review raised three points: the trial is on OrbStack only, so the docs must not claim Docker Desktop works; the stage→prod switch on one shared Dagster database was not checked; and the Linux-rule docs phase was only a few lines. The user chose to apply all three fixes: the wording now says 'tried on OrbStack, Docker Desktop not tried', the trial records what the prod Server shows after the switch, and the docs phase is folded into the guide phase (3 phases). No further redirect.
+
+## Quality Gate
+
+Full path, one gate iteration. The critic raised 0 blockers, 1 major and 10 minor issues.
+
+- Healed (major): `requiredMaterials` was empty although phase 3 needs this Mac's OrbStack runtime. It now lists it.
+- Healed (minor): the objective and success definition said Docker Desktop and now say OrbStack (Desktop not tried); the 22 `deferred` entries (many duplicates) were collapsed to 15 unique ones; the phase-2 rubric no longer uses `pytest --count` (pytest-repeat is not installed), and its mutation check now names the template file to edit; phase 3's expected result now says what 'done' means if the trial hits a blocker.
+- Accepted debt (minor): phase 3 has three parts (the guide, the trial, and narrowing the Linux rule), which the user accepted at the preview; the boundedContext names are not in the 8-term ubiquitous language list, which is full.
+- Verify-blockers call: not needed. Final verdict: passed after heal.
+
+## Cost
+
+Agent calls: 6 of the 8–10 budgeted (analyze, discovery, decompose, preview concerns, rubrics, critic). 0 patch calls, no healer call (the fixes were applied mechanically), no verification call.
+
+## Full analysis
+
+**Domain shape:** technical — The objective is about deployment and runtime machinery (Docker databases, Environment configuration, Server containers on macOS, E2E isolation checks), not about modelling business entities or rules.
+
+| Term | Meaning |
+|---|---|
+| Environment | A named run target (dev, stage, prod, or a Branch Environment) with its own Warehouse and Reverse Sync targets in adops.yaml; only stage and prod write in a Reverse Sync. |
+| Warehouse | The analytical database a Pipeline loads into; for prod here, warehouse_prod created by warehouse_init. |
+| Reverse Sync target | The operational database a Reverse Sync writes into; for prod, shop_prod (customer_stats), for stage, shop. |
+| Source | The operational database a Sync reads from; the demo shop Postgres, shared by stage and prod. |
+| Server | The Dagster daemon and webserver started by `docker compose --profile server up`, serving one Environment chosen by ADOPS_ENVIRONMENT. |
+| host networking | Docker network_mode: host, used by Server containers; on Docker Desktop for macOS it must be turned on in settings. |
+| warehouse_init | The demo's SQL init scripts that create the per-Environment Warehouse databases on a fresh volume. |
+| prod isolation check | The new Postgres-only E2E test proving `adops run --env prod` writes only to warehouse_prod and shop_prod. |
+
+**Assumptions**
+- confirmed: prod gets its own Warehouse database warehouse_prod and Reverse Sync target shop_prod; it reads the shop Source; stage unchanged
+- confirmed: a Server may run on Docker Desktop for macOS when its Warehouse is Postgres; a DuckDB-Warehouse Server stays Linux-only (supersedes h8 'Server must be a Linux host')
+- confirmed: the demo adops.yaml gets a working local prod Environment; the plain template keeps only dev (supersedes h8 'commented prod block' for the demo)
+- confirmed: one Server per machine at a time, switched with ADOPS_ENVIRONMENT and a restart
+- confirmed: Mac proof is a manual trial during execution recorded in the guide; CI proves prod on Linux
+- confirmed: the prod E2E check runs on the Postgres Warehouse only
+- The demo Warehouse Postgres container already runs ./warehouse_init/*.sql on first start; a sibling script can create warehouse_prod, and the shop seed can create shop_prod with customer_stats.
+- Reverse Sync writes only in Environments named exactly stage or prod (horizon 5), so prod writes for real with no new write rule.
+- prod reuses the same password env vars and Postgres servers as stage; only database names differ.
+- The Server already serves exactly one Environment from ADOPS_ENVIRONMENT with network_mode: host; no new Server code is needed for prod.
+- The Postgres Warehouse lock is a session advisory lock, so a Postgres-Warehouse Server on macOS needs no locking change.
+- Per-Environment dlt state and applied-records tables already key on the Environment.
+- Existing MCP shared-database refusal keeps working; the new prod databases are distinct from dev's.
+- The guide is a repo doc under docs/, not a seventh Assistant Skill.
+- confirmed: the manual Mac trial runs on OrbStack (this Mac has no Docker Desktop); the guide names Docker Desktop host networking as supported in principle but not tried
+
+**Risks**
+- Postgres init scripts run only on an empty data volume: existing volumes will not get warehouse_prod or shop_prod until recreated (`docker compose down -v`).
+- Docker Desktop for macOS host networking is opt-in and version-dependent; the guide must name the setting and minimum version, and the trial may expose an environment blocker.
+- Adding prod runs to the e2e job could push it past its 20-minute timeout (g4).
+- The E2E isolation assertion must check absence of writes in stage, dev and shop, not only prod success.
+- The demo ships a writable prod pointed at local databases; a user pointing it at a real prod machine without reading the comment could write to real data.
+- Template changes must be added to the CI wheel-content list (g3) and the init-command unit tests that list demo files.
+- Stage-only assumptions in existing code, tests or Skills may break.
+- Running stage and prod Servers at once would collide on the Dagster metadata DB and port; switching must not corrupt Dagster run history across Environments.

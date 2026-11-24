@@ -60,29 +60,33 @@ environments:
         database: shop
         user: shop
         password_env: SHOP_PASSWORD
-  # The release workflow (.github/workflows/adops-prod.yml) deploys to prod on its own Server
-  # machine: uncomment this block and point it at that machine's Warehouse, Sources and Targets.
-  # prod:
-  #   warehouse:
-  #     type: postgres
-  #     host: localhost
-  #     port: 15433
-  #     database: warehouse
-  #     user: warehouse
-  #     password_env: WAREHOUSE_PASSWORD
-  #   sources:
-  #     shop:
-  #       type: postgres
-  #       host: localhost
-  #       port: 15432
-  #       database: shop
-  #       user: shop
-  #       password_env: SHOP_PASSWORD
-  #   targets:
-  #     shop:
-  #       type: postgres
-  #       host: localhost
-  #       port: 15432
-  #       database: shop
-  #       user: shop
-  #       password_env: SHOP_PASSWORD
+  # This prod runs against the local Docker databases, apart from dev's and stage's. Before
+  # pointing it at a real prod machine, edit host, port and database below.
+  prod:
+    warehouse:
+      type: postgres
+      host: localhost
+      port: 15433
+      database: warehouse_prod
+      user: warehouse
+      password_env: WAREHOUSE_PASSWORD
+    # To keep the Warehouse in a local DuckDB file instead, replace the warehouse block above with:
+    # warehouse:
+    #   type: duckdb
+    #   path: .adops/warehouse_prod.duckdb
+    sources:
+      shop:
+        type: postgres
+        host: localhost
+        port: 15432
+        database: shop
+        user: shop
+        password_env: SHOP_PASSWORD
+    targets:
+      shop:
+        type: postgres
+        host: localhost
+        port: 15432
+        database: shop_prod
+        user: shop
+        password_env: SHOP_PASSWORD

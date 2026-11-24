@@ -6,6 +6,8 @@ Promotion (Branch Environment → stage → prod) runs as three GitHub Actions w
 
 **One Warehouse lock.** Every Warehouse-touching run (Branch run, deploy, Schedule, drop-branch) takes a Warehouse lock per Pipeline run: a Postgres session advisory lock, or `flock` on `<duckdb file>.lock`. It waits a fixed 30 minutes, then fails without retry. Branch runs and drop-branch take stage's lock. A Server must be a Linux host, because `flock` is not reliably shared through a Docker Desktop for macOS bind mount.
 
+**Clarification (2026-11-23):** The Linux-host rule applies to Servers whose Warehouse is a DuckDB file, the only case where the lock is a `flock`. A Server with a Postgres Warehouse takes a Postgres advisory lock and may run on macOS: tried on OrbStack, not on Docker Desktop (`docs/playbooks/run-stage-and-prod-on-a-mac.md`).
+
 **Considered Options:** a GitHub-hosted runner for everything (it cannot reach a localhost Postgres or a DuckDB file Warehouse, and stage/prod secrets would live in GitHub); the Git-pulling Server of ADR-0014 (it needs Git credentials on the Server, a polling loop and a rule for "latest release", none of which a push from the runner needs); GitHub pushing to the Server over SSH (the Server must accept inbound connections); relying on the job condition alone to keep fork code off the Server (a Fork PR can edit it); a lock around a whole `adops run --all` (one slow deploy would hold off every Branch run for its full length).
 
 **Consequences:**

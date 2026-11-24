@@ -31,3 +31,5 @@
 - 2026-11-23 | horizon 14 | completed | 7 phases; accept-schema writes the record in dev, other --env read-only record only, CLI --branch under stage lock, MCP returns record_path, demo E2E uses the dev record; ADRs 0015/0014/0006 clarified
 - 2026-11-23 | horizon 15 | planned | 5 phases (six Assistant Skills in .claude/skills: setup+checks, build/test-in-dev, share/promote, breaking-change, offline Git replay test); gate passed (0 blockers, 1 major fixed)
 - 2026-11-23 | horizon 15 | completed | 5 phases; 1 amendment (adops-share makes the starting commit on main), 0 overrides
+- 2026-11-23 | horizon 16 | planned | 3 phases (run stage and prod locally on a Mac); gate passed after mechanical heal (0 blockers, 1 major)
+- 2026-11-23 | horizon 16 | completed | 3 phases | demo prod Environment, prod isolation E2E, Mac stage/prod guide (OrbStack trial passed; Linux-only rule narrowed to DuckDB Servers)

@@ -364,31 +364,33 @@ def test_demo_incremental_breaking_change_and_missing_table(demo):
         assert all(env[name] not in text for text in run_logs)
 
 
-def stage_schemas(demo):
+def warehouse_schemas(demo, environment):
     sql = (
         "SELECT schema_name FROM information_schema.schemata"
         " WHERE catalog_name = current_database()"
     )
-    return sorted(name for (name,) in warehouse(demo, sql, "stage"))
+    return sorted(name for (name,) in warehouse(demo, sql, environment))
 
 
 def branch_schemas(demo, branch):
-    return [schema for schema in stage_schemas(demo) if schema.startswith(f"br_{branch}__")]
+    schemas = warehouse_schemas(demo, "stage")
+    return [schema for schema in schemas if schema.startswith(f"br_{branch}__")]
 
 
-def stage_contents(demo):
-    """Every row of every table and view stage owns, so any write by a Branch shows up."""
+def warehouse_contents(demo, environment):
+    """Every row of every table and view the Environment owns, so any outside write shows up."""
     tables = warehouse(
         demo,
         "SELECT table_schema, table_name FROM information_schema.tables"
         " WHERE table_catalog = current_database()"
         " AND table_schema NOT IN ('pg_catalog', 'information_schema')",
-        "stage",
+        environment,
     )
-    contents = {"schemas": [s for s in stage_schemas(demo) if not s.startswith("br_")]}
+    schemas = warehouse_schemas(demo, environment)
+    contents = {"schemas": [s for s in schemas if not s.startswith("br_")]}
     for schema, table in sorted(tables):
         if not schema.startswith("br_"):
-            rows = warehouse(demo, f'SELECT * FROM "{schema}"."{table}"', "stage")
+            rows = warehouse(demo, f'SELECT * FROM "{schema}"."{table}"', environment)
             contents[f"{schema}.{table}"] = sorted(rows, key=repr)
     return contents
 
@@ -408,7 +410,7 @@ def test_branch_environment_defers_rebuilds_and_drops(demo):
     code, output = adops_run(project, *RUN, "--env", "stage")
 
     assert code == 0, output
-    stage_before = stage_contents(demo)
+    stage_before = warehouse_contents(demo, "stage")
     target_before = customer_stats(env)
     assert stage_before["adops._adops_step_fingerprints"]
     assert target_before == SEED_CUSTOMER_STATS
@@ -451,7 +453,7 @@ def test_branch_environment_defers_rebuilds_and_drops(demo):
         rows = warehouse(demo, f"SELECT count(*) FROM br_feat__raw_shop.{table}", "stage")
         assert rows[0][0] > 0
     assert "br_feat__raw_shop" in branch_schemas(demo, "feat")
-    assert stage_contents(demo) == stage_before
+    assert warehouse_contents(demo, "stage") == stage_before
     assert customer_stats(env) == target_before
 
     model.write_text(original_model)
@@ -473,7 +475,7 @@ def test_branch_environment_defers_rebuilds_and_drops(demo):
     assert branch_schemas(demo, "feat") == []
     assert branch_schemas(demo, "feat2") == ["br_feat2__analytics"]
     assert not (project / ".adops" / "dlt" / "br_feat").exists()
-    assert stage_contents(demo) == stage_before
+    assert warehouse_contents(demo, "stage") == stage_before
     assert customer_stats(env) == target_before
 
     code, output = adops_run(project, "drop-branch", "feat")
@@ -485,8 +487,50 @@ def test_branch_environment_defers_rebuilds_and_drops(demo):
 
     assert code == 0, output
     assert_no_secret_or_row_value(output, env)
-    assert [s for s in stage_schemas(demo) if s.startswith("br_")] == []
-    assert stage_contents(demo) == stage_before
+    assert [s for s in warehouse_schemas(demo, "stage") if s.startswith("br_")] == []
+    assert warehouse_contents(demo, "stage") == stage_before
+
+
+def outside_prod(demo):
+    return {
+        "dev Warehouse": warehouse_contents(demo, "dev"),
+        "stage Warehouse": warehouse_contents(demo, "stage"),
+        "shop target": customer_stats(demo.env),
+        "shop_dev target": customer_stats(demo.env, "shop_dev"),
+    }
+
+
+@pytest.mark.parametrize("demo", ["postgres"], indirect=True)
+def test_prod_runs_write_only_to_prod_warehouse_and_target(demo):
+    project, env = demo.project, demo.env
+    for args in (RUN, (*RUN, "--env", "stage")):
+        code, output = adops_run(project, *args)
+        assert code == 0, output
+    # Prod computes the seed stats, so a prod write into stage's target would undo this edit.
+    shop(env, "UPDATE customer_stats SET order_count = 0 WHERE customer_id = 1")
+    before = outside_prod(demo)
+    assert before["dev Warehouse"]["analytics.customer_orders"]
+    assert before["stage Warehouse"]["analytics.customer_stats"]
+    assert before["shop target"][1:] == SEED_CUSTOMER_STATS[1:]
+
+    code, output = adops_run(project, *RUN, "--env", "prod")
+
+    assert code == 0, output
+    assert outside_prod(demo) == before
+    assert_reverse_sync_passed(output)
+    assert "  wrote: inserted 20, updated 0, deleted 0" in output.splitlines()
+    assert_no_secret_or_row_value(output, env)
+    assert customer_stats(env, "shop_prod") == SEED_CUSTOMER_STATS
+    assert analytics_rows(demo, "prod") == 100
+
+    code, output = adops_run(project, "run", "--all", "--env", "prod")
+
+    assert code == 0, output
+    assert outside_prod(demo) == before
+    assert "Pipeline shop_sync passed in Environment prod." in output
+    assert_no_secret_or_row_value(output, env)
+    assert customer_stats(env, "shop_prod") == SEED_CUSTOMER_STATS
+    assert analytics_rows(demo, "prod") == 100
 
 
 # Runs `adops` with its Warehouse lock wrapped, so the test sees when each process held it.

@@ -1,7 +1,0 @@
-{"repoGuards":[
-{"id":"g1","source":".github/workflows/ci.yml","kind":"ci-gate","enforces":"uv run ruff check (E,F,W,I,B,UP; line-length 100) must pass on every PR","paths":[]},
-{"id":"g2","source":".github/workflows/ci.yml + pyproject.toml [tool.coverage]","kind":"ci-gate","enforces":"uv run pytest tests/unit --cov with fail_under=100 line+branch on src/adops; only 'if TYPE_CHECKING:' excluded","paths":["src/adops/"]},
-{"id":"g3","source":".github/workflows/ci.yml 'Project templates ship in the wheel'","kind":"ci-gate","enforces":"builds the wheel and greps for an explicit list of template files; a new template file not added to the list is not checked, a listed file missing fails CI","paths":["src/adops/templates/",".github/workflows/ci.yml"]},
-{"id":"g4","source":".github/workflows/ci.yml e2e job","kind":"ci-gate","enforces":"uv run pytest tests/e2e -m e2e on ubuntu with Docker, 20-minute timeout","paths":["tests/e2e/"]},
-{"id":"g5","source":"docs/roadmaps/agentic-dataops/decisions.md horizon 1","kind":"written-rule","enforces":"no 'pragma: no cover' except TYPE_CHECKING; domain/application import no framework","paths":["src/adops/"]}
-]}

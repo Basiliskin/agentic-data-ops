@@ -9,7 +9,7 @@ import psycopg
 import yaml
 
 ADOPS = str(Path(sys.executable).parent / "adops")
-WAREHOUSE_DATABASES = {"dev": "warehouse", "stage": "warehouse_stage"}
+WAREHOUSE_DATABASES = {"dev": "warehouse", "stage": "warehouse_stage", "prod": "warehouse_prod"}
 
 
 def docker_available() -> bool:
@@ -47,6 +47,8 @@ def use_shipped_duckdb_warehouse(settings):
 def reseed_shop(stack, env):
     seed = (stack / "seed" / "01_shop.sql").read_text()
     shop(env, f"DROP SCHEMA public CASCADE; CREATE SCHEMA public; {seed}")
+    with connect(env, "SHOP", "shop", "shop_prod") as conn:
+        conn.execute("TRUNCATE customer_stats")
 
 
 def reset_postgres_warehouses(env):
