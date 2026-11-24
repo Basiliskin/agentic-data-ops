@@ -26,3 +26,7 @@ run_monitoring:
   start_timeout_seconds: 180
   poll_interval_seconds: 120
   max_resume_run_attempts: 0
+
+# No usage statistics are sent to Dagster, and its first-run notice about them is not shown.
+telemetry:
+  enabled: false

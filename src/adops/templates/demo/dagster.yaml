@@ -11,3 +11,7 @@ storage:
         env: DAGSTER_PG_USER
       password:
         env: DAGSTER_PG_PASSWORD
+
+# No usage statistics are sent to Dagster, and its first-run notice about them is not shown.
+telemetry:
+  enabled: false

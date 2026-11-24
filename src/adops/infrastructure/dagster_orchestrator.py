@@ -22,6 +22,9 @@ from adops.application.run_pipeline import run_step
 from adops.domain.checks import CheckResult
 
 AFTER = "after"
+# The CLI prints its own summary from the StepReports, so Dagster's console logger stays silent
+# (a failed Step would otherwise print a full stack trace); the run's events are still stored.
+QUIET_CONSOLE = {"loggers": {"console": {"config": {"log_level": "CRITICAL"}}}}
 
 
 class JobCompileError(Exception):
@@ -58,7 +61,9 @@ class DagsterOrchestrator:
         reports: dict[str, StepReport] = {}
         job = compile_job(plan, sync, reports=reports)
         with _instance() as instance:
-            job.execute_in_process(instance=instance, raise_on_error=False)
+            job.execute_in_process(
+                instance=instance, raise_on_error=False, run_config=QUIET_CONSOLE
+            )
         steps = tuple(
             reports.get(task.name, StepReport(task.name, StepStatus.SKIPPED)) for task in plan.steps
         )

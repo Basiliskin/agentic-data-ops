@@ -470,7 +470,7 @@ def test_server_dagster_instance_runs_one_run_at_a_time_on_postgres(project):
 
     assert getattr(module, coordinator["class"]) is QueuedRunCoordinator
     assert coordinator["config"] == {"max_concurrent_runs": 1}
-    assert set(config) == {"storage", "run_coordinator", "run_monitoring"}
+    assert set(config) == {"storage", "run_coordinator", "run_monitoring", "telemetry"}
     assert config["run_monitoring"] == {
         "enabled": True,
         "start_timeout_seconds": 180,
@@ -501,7 +501,24 @@ def test_demo_keeps_its_host_dagster_storage_unchanged(demo):
     host = yaml.safe_load((demo / "dagster.yaml").read_text())
     server = yaml.safe_load((demo / "server" / "dagster.yaml").read_text())
 
-    assert host == {"storage": server["storage"]}
+    assert host == {"storage": server["storage"], "telemetry": server["telemetry"]}
+
+
+@pytest.mark.parametrize("config_file", ["dagster.yaml", "server/dagster.yaml"])
+def test_demo_dagster_instances_send_no_telemetry(demo, tmp_path, config_file):
+    config = yaml.safe_load((demo / config_file).read_text())
+    del config["storage"]
+    home = tmp_path / "dagster_home"
+    home.mkdir()
+    (home / "dagster.yaml").write_text(yaml.safe_dump(config))
+
+    with DagsterInstance.from_config(str(home)) as instance:
+        assert not instance.telemetry_enabled
+
+
+def test_plain_host_runs_use_an_instance_that_sends_no_telemetry():
+    with DagsterInstance.ephemeral() as instance:
+        assert not instance.telemetry_enabled
 
 
 def test_plain_project_has_no_root_dagster_file_so_host_runs_stay_ephemeral(plain):

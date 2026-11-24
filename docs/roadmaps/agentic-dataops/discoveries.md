@@ -136,16 +136,16 @@
 - [landed] 2026-11-23 | horizon 15 | Skill test ids are hyphenated (demo/adops-test-in-dev): a rubric `-k test_in_dev` selects 0 tests (exit 5); use `-k "test-in-dev"` in later Skill rubrics and gates [phase 2]
 - [landed] 2026-11-23 | horizon 15 | missed-prereq: first commit of a new Project — adops-setup runs git init -b main only and nothing commits the init files; Stage 1.6 checked git usability, not who makes the — see horizon-15 roadmap.md
 - [landed] 2026-11-23 | horizon 15 | grader: skill order check is a subsequence search; in adops-share 'git push -u origin main' masks a dropped 'git push -u origin <name>' — tighten if a Skill's push step changes [phase 5]
-- 2026-11-23 | horizon 16 | The old commented demo prod block pointed at dev's Warehouse (warehouse) and stage's target (shop); uncommented as-is it would make the MCP refuse dev
-- 2026-11-23 | horizon 16 | test_init_command pins demo Environments to {dev, stage}, the seed list to 01/02, and runs the commented-prod test for demo AND plain
-- 2026-11-23 | horizon 16 | Reverse Sync (WRITING_ENVIRONMENTS) and Schedules (SCHEDULED_ENVIRONMENTS) already include prod; a demo prod needs no Python change
-- 2026-11-23 | horizon 16 | Postgres advisory locks are per database, so stage and prod Warehouse locks are independent; flock is DuckDB-only
-- 2026-11-23 | horizon 16 | stage and prod Servers share one DAGSTER_PG_DB with identical job/schedule names and no Environment tag; schedule on/off state carries over
-- 2026-11-23 | horizon 16 | Server Dockerfile installs adops==0.1.0 from the index unless built with --build-arg ADOPS_PACKAGE=/build/<wheel> (test_server.py pattern)
-- 2026-11-23 | horizon 16 | This Mac runs OrbStack (Docker Engine 29.8.2), not Docker Desktop; no Mac host-networking trial was ever recorded
-- 2026-11-23 | horizon 16 | e2e demo_project.py: WAREHOUSE_DATABASES has only dev/stage; reseed_shop resets only shop; use_shipped_duckdb_warehouse uncomments every '# warehouse:' block
-- 2026-11-23 | horizon 16 | adops-prod.yml header and promotion.md step 6 say 'uncomment the prod block'; promotion.md and ADR-0016 say a Server must run Linux
-- 2026-11-23 | horizon 16 | Full e2e suite takes 781s (13m) on this Mac with the prod test; ~35% headroom under the 20-minute CI e2e job timeout
-- 2026-11-23 | horizon 16 | Unit gate needs ADOPS_TEST_POSTGRES_DSN=postgresql://postgres:adops@localhost:55432/postgres; without it 54 Postgres tests error and coverage drops to 98.5%
-- 2026-11-23 | horizon 16 | Server image from a wheel: build both Server services with --build-arg, then 'up --no-build'; a plain 'up' rebuilds dagster_webserver with the index default and fails
-- 2026-11-23 | horizon 16 | Mac OrbStack trial: host-networked Server works for stage and prod; hand-run 'adops run --env prod' also lands in the shared Dagster run history, untagged
+- [landed] 2026-11-23 | horizon 16 | The old commented demo prod block pointed at dev's Warehouse (warehouse) and stage's target (shop); uncommented as-is it would make the MCP refuse dev
+- [landed] 2026-11-23 | horizon 16 | test_init_command pins demo Environments to {dev, stage}, the seed list to 01/02, and runs the commented-prod test for demo AND plain
+- [landed] 2026-11-23 | horizon 16 | Reverse Sync (WRITING_ENVIRONMENTS) and Schedules (SCHEDULED_ENVIRONMENTS) already include prod; a demo prod needs no Python change
+- [landed] 2026-11-23 | horizon 16 | Postgres advisory locks are per database, so stage and prod Warehouse locks are independent; flock is DuckDB-only
+- [landed] 2026-11-23 | horizon 16 | stage and prod Servers share one DAGSTER_PG_DB with identical job/schedule names and no Environment tag; schedule on/off state carries over
+- [landed] 2026-11-23 | horizon 16 | Server Dockerfile installs adops==0.1.0 from the index unless built with --build-arg ADOPS_PACKAGE=/build/<wheel> (test_server.py pattern)
+- [landed] 2026-11-23 | horizon 16 | This Mac runs OrbStack (Docker Engine 29.8.2), not Docker Desktop; no Mac host-networking trial was ever recorded
+- [landed] 2026-11-23 | horizon 16 | e2e demo_project.py: WAREHOUSE_DATABASES has only dev/stage; reseed_shop resets only shop; use_shipped_duckdb_warehouse uncomments every '# warehouse:' block
+- [landed] 2026-11-23 | horizon 16 | adops-prod.yml header and promotion.md step 6 say 'uncomment the prod block'; promotion.md and ADR-0016 say a Server must run Linux
+- [landed] 2026-11-23 | horizon 16 | Full e2e suite takes 781s (13m) on this Mac with the prod test; ~35% headroom under the 20-minute CI e2e job timeout
+- [landed] 2026-11-23 | horizon 16 | Unit gate needs ADOPS_TEST_POSTGRES_DSN=postgresql://postgres:adops@localhost:55432/postgres; without it 54 Postgres tests error and coverage drops to 98.5%
+- [landed] 2026-11-23 | horizon 16 | Server image from a wheel: build both Server services with --build-arg, then 'up --no-build'; a plain 'up' rebuilds dagster_webserver with the index default and fails
+- [landed] 2026-11-23 | horizon 16 | Mac OrbStack trial: host-networked Server works for stage and prod; hand-run 'adops run --env prod' also lands in the shared Dagster run history, untagged

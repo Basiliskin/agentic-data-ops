@@ -313,6 +313,20 @@ def test_failing_first_step_skips_the_rest_with_the_sanitized_error():
     assert stored.status is DagsterRunStatus.FAILURE
 
 
+def test_failing_run_prints_nothing_but_keeps_its_events(capfd: pytest.CaptureFixture[str]):
+    sync = RecordingSync(fail_preflight_of={"customers": ConnectionError("connection refused")})
+
+    run(sync)
+
+    printed = "".join(capfd.readouterr())
+    assert " - dagster - " not in printed
+    assert "Stack Trace" not in printed
+    with DagsterInstance.get() as instance:
+        (stored,) = instance.get_runs()
+        events = instance.all_logs(stored.run_id)
+    assert any(event.dagster_event and event.dagster_event.is_step_failure for event in events)
+
+
 def test_execute_returns_a_result_instead_of_raising(monkeypatch: pytest.MonkeyPatch):
     seen: list[bool] = []
     original = dagster_orchestrator.JobDefinition.execute_in_process
