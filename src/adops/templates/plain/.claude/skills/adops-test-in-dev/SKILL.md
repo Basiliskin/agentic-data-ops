@@ -37,6 +37,9 @@ writing it."
   (`rows_loaded`).
 - For each Step with a `preview`, tell the person in plain numbers how many rows it would
   insert, update and delete in the target, and show a few of the sample keys.
+- adops builds the dbt models into the `analytics` schema, so when you suggest a query for the
+  person to look at a model's rows, name it as `analytics.<model>`, for example
+  `select * from analytics.top_customers`.
 - Then say the change is ready to share with the adops-share Skill.
 
 ## 3. Explain a failure

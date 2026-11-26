@@ -1,3 +1,5 @@
 # Users need no Git or Docker knowledge; skills operate both for them
 
 The target user can write SQL and talk to an AI assistant but may never have used Git or Docker. Skills therefore check prerequisites (Docker installed and running, free ports), perform Git operations (branch, commit, pull request) themselves, and narrate each step in plain language. A web UI was rejected as the route to accessibility because the Assistant already provides the conversational interface; the only hard requirement is a GitHub account somewhere on the team.
+
+**Clarification (2026-11-26):** `adops init` itself runs `git init -b main` and commits every file it wrote as "Start the adops Project", unless `--no-git` is given, Git is missing, the folder is already inside a repository, or Git refuses the commit (usually no name and email set; init then says how to finish). Leaving the first save to the adops-share Skill was rejected: by then the person's change is already in `dbt/` and `pipelines/`, so the Skill cannot tell init's files from the change, and the first pull request held the whole Project and could not get a Branch run.

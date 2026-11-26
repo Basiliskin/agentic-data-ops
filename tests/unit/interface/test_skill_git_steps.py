@@ -80,7 +80,7 @@ def under_shared_paths(path: str) -> bool:
 @pytest.fixture
 def pushed(tmp_path):
     work = tmp_path / "work"
-    result = runner.invoke(cli.app, ["init", str(work), "--demo"])
+    result = runner.invoke(cli.app, ["init", "--no-git", str(work), "--demo"])
     assert result.exit_code == 0, result.output
     git("init", "--quiet", "-b", "main", cwd=work)
     git("add", "-A", cwd=work)

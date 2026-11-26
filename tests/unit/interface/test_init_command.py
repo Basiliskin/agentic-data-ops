@@ -23,7 +23,8 @@ from adops.domain.loader import (
 from adops.domain.pipeline import SyncStep
 from adops.domain.reverse_sync import ReverseSyncStep
 from adops.domain.transform import TransformStep
-from adops.interface import cli
+from adops.infrastructure.git_start import GitStart
+from adops.interface import cli, init_command
 from adops.interface.run_command import DAGSTER_FILE
 
 runner = CliRunner()
@@ -85,7 +86,7 @@ def snapshot(root):
 @pytest.fixture
 def demo(tmp_path):
     target = tmp_path / "shop"
-    result = runner.invoke(cli.app, ["init", str(target), "--demo"])
+    result = runner.invoke(cli.app, ["init", "--no-git", str(target), "--demo"])
     assert result.exit_code == 0, result.output
     return target
 
@@ -93,7 +94,7 @@ def demo(tmp_path):
 @pytest.fixture
 def plain(tmp_path):
     target = tmp_path / "project"
-    result = runner.invoke(cli.app, ["init", str(target)])
+    result = runner.invoke(cli.app, ["init", "--no-git", str(target)])
     assert result.exit_code == 0, result.output
     return target
 
@@ -597,14 +598,14 @@ def test_mcp_json_registers_the_adops_mcp_server_launched_from_the_project(proje
 def test_init_creates_missing_parent_folders(tmp_path):
     target = tmp_path / "a" / "b"
 
-    result = runner.invoke(cli.app, ["init", str(target), "--demo"])
+    result = runner.invoke(cli.app, ["init", "--no-git", str(target), "--demo"])
 
     assert result.exit_code == 0, result.output
     assert (target / "adops.yaml").is_file()
 
 
 def test_init_accepts_an_existing_empty_folder(tmp_path):
-    result = runner.invoke(cli.app, ["init", str(tmp_path)])
+    result = runner.invoke(cli.app, ["init", "--no-git", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
     assert (tmp_path / "adops.yaml").is_file()
@@ -615,7 +616,7 @@ def test_init_refuses_a_non_empty_folder_and_leaves_it_untouched(tmp_path, demo_
     (tmp_path / "notes.txt").write_text("mine")
     before = snapshot(tmp_path)
 
-    result = runner.invoke(cli.app, ["init", str(tmp_path), *demo_flag])
+    result = runner.invoke(cli.app, ["init", "--no-git", str(tmp_path), *demo_flag])
 
     assert result.exit_code == 1
     assert "not an empty folder" in result.output
@@ -627,7 +628,7 @@ def test_init_refuses_a_path_that_is_a_file(tmp_path):
     target = tmp_path / "taken"
     target.write_text("mine")
 
-    result = runner.invoke(cli.app, ["init", str(target)])
+    result = runner.invoke(cli.app, ["init", "--no-git", str(target)])
 
     assert result.exit_code == 1
     assert target.read_text() == "mine"
@@ -635,7 +636,7 @@ def test_init_refuses_a_path_that_is_a_file(tmp_path):
 
 @pytest.mark.parametrize("demo_flag", [["--demo"], []])
 def test_init_writes_no_tool_code(tmp_path, demo_flag):
-    runner.invoke(cli.app, ["init", str(tmp_path), *demo_flag])
+    runner.invoke(cli.app, ["init", "--no-git", str(tmp_path), *demo_flag])
 
     assert list(tmp_path.rglob("*.py")) == []
 
@@ -1091,3 +1092,60 @@ def test_plain_settings_carry_the_prod_environment_the_release_workflow_needs_co
     assert parsed["prod"].keys() == parsed[reference].keys()
     assert parsed["prod"]["warehouse"].keys() == parsed[reference]["warehouse"].keys()
     assert settings_variables(parsed["prod"]) <= set(dotenv_values(project / ".env.example"))
+
+
+@pytest.fixture
+def git_identity(monkeypatch):
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for role in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{role}_NAME", "adops")
+        monkeypatch.setenv(f"GIT_{role}_EMAIL", "adops@example.com")
+
+
+@pytest.mark.usefixtures("git_identity")
+@pytest.mark.parametrize("demo_flag", [[], ["--demo"]])
+def test_init_saves_every_starting_file_so_the_first_pull_request_holds_only_the_change(
+    tmp_path, demo_flag
+):
+    target = tmp_path / "project"
+
+    result = runner.invoke(cli.app, ["init", str(target), *demo_flag])
+
+    assert result.exit_code == 0, result.output
+    assert "Saved these starting files in a new Git repository, on branch main." in result.output
+    log = subprocess.run(
+        ["git", "log", "--format=%s"], cwd=target, capture_output=True, text=True, check=True
+    )
+    assert log.stdout.strip() == "Start the adops Project"
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=target, capture_output=True, text=True, check=True
+    )
+    assert status.stdout == ""
+
+
+def test_no_git_creates_no_repository(tmp_path):
+    target = tmp_path / "project"
+
+    result = runner.invoke(cli.app, ["init", "--no-git", str(target)])
+
+    assert result.exit_code == 0, result.output
+    assert not (target / ".git").exists()
+    assert "Git" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("outcome", "says"),
+    [
+        (GitStart.NO_GIT, "Git is not installed"),
+        (GitStart.INSIDE_REPOSITORY, "already inside a Git repository"),
+        (GitStart.COMMIT_FAILED, "git config --global user.email"),
+    ],
+)
+def test_init_says_why_it_made_no_starting_save(tmp_path, monkeypatch, outcome, says):
+    monkeypatch.setattr(init_command, "start_repository", lambda path: outcome)
+
+    result = runner.invoke(cli.app, ["init", str(tmp_path / "project")])
+
+    assert result.exit_code == 0, result.output
+    assert says in result.output

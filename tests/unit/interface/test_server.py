@@ -21,7 +21,7 @@ SCHEDULE = "schedule: daily at 06:00\n"
 @pytest.fixture
 def project(tmp_path: Path) -> Path:
     path = tmp_path / "project"
-    result = runner.invoke(cli.app, ["init", "--demo", str(path)])
+    result = runner.invoke(cli.app, ["init", "--no-git", "--demo", str(path)])
     assert result.exit_code == 0, result.output
     pipeline = path / "pipelines" / "shop_sync.yaml"
     pipeline.write_text(pipeline.read_text() + SCHEDULE)

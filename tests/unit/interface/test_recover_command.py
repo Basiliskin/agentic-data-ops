@@ -19,7 +19,7 @@ TOKEN_PATH = "/services/SENTINEL_TOKEN"
 @pytest.fixture
 def project(tmp_path: Path) -> Path:
     path = tmp_path / "project"
-    result = runner.invoke(cli.app, ["init", "--demo", str(path)])
+    result = runner.invoke(cli.app, ["init", "--no-git", "--demo", str(path)])
     assert result.exit_code == 0, result.output
     return path
 

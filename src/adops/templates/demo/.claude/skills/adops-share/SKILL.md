@@ -1,6 +1,6 @@
 ---
 name: adops-share
-description: Share a finished change - checks the Project has a stage Environment, puts the change on its own Git branch, commits only the Project's own files, opens a pull request on GitHub and runs the change in its Branch Environment. Use it once a Pipeline works in dev and the person wants it reviewed.
+description: Share a finished change - checks the Project has a stage Environment, puts the change on its own Git branch, commits only the Project's own files, tries it in its Branch Environment, then opens a pull request on GitHub. Use it once a Pipeline works in dev and the person wants it reviewed.
 ---
 
 # Share a change through a pull request
@@ -41,8 +41,14 @@ save to compare against."
 
 - Run `git rev-parse --verify HEAD`. If it succeeds, the repository already has history: skip
   to step 3.
-- If it fails, nothing has been saved yet. Make one starting save on main with the files
-  `adops init` wrote, so the change itself still goes through review:
+- If it fails, nothing has been saved yet. `adops init` normally makes this starting save
+  itself, so this Project was made without it (no Git, no Git name and email, or `--no-git`).
+  Tell the person before going on: "This Project has no saved history yet, so I can't tell the
+  files `adops init` wrote from your changes. I'll save the setup files on main and put the
+  Pipelines, dbt models and `adops.yaml` in the pull request, so the first pull request shows
+  all of them, and it can't be tried in a Branch Environment until stage has run once." Then
+  make one starting save on main with the files `adops init` wrote, so the change itself still
+  goes through review:
   - Check that `.gitignore` lists `.env` and `.adops/`, so passwords and local state can never
     be saved. If either is missing, stop and ask the person to add it.
   - Run `git status --short` and stage each listed path by name with `git add <path>`, for
@@ -74,20 +80,46 @@ passwords or local run data."
   to the person and stage one only after they agree.
 - Run `git commit -m "<one line saying what the change does>"`.
 
-## 5. Make sure GitHub has a copy of the repository
+## 5. Try the change in its Branch Environment
+
+Say: "Now I'm trying the change in its own Branch Environment, a private copy inside the stage
+Warehouse that nothing else uses."
+
+This runs from this computer, before anything is sent to GitHub, so any problem shows up while it
+is still easy to change course. Every call here names the branch with `branch="<name>"` and no Environment, so the tools act
+only on this branch's own schemas.
+
+- Call `mcp__adops__test_connection` with `branch="<name>"`. If a connection fails, explain
+  which database it is and stop until it is fixed.
+- Call `mcp__adops__run` with the Pipeline's name and `branch="<name>"`, once; do not also call
+  `mcp__adops__preview`, which would run the whole Pipeline again. If `succeeded` is true, say
+  which Steps ran and how many rows each loaded, and for each Step with a `preview`, how many
+  rows it would insert, update and delete in the target. If not, explain the failed Step's
+  `error` and each failed check in plain words, as the adops-test-in-dev Skill does, then fix
+  the change, save it again as in step 4 and repeat this step.
+- If the run is refused because stage has no Step Fingerprints, stage has never run this
+  Pipeline, so there is nothing yet for a Branch Environment to compare against. That is not a
+  fault in the change. Explain: "stage has never run this Pipeline, so the change can't be tried
+  in a Branch Environment yet. It can still go to a pull request so someone can review it; once
+  a pull request is merged and stage has run, later changes get their Branch run." Ask whether
+  to go on to the pull request, and stop if they say no.
+
+## 6. Make sure GitHub has a copy of the repository
 
 Say: "A pull request lives on GitHub, so I'm checking the repository has a GitHub copy to send
 the branch to."
 
-- Run `git remote get-url origin`. If it prints a URL, go on to step 6.
+- Run `git remote get-url origin`. If it prints a URL, go on to step 7.
 - If there is no remote, ask the person before creating anything: "This repository is not on
-  GitHub yet. Shall I create a private GitHub repository for it?" Only after they agree, run
+  GitHub yet. Shall I create a private GitHub repository for it? Its pull request checks and
+  the stage and prod updates only start once a self-hosted runner is set up for it, which
+  someone with admin rights does by hand." Only after they agree, run
   `gh repo create <repository-name> --private --source=. --remote=origin`.
 - If you made the starting save in step 2, send main too: `git push -u origin main`. If a stage
   Server is already connected to this repository, this first push of main starts its stage
   update, and it only carries the starting files, so nothing of the change reaches stage.
 
-## 6. Send the branch and open the pull request
+## 7. Send the branch and open the pull request
 
 Say: "I'm sending the branch to GitHub and opening a pull request so someone can review the
 change."
@@ -99,23 +131,11 @@ change."
 - Explain what GitHub does next: the pull request workflow checks the Project files and then
   runs every Pipeline of the branch in its Branch Environment on the stage Server. When the
   pull request is closed or merged, the same workflow removes that Branch Environment.
-
-## 7. Try the change in its Branch Environment
-
-Say: "Now I'm trying the change in its own Branch Environment, a private copy inside the stage
-Warehouse that nothing else uses."
-
-Every call here names the branch with `branch="<name>"` and no Environment, so the tools act
-only on this branch's own schemas.
-
-- Call `mcp__adops__test_connection` with `branch="<name>"`. If a connection fails, explain
-  which database it is and stop until it is fixed.
-- Call `mcp__adops__run` with the Pipeline's name and `branch="<name>"`, once; do not also call
-  `mcp__adops__preview`, which would run the whole Pipeline again. If `succeeded` is true, say
-  which Steps ran and how many rows each loaded, and for each Step with a `preview`, how many
-  rows it would insert, update and delete in the target. If not, explain the failed Step's
-  `error` and each failed check in plain words, as the adops-test-in-dev Skill does, then fix
-  the change, save it again as in step 4, send it with `git push`, and repeat this step. The
-  new commit updates the same pull request, so do not open another one.
+- Check whether GitHub has somewhere to run those checks: `gh api
+  repos/{owner}/{repo}/actions/runners --jq '[.runners[].labels[].name] | index("adops-stage")'`.
+  If it prints a number, a stage runner is registered. If it prints `null`, say: "No self-hosted
+  runner labelled adops-stage is set up for this repository yet, so the pull request's checks
+  won't start. Someone with admin rights sets one up on the stage Server's machine." If the
+  command is refused for lack of rights, say you could not check and leave it there.
 
 When the pull request has been merged, the adops-promote Skill explains what happens next.

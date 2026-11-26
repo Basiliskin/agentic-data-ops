@@ -61,7 +61,7 @@ def no_network(monkeypatch):
 def test_demo_project_validates_offline_without_env_file(tmp_path, monkeypatch, no_network):
     for name in ("SHOP_PASSWORD", "WAREHOUSE_PASSWORD", "DAGSTER_PG_PASSWORD"):
         monkeypatch.delenv(name, raising=False)
-    runner.invoke(cli.app, ["init", str(tmp_path), "--demo"])
+    runner.invoke(cli.app, ["init", "--no-git", str(tmp_path), "--demo"])
 
     result = validate("--project", str(tmp_path))
 
@@ -83,7 +83,7 @@ def dbt_never_runs(monkeypatch):
 
 @pytest.mark.usefixtures("no_network", "dbt_never_runs")
 def test_demo_with_its_dbt_project_validates_without_running_dbt(tmp_path):
-    runner.invoke(cli.app, ["init", str(tmp_path), "--demo"])
+    runner.invoke(cli.app, ["init", "--no-git", str(tmp_path), "--demo"])
 
     result = validate("--project", str(tmp_path))
 
@@ -93,7 +93,7 @@ def test_demo_with_its_dbt_project_validates_without_running_dbt(tmp_path):
 
 @pytest.mark.usefixtures("dbt_never_runs")
 def test_missing_dbt_project_file_names_the_step_and_the_relative_path(tmp_path):
-    runner.invoke(cli.app, ["init", str(tmp_path), "--demo"])
+    runner.invoke(cli.app, ["init", "--no-git", str(tmp_path), "--demo"])
     (tmp_path / "dbt" / "dbt_project.yml").unlink()
 
     result = validate("--project", str(tmp_path))

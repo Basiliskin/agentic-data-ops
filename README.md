@@ -45,6 +45,10 @@ cp .env.example .env
 docker compose up --wait
 ```
 
+`adops init` also makes the folder a Git repository and saves the starting files in it, so later
+your assistant can share each change on its own. (If Git isn't installed, it skips this and says
+so; `--no-git` turns it off.)
+
 > **Docker isn't running?** `docker compose` fails with an error about the Docker daemon.
 > Open OrbStack or Docker Desktop, wait until it says it's running, and run the command again.
 
