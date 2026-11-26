@@ -194,6 +194,7 @@ can be committed safely.
 
 - **Run stage and prod**: [Run stage and prod locally on a Mac](docs/playbooks/run-stage-and-prod-on-a-mac.md)
 - **Pull request → stage → prod through GitHub**: [Promotion](docs/playbooks/promotion.md)
+- **Check the quickstart and Assistant example still work**: [Try the Assistant on the demo](docs/playbooks/try-the-assistant.md)
 - **Why it's built this way**: [Architecture decisions](docs/adr/)
 - **What the words mean**: [Glossary](GLOSSARY.md)
 
