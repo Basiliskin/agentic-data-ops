@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 from dagster import DagsterInstance, QueuedRunCoordinator
+from dagster._core.workspace.load import location_origins_from_yaml_paths
 from dotenv import dotenv_values
 from git_harness import GIT_ENV, git
 from typer.testing import CliRunner
@@ -980,8 +981,10 @@ def test_folder_update_moves_the_server_to_the_new_version_and_keeps_its_local_f
 @pytest.mark.parametrize("environment", ["stage", "prod"])
 def test_deploy_reloads_the_code_location_the_server_workspace_names(project, environment):
     script = step_script(deploy_job(project, environment), "reloadRepositoryLocation")
-    workspace = yaml.safe_load((project / "server" / "workspace.yaml").read_text())
-    location = workspace["load_from"][0]["python_module"]["module_name"]
+    # The name Dagster itself gives the location, not one rebuilt from workspace.yaml's fields:
+    # a hand-built name ("adops.interface.server") made every real deploy fail its reload.
+    [origin] = location_origins_from_yaml_paths([str(project / "server" / "workspace.yaml")])
+    location = origin.location_name
 
     assert f'reloadRepositoryLocation(repositoryLocationName: \\"{location}\\")' in script
     assert "{ __typename ... on WorkspaceLocationEntry" in script

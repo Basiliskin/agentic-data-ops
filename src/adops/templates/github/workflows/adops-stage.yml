@@ -41,7 +41,7 @@ jobs:
           fi
           response=$(curl --fail --silent --show-error -X POST "http://127.0.0.1:$port/graphql" \
             -H 'Content-Type: application/json' \
-            --data '{"query": "mutation { reloadRepositoryLocation(repositoryLocationName: \"adops.interface.server\") { __typename ... on WorkspaceLocationEntry { loadStatus locationOrLoadError { __typename } } } }"}')
+            --data '{"query": "mutation { reloadRepositoryLocation(repositoryLocationName: \"adops.interface.server:defs\") { __typename ... on WorkspaceLocationEntry { loadStatus locationOrLoadError { __typename } } } }"}')
           for expected in '"__typename": *"WorkspaceLocationEntry"' '"loadStatus": *"LOADED"' \
                           '"locationOrLoadError": *\{ *"__typename": *"RepositoryLocation"'; do
             if ! printf '%s' "$response" | grep -Eq "$expected"; then

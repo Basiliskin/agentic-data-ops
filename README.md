@@ -5,7 +5,7 @@ the results back to your app, with checks that stop bad data before it spreads. 
 own machines and drive it by talking to your AI assistant (such as Claude Code).
 
 > **Status: early (0.1).** Works end to end on the demo shop, in dev, stage and prod. Promotion
-> through GitHub (pull request → stage → prod) is written but not yet proven on a real runner.
+> through GitHub is proven on a real runner from pull request to stage; release → prod is not yet.
 > Starting your own Project from scratch is still thin (see [below](#start-your-own-project)).
 
 ## What you need

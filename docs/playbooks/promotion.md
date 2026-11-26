@@ -145,6 +145,11 @@ Each Server machine gets one, with a label that says which Server it is:
    sudo ./svc.sh start
    ```
 
+**A Mac stage Server** (Postgres Warehouse only, see "Before you start"): choose **macOS** on the
+GitHub page, run `config.sh` as yourself, and skip the `sudo` and `usermod` parts above: the runner
+runs as your user, who can already use Docker. `./svc.sh install` sets it up as a launch agent that
+starts when you log in, or run `./run.sh` in a terminal for a trial.
+
 The runner shows as **Idle** under **Settings > Actions > Runners** when it is ready. Use the label
 exactly as written (`adops-stage`, not `stage`): a job whose label matches no runner waits forever.
 
@@ -176,8 +181,10 @@ Keep it on at its strictest:
 
 Open **Settings > Actions > General**, then:
 
-- **Private repository:** under **Fork pull request workflows**, turn on **Require approval for fork
-  pull request workflows**, and leave **Send secrets to workflows from pull requests** off.
+- **Private repository:** under **Fork pull request workflows**, GitHub leaves **Run workflows from
+  fork pull requests** off for a new private repository, so no Fork PR runs anything. That is the
+  safest setting; keep it unless you need Fork PRs. If you turn it on, also turn on **Require approval
+  for fork pull request workflows**, and leave **Send secrets to workflows from pull requests** off.
 - **Public repository:** under **Approval for running fork pull request workflows from
   contributors**, choose **Require approval for all external contributors** (older GitHub pages call
   it "Require approval for all outside collaborators"). Do not choose the "first-time contributors"
@@ -219,6 +226,12 @@ lines at the prod machine before the first release, and merge that change. The p
 `.env` holds the matching passwords.
 
 ## Step 7 — Try it
+
+Stage must have run once before a pull request can get a Branch run: until then the Branch run
+stops with "stage has no Step Fingerprints; run the Pipeline in stage first" and the check is red,
+even for a correct change. The first push to `main` after the runner and Server are ready gives
+stage that run. (Pushing a new repository starts `adops stage` at once; if no runner exists yet,
+cancel that run under **Actions**, then re-run it when step 3 is done.)
 
 1. Open a pull request from a branch in your repository. `adops pull request` runs on the stage
    Server; its log shows each Pipeline's Branch run.
@@ -273,3 +286,9 @@ name, then rerun the remaining pull request's workflow as in step 2:
 cd <your-server-folder>
 sudo -u <runner-user> docker compose --profile server run --rm --no-deps dagster_daemon adops drop-branch <branch>
 ```
+
+## Recorded trials
+
+| Date | Where | Result |
+|---|---|---|
+| 2026-11-26 | Stage Server on a Mac (OrbStack, Postgres Warehouse), runner run with `./run.sh`, a fresh private demo repository, Server image built from a wheel | **PR → Branch run, merge → stage and drop on close all passed.** The first deploy failed at the reload step: the workflows asked Dagster for the location `adops.interface.server`, but Dagster names it `adops.interface.server:defs`. Fixed the same day. After that, merge → stage passed (22 s), a pull request adding a dbt model got a Branch run that deferred the unchanged Sync to stage and built only the Transform (17 s), and closing it dropped its schemas. Not yet tried: release → prod, a Linux runner as a service, root-owned `.adops/` files, a reload during a run in progress. |
