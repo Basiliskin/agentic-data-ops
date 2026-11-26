@@ -110,6 +110,10 @@ cd ~/adops-try && docker compose down -v && cd ~ && rm -rf ~/adops-try
 gh repo delete <you>/adops-try    # only if you did the share part; asks you to confirm
 ```
 
+`gh` is not allowed to delete repositories by default. If `gh repo delete` fails with
+`HTTP 403 ... needs the "delete_repo" scope`, grant that once with
+`gh auth refresh -h github.com -s delete_repo` (it opens the browser) and run the delete again.
+
 ## Running it without a person (for maintainers)
 
 Steps 2–3 can run headless, which shows whether it works but not what a person sees (no
