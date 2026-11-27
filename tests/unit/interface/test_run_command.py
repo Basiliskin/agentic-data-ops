@@ -240,7 +240,7 @@ def lock(locks):
 @pytest.fixture
 def orchestrator(monkeypatch):
     fake = RecordingOrchestrator()
-    monkeypatch.setattr(run_command, "build_orchestrator", lambda: fake)
+    monkeypatch.setattr(run_command, "build_orchestrator", lambda _: fake)
     return fake
 
 
@@ -564,7 +564,7 @@ def test_first_run_records_a_snapshot_for_every_table(project, sync, orchestrato
 def test_real_adapters_are_built_for_the_project(tmp_path, monkeypatch):
     monkeypatch.undo()
     sync = run_command.build_sync(tmp_path, "shop_sync", "stage", "postgres")
-    orchestrator = run_command.build_orchestrator()
+    orchestrator = run_command.build_orchestrator(tmp_path)
     store = run_command.build_snapshot_store(tmp_path, "stage", "postgres")
     clock = run_command.build_clock()
     transform = run_command.build_transform(tmp_path, "postgres")
@@ -585,6 +585,7 @@ def test_real_adapters_are_built_for_the_project(tmp_path, monkeypatch):
     assert isinstance(sync, DltSync)
     assert isinstance(sync, Sync)
     assert isinstance(orchestrator, DagsterOrchestrator)
+    assert orchestrator.release == tmp_path
     assert isinstance(orchestrator, Orchestrator)
     assert isinstance(store, WarehouseSnapshotStore)
     assert isinstance(store, SchemaSnapshotStore)
@@ -1478,7 +1479,7 @@ class MarkingOrchestrator:
 @pytest.fixture
 def marking(lock, monkeypatch):
     fake = MarkingOrchestrator(lock)
-    monkeypatch.setattr(run_command, "build_orchestrator", lambda: fake)
+    monkeypatch.setattr(run_command, "build_orchestrator", lambda _: fake)
     return fake
 
 
@@ -1669,7 +1670,7 @@ class LeakingOrchestrator:
 
 @pytest.mark.usefixtures("sync")
 def test_a_run_log_masks_every_project_secret_value(project, monkeypatch):
-    monkeypatch.setattr(run_command, "build_orchestrator", LeakingOrchestrator)
+    monkeypatch.setattr(run_command, "build_orchestrator", lambda _: LeakingOrchestrator())
 
     run_command.run_project(project, "shop_sync", "dev")
 

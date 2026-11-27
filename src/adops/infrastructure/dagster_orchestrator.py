@@ -1,5 +1,6 @@
 import os
 from collections.abc import Iterable, MutableMapping
+from pathlib import Path
 
 from dagster import (
     DagsterInstance,
@@ -20,6 +21,7 @@ from dagster import (
 from adops.application.ports import RunPlan, RunResult, StepReport, StepStatus, StepTask, Sync
 from adops.application.run_pipeline import run_step
 from adops.domain.checks import CheckResult
+from adops.infrastructure.dagster_server import RELEASE_TAG
 
 AFTER = "after"
 # The CLI prints its own summary from the StepReports, so Dagster's console logger stays silent
@@ -55,14 +57,23 @@ def compile_job(
 
 
 class DagsterOrchestrator:
-    """Runs a RunPlan as a Dagster job, recorded in the instance DAGSTER_HOME points to."""
+    """Runs a RunPlan as a Dagster job, recorded in the instance DAGSTER_HOME points to.
+
+    Each run is tagged RELEASE_TAG with `release`, the Project folder the run reads.
+    """
+
+    def __init__(self, release: Path) -> None:
+        self.release = release
 
     def execute(self, plan: RunPlan, sync: Sync) -> RunResult:
         reports: dict[str, StepReport] = {}
         job = compile_job(plan, sync, reports=reports)
         with _instance() as instance:
             job.execute_in_process(
-                instance=instance, raise_on_error=False, run_config=QUIET_CONSOLE
+                instance=instance,
+                raise_on_error=False,
+                run_config=QUIET_CONSOLE,
+                tags={RELEASE_TAG: str(self.release)},
             )
         steps = tuple(
             reports.get(task.name, StepReport(task.name, StepStatus.SKIPPED)) for task in plan.steps

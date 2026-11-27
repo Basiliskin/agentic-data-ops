@@ -5,6 +5,8 @@ holding the Server's single run slot while it waits, so other Pipelines queue be
 """
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from pathlib import PurePosixPath
 
 from dagster import (
     DagsterInstance,
@@ -25,6 +27,7 @@ from dagster import (
     job,
     op,
 )
+from dagster._core.storage.dagster_run import NOT_FINISHED_STATUSES
 
 from adops.application.ports import SUCCEEDED, RunResult
 from adops.domain.schedule import Schedule
@@ -39,6 +42,7 @@ IN_PROGRESS = [
 ]
 STALE = [DagsterRunStatus.STARTING, DagsterRunStatus.STARTED]
 STALE_RUN_FAILURE = "Marked failed when the Server started: the run was left running by a crash."
+RELEASE_TAG = "adops/release"
 
 
 def build_server_definitions(
@@ -46,10 +50,17 @@ def build_server_definitions(
     time_zone: str,
     run: Callable[[str], RunResult],
     on_failure: Callable[[RunResult], None],
+    *,
+    release: str,
     retry_delay_seconds: int = RETRY_DELAY_SECONDS,
 ) -> Definitions:
-    """`run` reads any secret itself, inside the run worker; none goes into run config or tags."""
-    jobs = [_pipeline_job(name, run, on_failure, retry_delay_seconds) for name, _ in pipelines]
+    """`run` reads any secret itself, inside the run worker; none goes into run config or tags.
+
+    `release` is the Project folder `run` reads; each run is tagged RELEASE_TAG with it.
+    """
+    jobs = [
+        _pipeline_job(name, run, on_failure, release, retry_delay_seconds) for name, _ in pipelines
+    ]
     schedules = [
         _schedule(job_def, schedule, time_zone)
         for job_def, (_, schedule) in zip(jobs, pipelines, strict=True)
@@ -75,14 +86,40 @@ def clear_stale_runs(instance: DagsterInstance, notify: Callable[[str], object])
     return pipelines
 
 
+@dataclass(frozen=True)
+class ReleasesInUse:
+    names: frozenset[str]
+    untagged_run_in_progress: bool
+
+
+def in_use_release_folders(instance: DagsterInstance, releases: PurePosixPath) -> ReleasesInUse:
+    """Names of the folders in `releases` that unfinished runs read, from their RELEASE_TAG.
+
+    A run waiting for a retry stays STARTED, so it counts. A tag outside `releases` (a Branch run
+    from a pull-request checkout) protects nothing. A run with no tag (started before runs were
+    tagged, or not yet at its op) may read any folder, which `untagged_run_in_progress` reports.
+    """
+    names: set[str] = set()
+    untagged = False
+    for run in instance.get_runs(filters=RunsFilter(statuses=list(NOT_FINISHED_STATUSES))):
+        tag = run.tags.get(RELEASE_TAG)
+        if tag is None:
+            untagged = True
+        elif PurePosixPath(tag).parent == releases:
+            names.add(PurePosixPath(tag).name)
+    return ReleasesInUse(frozenset(names), untagged)
+
+
 def _pipeline_job(
     name: str,
     run: Callable[[str], RunResult],
     on_failure: Callable[[RunResult], None],
+    release: str,
     retry_delay_seconds: int,
 ) -> JobDefinition:
     @op(name="run_pipeline")
     def run_pipeline(context: OpExecutionContext) -> None:
+        context.instance.add_run_tags(context.run_id, {RELEASE_TAG: release})
         result = run(name)
         metadata = {step.name: MetadataValue.text(str(step.status)) for step in result.steps}
         if result.succeeded:

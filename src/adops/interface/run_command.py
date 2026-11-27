@@ -138,8 +138,8 @@ def build_run_log_writer() -> RunLogWriter:
     return write_run_log
 
 
-def build_orchestrator() -> Orchestrator:
-    return DagsterOrchestrator()
+def build_orchestrator(project: Path) -> Orchestrator:
+    return DagsterOrchestrator(release=project)
 
 
 def build_transform(
@@ -347,7 +347,11 @@ def _run_project(
     with _scoped_environ(_dagster_environ(project)):
         if branch is None:
             return run_in_environment(
-                project, pipeline, environment, build_orchestrator(), lock_timeout=lock_timeout
+                project,
+                pipeline,
+                environment,
+                build_orchestrator(project),
+                lock_timeout=lock_timeout,
             )
         settings_text, pipeline_text = read_project_files(project, pipeline)
         return _run_branch(
@@ -502,7 +506,7 @@ def _run_branch_locked(
         build_sync(project, pipeline, name, kind, layout=layout),
         build_snapshot_store(project, name, kind, layout=layout),
         build_clock(),
-        build_orchestrator(),
+        build_orchestrator(project),
         StepTransforms(transforms),
         StepReverseSyncs(reverse_syncs),
         fingerprinting,

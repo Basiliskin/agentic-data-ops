@@ -1,9 +1,11 @@
 # Every published release deploys to the prod Server through a self-hosted runner labelled adops-prod.
 # Create a GitHub environment named prod with required reviewers, and set its variable
-# ADOPS_SERVER_DIR to the Server's Project folder on that machine; it must be a git clone of this
-# repository. First point adops.yaml's prod Environment at that machine: in a demo Project, edit
-# its host, port and database; in a plain Project, uncomment the prod block. A failing validate
-# leaves that folder untouched.
+# ADOPS_SERVER_DIR to the Server folder on that machine; it must hold releases/ and a 'current'
+# link (docs/playbooks/promotion.md, "One-time move to release folders"). First point the prod
+# Environment in adops.yaml at that machine: in a demo Project, edit its host, port and database;
+# in a plain Project, uncomment the prod block. The deploy copies the validated release into
+# releases/<commit>, points current at it, reloads the Server and runs every Pipeline from current.
+# A failing validate changes no file on the Server.
 name: adops prod
 
 on:
@@ -34,10 +36,12 @@ jobs:
           docker compose --project-directory "$ADOPS_SERVER_DIR" --profile server run --rm --no-deps -T
           -v "$GITHUB_WORKSPACE:/project" -v "$ADOPS_SERVER_DIR/.adops:/project/.adops"
           dagster_daemon adops validate
-      - name: Move the Server Project folder to the new version
+      - name: Copy the new version into its release folder and switch the Server to it
         run: |
-          git -C "$ADOPS_SERVER_DIR" fetch "$GITHUB_WORKSPACE" "refs/tags/$RELEASE_TAG"
-          git -C "$ADOPS_SERVER_DIR" checkout --detach FETCH_HEAD
+          commit=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)
+          docker compose --project-directory "$ADOPS_SERVER_DIR" --profile server run --rm --no-deps -T \
+            -v "$GITHUB_WORKSPACE:/checkout:ro" \
+            dagster_daemon adops server-release --server-dir /project --from /checkout --commit "$commit"
       - name: Reload the Server's Pipelines and Schedules
         run: |
           port=$(grep -E '^DAGSTER_WEBSERVER_PORT=' "$ADOPS_SERVER_DIR/.env" | cut -d= -f2- | tr -d "\"' \r")
@@ -58,7 +62,7 @@ jobs:
       - name: Run every Pipeline in prod
         run: >-
           docker compose --project-directory "$ADOPS_SERVER_DIR" --profile server run --rm --no-deps -T
-          dagster_daemon adops run --all --env prod
+          dagster_daemon adops run --all --env prod --project /project/current
       - name: Give the checkout back to the runner user
         if: always()
         run: >-

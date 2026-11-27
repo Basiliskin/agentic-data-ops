@@ -57,6 +57,21 @@ The Server runs each Pipeline on its Schedule, in the one Environment named by `
 in `.env` (`stage` by default). Only Pipelines with a `schedule:` line run. For a quick try, add
 `schedule: "* * * * *"` (every minute) as the first line of `pipelines/shop_sync.yaml`.
 
+The Server reads the Project from a `current` link inside the Project folder, the layout a Promotion
+deploy uses (see [Promotion setup](promotion.md#one-time-move-to-release-folders)). Make one that
+points at a copy of the Project, with `.env` and `.adops/` shared:
+
+```sh
+mkdir -p .adops releases/local
+rsync -a --exclude=/releases --exclude=/current --exclude=/.env --exclude=/.adops --exclude=/.git ./ releases/local/
+ln -s ../../.env releases/local/.env
+ln -s ../../.adops releases/local/.adops
+ln -s releases/local current
+```
+
+The Server reads Pipeline files from `current/`, so edit them there (for example
+`current/pipelines/shop_sync.yaml`) while it runs.
+
 Build the Server image once, then start it:
 
 ```sh
@@ -72,6 +87,18 @@ webserver without the wheel and fail:
 ```sh
 docker compose --profile server build --build-arg ADOPS_PACKAGE=/build/adops-0.1.0-py3-none-any.whl
 ```
+
+Check that the container sees the same `current` as the Mac. The two commands must print the same
+`releases/local`, and again after any later switch of the link (a Promotion deploy switches it to
+`releases/<commit>`):
+
+```sh
+readlink current
+docker compose --profile server exec dagster_daemon readlink /project/current
+```
+
+If the container prints an old folder or nothing, the Docker runtime is not passing link changes
+through the folder mount. This check has not been tried on OrbStack or Docker Desktop yet.
 
 Open the Dagster page at `http://127.0.0.1:3000`. If another program already uses port 3000, set
 `DAGSTER_WEBSERVER_PORT` in `.env` to a free port before starting the Server.

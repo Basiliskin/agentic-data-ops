@@ -23,7 +23,7 @@ services:
     env_file: .env
     environment:
       DAGSTER_HOME: /project/server
-      ADOPS_PROJECT: /project
+      ADOPS_PROJECT: /project/current
     volumes:
       - ./:/project
     depends_on:

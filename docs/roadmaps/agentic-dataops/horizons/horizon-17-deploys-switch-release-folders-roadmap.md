@@ -1,0 +1,461 @@
+# Horizon 17 — Deploys switch release folders
+
+## 🎯 What are we trying to achieve?
+
+A stage or prod deploy should never change files that a running Pipeline is reading. After this horizon, every deploy copies the new version into its own folder (`releases/<commit>`) inside the Server folder, then flips a `current` link to it in one step. A run that already started keeps using the folder it started in; the next run uses the new one. Deploys still run every Pipeline. Rerunning only Changed Steps is horizon 18.
+
+## 🧠 Why does this change need to happen?
+
+Today the deploy workflow runs `git checkout` directly in the folder the Server reads from. A scheduled run can be halfway through when that happens, so its Transform Step might run new dbt models against data the old Pipeline loaded, and it might save a Step Fingerprint (a hash of what a Step does) for files it never ran. Restarting the Server to switch folders would kill runs, so the switch has to happen inside the folder the containers already mount.
+
+## At a glance
+
+- **Phases:** 5
+- **Complexity:** Medium. Mostly mechanics, but they have to hold up on a live Server.
+- **Main risk:** Dagster might look up the project folder again later in a run (for example on a retry), so the run would read new files after all. Phase 1 proves this against Dagster's real loader first.
+- **Testing focus:** atomic link switch, relative links that work on the host and in the container, refusing without touching files, cleanup that never deletes a folder a run still uses, a real e2e deploy during a held run.
+
+## Order of work
+
+```
+Phase 1 — Pin each Server run to its release folder
+        ↓  (independent of Phase 1; both feed Phase 3)
+Phase 2 — Add release folder layout check, switch and cleanup
+        ↓  (Phase 3 uses the module and the run tag)
+Phase 3 — Add a Server release command
+        ↓  (Phase 4 wires the command into the workflows)
+Phase 4 — Change deploys to switch release folders
+        ↓  (Phase 5 tests the whole deploy on a real Server)
+Phase 5 — Test a deploy during a held scheduled run
+```
+
+```mermaid
+graph TD
+  pin-run-to-release-folder["Pin each Server run to its release folder (pin-run-to-release-folder)"]
+  release-folders-adapter["Add release folder layout check, switch and cleanup (release-folders-adapter)"]
+  release-command["Add a Server release command (release-command)"]
+  deploy-workflows-use-release-folders["Change deploys to switch release folders (deploy-workflows-use-release-folders)"]
+  e2e-deploy-during-held-run["Test a deploy during a held scheduled run (e2e-deploy-during-held-run)"]
+  release-folders-adapter --> release-command
+  pin-run-to-release-folder --> release-command
+  release-command --> deploy-workflows-use-release-folders
+  deploy-workflows-use-release-folders --> e2e-deploy-during-held-run
+  pin-run-to-release-folder --> e2e-deploy-during-held-run
+```
+
+### Phase 1 — Pin each Server run to its release folder
+
+Technical ID: `pin-run-to-release-folder` · Server runtime · cross-cutting · small blast radius
+
+**Goal** — A Server run (scheduled or retried) resolves the Project path once when its run worker starts, records that resolved release folder on the run, and reads adops.yaml, pipelines/*.yaml, pipelines/accepted/, .env and the dbt tree only from that folder for its whole life, retries included, even if the 'current' link is switched while it runs. The deploy's own in-process `adops run` carries the same tag.
+
+**Why** — Later phases will switch a 'current' symlink (a file that points at another folder) to a new release folder while runs are still going. That is only safe if a run that already started keeps reading its old folder. Nobody has checked yet whether Dagster's run worker and its retries resolve the path once or again later, so this phase proves it first, against Dagster's real loader. It is one small slice across layers: the interface code location and run command plus one infrastructure run tag on both scheduled and in-process runs.
+
+**Changes**
+
+- In load_definitions, resolve ADOPS_PROJECT to its real path (following the 'current' symlink) exactly once and pass only that resolved folder into the run closure, so a RetryRequested retry of run(name) reuses it and never re-reads 'current'.
+- In the Pipeline op in dagster_server.py, add a run tag (for example adops/release = the resolved folder) at run start so other code can later tell which release folder a run in progress uses; keep Secrets out of tags as today.
+- Set the same adops/release tag on runs started by `adops run` through DagsterOrchestrator.execute_in_process (the deploy's own run, hand runs and Branch runs), holding the project folder run_command.py resolves once at start (run_command.py ~line 251), so every in-progress run on the Server's Dagster instance names its folder.
+- Add a unit test that loads `adops.interface.server:defs` through Dagster's real python_module loader with ADOPS_PROJECT pointing at a 'current' symlink to folder A, switches the symlink to folder B, executes the job with one forced retry, and asserts every file read and the run tag name folder A.
+- Add a unit test that a run worker started after the switch resolves folder B.
+- Keep 100% line+branch coverage with no new pragma.
+
+**Files / areas**
+
+- `src/adops/interface/server.py`
+- `src/adops/infrastructure/dagster_server.py`
+- `tests/unit/interface/test_server.py`
+- `tests/unit/infrastructure/test_dagster_server.py`
+- `src/adops/infrastructure/dagster_orchestrator.py`
+- `src/adops/interface/run_command.py`
+- `tests/unit/infrastructure/test_dagster_orchestrator.py`
+
+**How to verify**
+
+- **Project path resolved once, before the run closure** — `grep -n 'resolve\|realpath\|ADOPS_PROJECT' src/adops/interface/server.py` shows ADOPS_PROJECT read and resolved in load_definitions only, not inside the op/run body or the retry path
+- **Test goes through Dagster's real code-location loader** — `grep -n 'python_module\|load_definitions_from_module\|CodeLocationOrigin\|workspace' tests/unit/interface/test_server.py` shows the test uses Dagster's module loader
+- **Run is tagged with its resolved release folder** — `uv run pytest tests/unit/infrastructure/test_dagster_server.py -q` includes a test asserting the tag key and that its value equals the resolved folder A, not '/project/current'
+- **A worker started after the switch uses the new folder** — `uv run pytest tests/unit/interface/test_server.py -q` passes a test that loads defs after switching 'current' to B and asserts reads and tag name B
+
+**Done when** — A passing unit test that loads the Server code location through Dagster's real loader, switches 'current' mid-run, and shows the run and its retry read only the release folder resolved at run start and tag the run with it., and every check under *How to verify* passes its bar.
+
+**Depends on** — nothing — can start immediately
+
+**Guards**
+
+- g2: new branches in server.py and dagster_server.py covered by the new unit tests to 100% line+branch
+- g5: no pragma: no cover added
+- g6: no change to domain/application; Dagster stays in infrastructure, path resolution in interface
+
+<details><summary>Reference — full rubric</summary>
+
+| Dimension | Rule | Pass criteria | Failure examples | minScore |
+|---|---|---|---|---|
+| resolve-once-per-worker | load_definitions turns ADOPS_PROJECT into a real path (symlink followed) exactly once, and the run closure and its RetryRequested retries only ever receive that resolved folder, never the 'current' path. | `grep -n 'resolve\\|realpath\\|ADOPS_PROJECT' src/adops/interface/server.py` shows ADOPS_PROJECT read and resolved in load_definitions only, not inside the op/run body or the retry path<br>`uv run pytest tests/unit/interface/test_server.py -k retry -q` passes a test that switches 'current' from A to B between the first attempt and the forced retry and asserts the retry read adops.yaml from A<br>Nothing in server.py or dagster_server.py calls os.environ['ADOPS_PROJECT'] or Path.resolve() again at execution time (check with grep) | The retry calls run(name) which re-reads os.environ['ADOPS_PROJECT'] and resolves 'current' again, so attempt 2 reads folder B<br>The resolved path is computed but the closure captures the unresolved '/project/current' string (resolve() result assigned to a different variable)<br>A pipeline loader helper calls Path(project).resolve() lazily on each file read, so the first read pins A but .env is read from B | 8 |
+| real-loader-switch-test | The pinning test loads adops.interface.server:defs through Dagster's python_module loading path (not by calling load_definitions directly) with ADOPS_PROJECT pointing at a relative 'current' symlink, switches the link mid-run, and checks every file category. | `grep -n 'python_module\\|load_definitions_from_module\\|CodeLocationOrigin\\|workspace' tests/unit/interface/test_server.py` shows the test uses Dagster's module loader<br>The test asserts reads of adops.yaml, a pipelines/*.yaml, pipelines/accepted/, .env and the dbt tree all come from folder A (e.g. distinct marker content per folder)<br>`uv run pytest tests/unit/interface/test_server.py -q` passes, and temporarily changing the code to resolve inside the op makes the test fail (mutation check by hand) | Test calls load_definitions() directly, so a lazy re-resolve in Dagster's run worker would go unnoticed<br>Test only checks adops.yaml; .env is loaded by a separate dotenv call that still follows 'current'<br>Test switches the symlink before execution starts and asserts A, which passes only because both folders have identical contents | 8 |
+| release-run-tag | Every Pipeline run gets a run tag (e.g. adops/release) set at run start whose value is the resolved release folder path, and no Secret value appears in tags. | `uv run pytest tests/unit/infrastructure/test_dagster_server.py -q` includes a test asserting the tag key and that its value equals the resolved folder A, not '/project/current'<br>The tag key is a single named constant importable from dagster_server.py (`grep -n 'adops/release' src/adops`) so the cleanup reader in a later phase uses the same key<br>A test with a Secret in .env asserts no tag value contains that Secret | Tag value is the raw ADOPS_PROJECT string '/project/current', making every run look like it uses whatever is current at cleanup time<br>Tag is added only on scheduled runs, not on the in-process deploy run, so later cleanup can't see the deploy run's folder<br>Tag key string duplicated as a literal in two files and later drifts | 8 |
+| new-worker-sees-new-folder | Pinning is per run worker, not per process lifetime: a definitions load after the switch resolves folder B. | `uv run pytest tests/unit/interface/test_server.py -q` passes a test that loads defs after switching 'current' to B and asserts reads and tag name B<br>The resolved path is not cached at module import in a module-level global that survives a reload (check server.py for module-level resolve) | Resolution is memoised with functools.lru_cache at import, so a code-location reload after deploy still uses folder A forever<br>Test for B reuses the same Definitions object as the A test and passes vacuously because it never reloads | 8 |
+
+Healer hint: If the retry or a later file read sees folder B, find the second place that reads ADOPS_PROJECT or calls resolve() at execution time (often a dotenv or dbt-path helper) and thread the already-resolved folder through instead.
+
+</details>
+
+### Phase 2 — Add release folder layout check, switch and cleanup
+
+Technical ID: `release-folders-adapter` · Promotion · infrastructure · medium blast radius
+
+**Goal** — An infrastructure module that, inside a Server folder, tells the new layout (a releases/ folder plus a relative 'current' symlink into it) from the old one (Project files at the root) and a half-moved one; builds releases/<commit> by copying the validated checkout; links it to the shared .env and .adops/; switches 'current' atomically; and picks which old release folders to delete.
+
+**Why** — The deploy must stop changing files in the live Project folder. Instead each version goes into its own release folder and a symlink called 'current' is swapped in one atomic rename, so a run never sees half-old, half-new files. These are file-system and Git mechanics with no business vocabulary, so they are a plain infrastructure module, not a port.
+
+**Changes**
+
+- Add a layout check returning new, old or half-moved: new only when releases/ is a folder and 'current' is a relative symlink to an existing releases/<commit>; anything else is old or half-moved.
+- Add prepare_release(server_dir, checkout, commit): copy the validated checkout's files (everything except .git, .env and .adops) into releases/<commit>.tmp with no git call, because the Server image (python:3.12-slim) has no git; add relative symlinks .env -> ../../.env and .adops -> ../../.adops, then rename it to releases/<commit>; re-running for an existing commit is a no-op.
+- Add switch_current(server_dir, commit): create a relative symlink current.tmp -> releases/<commit> and rename it over 'current' (one atomic rename).
+- Add a pure helper choosing folders to delete: keep the newest 3 by creation time, the one 'current' points at, and every folder in a given in-use set; if any in-progress run has no recorded folder, delete nothing.
+- Unit-test every branch with real temporary folders (no Docker, no git).
+
+**Files / areas**
+
+- `src/adops/infrastructure/release_folders.py`
+- `tests/unit/infrastructure/test_release_folders.py`
+
+**How to verify**
+
+- **Layout check covers new, old and half-moved exactly** — `uv run pytest tests/unit/infrastructure/test_release_folders.py -k layout -v` has a case for each: fresh folder with Project files at root (old), releases/ present but no 'current' (half-moved), 'current' absolute symlink (not new), 'current' dangling to missing releases/<x> (not new), 'current' a real directory (not new), 'current' pointing outside releases/ (not new), proper layout (new)
+- **Release prepared in a temp folder, renamed once, re-run is a no-op** — `uv run pytest tests/unit/infrastructure/test_release_folders.py -k prepare -v` asserts: no .git/.env/.adops copied from the checkout; releases/<c>/.env is a symlink whose os.readlink text is '../../.env' (same for .adops); file contents match the checkout
+- **'current' switched by one rename of a relative link** — `grep -n 'unlink\|os.replace\|rename\|symlink' src/adops/infrastructure/release_folders.py` shows symlink to current.tmp followed by os.replace/rename, and no unlink of 'current'
+- **Cleanup keeps newest 3 by time, current and in-use; deletes nothing on unknown** — `uv run pytest tests/unit/infrastructure/test_release_folders.py -k cleanup -v` passes cases where commit names sort opposite to their times (e.g. 'fff' oldest, 'aaa' newest), proving ordering is by time not name
+
+**Done when** — src/adops/infrastructure/release_folders.py with unit tests covering layout detection, release preparation, atomic 'current' switch and cleanup selection at 100% line+branch., and every check under *How to verify* passes its bar.
+
+**Depends on** — nothing — can start immediately
+
+**Guards**
+
+- g2: new module fully covered by tests/unit/infrastructure/test_release_folders.py
+- g5: no pragma: no cover
+- g6: lives in infrastructure; domain/application untouched
+
+<details><summary>Reference — full rubric</summary>
+
+| Dimension | Rule | Pass criteria | Failure examples | minScore |
+|---|---|---|---|---|
+| layout-detection-exact | The layout check returns 'new' only when releases/ is a real directory and 'current' is a relative symlink resolving to an existing releases/<commit>; every other shape is classified old or half-moved, never new. | `uv run pytest tests/unit/infrastructure/test_release_folders.py -k layout -v` has a case for each: fresh folder with Project files at root (old), releases/ present but no 'current' (half-moved), 'current' absolute symlink (not new), 'current' dangling to missing releases/<x> (not new), 'current' a real directory (not new), 'current' pointing outside releases/ (not new), proper layout (new)<br>The check uses os.readlink to inspect the link text, not only Path.resolve(), so absolute targets are detected | An absolute 'current' -> /project/releases/abc is accepted as new; it resolves in the container but dangles on the host<br>'current' as a plain directory is treated as new because Path.is_dir() follows it<br>Dangling 'current' passes because the check only tests is_symlink() | 8 |
+| prepare-release-atomic-idempotent | prepare_release copies the checkout (excluding .git, .env, .adops) into releases/<commit>.tmp, adds relative .env and .adops links, renames to releases/<commit>, uses no git, and re-running for an existing commit changes nothing. | `uv run pytest tests/unit/infrastructure/test_release_folders.py -k prepare -v` asserts: no .git/.env/.adops copied from the checkout; releases/<c>/.env is a symlink whose os.readlink text is '../../.env' (same for .adops); file contents match the checkout<br>A test runs prepare twice and asserts mtime/inode of releases/<c> unchanged on the second call<br>A test with a leftover releases/<c>.tmp from a crashed run shows prepare still succeeds (stale tmp removed or replaced)<br>`grep -n 'subprocess\\|git' src/adops/infrastructure/release_folders.py` shows no git invocation | Copy goes straight into releases/<commit>, so a crash leaves a half-copied folder that the idempotent check then treats as complete<br>A stale releases/<c>.tmp from a previous failure makes copytree raise FileExistsError on every later deploy<br>Links written as absolute paths to the host Server folder, which do not exist inside the container<br>copytree follows a symlink in the checkout and copies a huge target, or the ignore pattern skips nested dirs named .adops inside dbt | 8 |
+| switch-current-atomic | switch_current creates current.tmp as a relative symlink to releases/<commit> and os.replace()s it over 'current'; there is never a moment when 'current' is missing. | `grep -n 'unlink\\|os.replace\\|rename\\|symlink' src/adops/infrastructure/release_folders.py` shows symlink to current.tmp followed by os.replace/rename, and no unlink of 'current'<br>`uv run pytest tests/unit/infrastructure/test_release_folders.py -k switch -v` asserts os.readlink('current') == 'releases/<commit>' (relative) after switch, and that a leftover current.tmp is handled<br>A test switching to a commit with no releases/<commit> raises without changing 'current' | unlink('current') then symlink(...): a run starting between the two calls finds no Project<br>os.rename on a directory symlink with Path.rename to a target that is a dir-link: on some platforms it moves into the directory instead of replacing; must use os.replace on the link itself<br>Leftover current.tmp from a crash makes os.symlink raise FileExistsError forever | 9 |
+| cleanup-selection-safe | The pure selection helper returns folders to delete excluding the newest 3 by creation time, the current target, and every in-use folder; if any in-progress run lacks a recorded folder it returns nothing; it ignores *.tmp and non-directories. | `uv run pytest tests/unit/infrastructure/test_release_folders.py -k cleanup -v` passes cases where commit names sort opposite to their times (e.g. 'fff' oldest, 'aaa' newest), proving ordering is by time not name<br>A case where the in-use folder is the 5th newest of 6 (so keep-newest-3 cannot be what saves it) asserts it is kept<br>A case where current points at an old folder asserts it is kept<br>A case with an untagged in-progress run asserts an empty delete list<br>releases/<c>.tmp and 'current' itself are never returned | Sorting by folder name (commit SHA) instead of time, deleting the newest release<br>Test for in-use protection passes only because the in-use folder is among the newest 3<br>In-use set compared as resolved absolute paths while folders are listed as names, so nothing matches and the in-use folder is deleted<br>The untagged-run flag is ignored when the in-use set is non-empty | 9 |
+
+Healer hint: Most likely miss is a non-atomic or absolute link (unlink+symlink, or os.symlink with an absolute target); fix by always writing relative targets to a .tmp name and os.replace()-ing over the final name, and add a test that reads os.readlink text.
+
+</details>
+
+### Phase 3 — Add a Server release command
+
+Technical ID: `release-command` · Promotion · interface · medium blast radius
+
+**Goal** — A CLI command, run on the Server host by the deploy, that stops with a clear message on the old or half-moved layout before changing any file, otherwise prepares releases/<commit>, switches 'current', and deletes old release folders except the newest 3, the current one and any folder a run in progress still uses. It also refuses, without changing files, when the new commit changes the top-level Server config (docker-compose.yml, server/*.yaml).
+
+**Why** — The deploy workflows need one command to call instead of `git fetch`/`git checkout` into live files. Telling which folders are still in use needs the Dagster instance (the store of run records), which belongs in the interface/infrastructure edge, following the existing server-recover command pattern. The manual move steps for existing Servers land in the same phase as the stop message that points at them, so the message never names a missing section.
+
+**Changes**
+
+- Add in_use_release_folders(instance) in dagster_server.py: read runs with IN_PROGRESS statuses (a run waiting for a retry stays STARTED, so it counts) and return the release folders named by their adops/release tags; a tag pointing outside <Server folder>/releases/ (for example a Branch run from a PR checkout) protects nothing and is ignored; an in-progress run with no tag at all (started before the upgrade) sets a flag that makes cleanup delete nothing.
+- Add `adops server-release --server-dir DIR --from CHECKOUT --commit SHA` in release_command.py: run the layout check first; on old or half-moved layout print a message naming the one-time move section of docs/playbooks/promotion.md and exit non-zero without touching any file.
+- Before preparing a release, compare the new checkout's docker-compose.yml and server/*.yaml with the live top-level copies in the Server folder; if any differ, print which file changed and the promotion.md section for updating Server config by hand, and exit non-zero without changing any file.
+- On the new layout call prepare_release, switch_current, then delete the folders chosen by the cleanup helper using the in-use set; print which folder is now current and which were deleted.
+- Register the command in cli.py and unit-test it with a fake DagsterInstance and temporary folders.
+- Add a migration section to promotion.md whose heading matches the anchor in the server-release stop message: confirm no run in progress, export the current commit into releases/<commit>, keep .env, .adops/, server/ and docker-compose.yml at the root, create the relative 'current' symlink, update ADOPS_PROJECT, and check with the next deploy. The section also gives the manual step for updating top-level Server config (docker-compose.yml, server/*.yaml).
+- In promotion.md, state that a run in progress from before the upgrade (no tag) pauses cleanup until it finishes, and that Branch runs do not hold release folders.
+
+**Files / areas**
+
+- `src/adops/interface/release_command.py`
+- `src/adops/interface/cli.py`
+- `src/adops/infrastructure/dagster_server.py`
+- `tests/unit/interface/test_release_command.py`
+- `docs/playbooks/promotion.md`
+
+**How to verify**
+
+- **Refusals change no file** — `uv run pytest tests/unit/interface/test_release_command.py -v` has refusal tests (old layout, half-moved, changed docker-compose.yml, changed server/x.yaml, added or removed server/*.yaml) that snapshot the whole Server folder tree (paths, link targets, file hashes) before and after and assert equality
+- **In-use folders read from Dagster in-progress runs** — `grep -n 'IN_PROGRESS_RUN_STATUSES\|RunsFilter' src/adops/infrastructure/dagster_server.py` shows Dagster's in-progress status set used, not a hand-picked subset
+- **Prepare, switch, then clean up, and report** — `uv run pytest tests/unit/interface/test_release_command.py -v` shows a run with 5 existing releases leaves newest 3 + current + in-use and prints deleted names
+- **Stop messages point at real promotion.md sections** — A unit test reads docs/playbooks/promotion.md and asserts the heading/anchor text used in each stop message is present (`uv run pytest tests/unit/interface/test_release_command.py -k anchor`)
+
+**Done when** — A working `adops server-release` command with unit tests proving it refuses the old layout without changing files, switches 'current', and never deletes a folder a run in progress uses., and every check under *How to verify* passes its bar.
+
+**Depends on** — Add release folder layout check, switch and cleanup, Pin each Server run to its release folder
+
+**Guards**
+
+- g2: command and in_use_release_folders covered 100% by unit tests with a fake instance
+- g5: no pragma: no cover
+- g6: Dagster and typer stay in infrastructure/interface
+
+<details><summary>Reference — full rubric</summary>
+
+| Dimension | Rule | Pass criteria | Failure examples | minScore |
+|---|---|---|---|---|
+| refuse-without-touching | On old or half-moved layout, and when docker-compose.yml or any server/*.yaml in the checkout differ from the live top-level copies, server-release exits non-zero before creating, renaming or deleting anything. | `uv run pytest tests/unit/interface/test_release_command.py -v` has refusal tests (old layout, half-moved, changed docker-compose.yml, changed server/x.yaml, added or removed server/*.yaml) that snapshot the whole Server folder tree (paths, link targets, file hashes) before and after and assert equality<br>Each refusal test asserts a non-zero exit code and output naming the changed file (for config) and the promotion.md section<br>The config comparison runs before prepare_release (no releases/<c> or .tmp exists after a config refusal) | Config diff checked after prepare_release, so a refused deploy leaves releases/<new> behind<br>Only files present in the checkout are compared; a server/*.yaml deleted in the new commit is not seen as a change<br>Refusal prints the message but exits 0, so the workflow carries on to reload and run | 9 |
+| in-use-from-instance | in_use_release_folders reads runs with all IN_PROGRESS statuses (including STARTED runs waiting on a retry, and in-process deploy runs) and returns their release tags plus a flag when any such run has no tag. | `grep -n 'IN_PROGRESS_RUN_STATUSES\\|RunsFilter' src/adops/infrastructure/dagster_server.py` shows Dagster's in-progress status set used, not a hand-picked subset<br>`uv run pytest tests/unit/interface/test_release_command.py -v` uses a fake DagsterInstance with a STARTED run, a QUEUED/STARTING run, a SUCCESS run and an untagged STARTED run, and asserts only in-progress tags are returned and the untagged flag set<br>Tag key used is the same constant set by the run-tagging code (grep shows one definition) | Filters only STARTED, so a QUEUED or STARTING run whose worker already resolved its folder is ignored<br>Tag values are absolute container paths (/project/releases/abc) but cleanup compares against bare names, so nothing is protected<br>Untagged runs from before the upgrade are silently skipped, and their folder is deleted | 8 |
+| happy-path-order | On the new layout the command prepares releases/<commit>, switches 'current', and only then deletes the chosen folders, printing the new current folder and each deleted folder; re-running for the same commit is safe. | `uv run pytest tests/unit/interface/test_release_command.py -v` shows a run with 5 existing releases leaves newest 3 + current + in-use and prints deleted names<br>A test running the command twice with the same --commit asserts success both times and unchanged 'current'<br>A test where the current-before-switch folder is in use by a run asserts it is kept after the switch<br>`uv run adops server-release --help` lists --server-dir, --from and --commit | Cleanup runs before the switch and counts the previous 'current' as current, then deletes it after the switch when it falls out of the newest 3<br>A second deploy of the same commit fails because releases/<c> already exists<br>Cleanup deletes via shutil.rmtree following the .adops symlink inside the release and wipes shared state | 8 |
+| stop-message-anchor-exists | Every section the command's messages name exists as a heading in docs/playbooks/promotion.md, and that section contains the manual move and config-update steps. | A unit test reads docs/playbooks/promotion.md and asserts the heading/anchor text used in each stop message is present (`uv run pytest tests/unit/interface/test_release_command.py -k anchor`)<br>`grep -n 'releases/' docs/playbooks/promotion.md` shows the move steps: relative 'current' link creation (e.g. `ln -s releases/<commit> current`), ADOPS_PROJECT update, .env/.adops/server/docker-compose.yml kept at root | Message names '#one-time-move' but the heading renders as '#one-time-move-to-release-folders'<br>Manual steps say `ln -s $PWD/releases/<commit> current`, creating an absolute link the layout check then rejects | 8 |
+
+Healer hint: Most likely the config-diff or layout refusal runs after something has already been written, or misses a deleted server/*.yaml; move all checks to the top of the command and assert with a before/after tree snapshot.
+
+</details>
+
+### Phase 4 — Change deploys to switch release folders
+
+Technical ID: `deploy-workflows-use-release-folders` · Promotion · interface · medium blast radius
+
+**Goal** — The generated adops-stage.yml and adops-prod.yml validate, call `adops server-release` for the commit, reload the code location `adops.interface.server:defs`, and run `adops run --all --env <env> --project /project/current`, never running git fetch/checkout into live files and never compose up/down/restart/stop/start; the Server runs from /project/current.
+
+**Why** — This is where the safe switch reaches users: the workflows on the Server's self-hosted runner are what deploys. The bind mount, compose project directory and compose project name stay the Server folder, so Dagster run history and demo data volumes survive, and only the 'current' link inside the mount changes.
+
+**Changes**
+
+- Replace the folder-update step (git fetch/checkout) in both workflows with a `docker compose --project-directory "$ADOPS_SERVER_DIR" run dagster_daemon adops server-release --from /checkout ...` step that mounts the validated $GITHUB_WORKSPACE read-only at /checkout (never over /project); keep validate first and reload after the switch.
+- Point the deploy's own run at /project/current so it resolves the new release once; keep per-Pipeline Warehouse locking (`run --all` behaviour unchanged).
+- Set ADOPS_PROJECT: /project/current in both plain and demo docker-compose.yml; keep `./:/project`, DAGSTER_HOME /project/server and the compose project directory unchanged.
+- Rewrite the DEPLOY_WORKFLOWS tests by parsing the generated YAML: order validate < server-release < reload < run, no git fetch/checkout into the Server folder, no compose up/down/restart/stop/start, same mount and project directory, $GITHUB_WORKSPACE mounted read-only at /checkout for server-release; replace the real-git folder-update script test with one that shows the switch keeps .env and .adops.
+- Update the e2e Server fixture to lay the demo Project out as releases/<commit> plus 'current' so the existing Server e2e cases stay green.
+- Update the workflow comment headers to describe the new deploy steps.
+- Update promotion.md's 'What the workflows do' table, 'After a deploy' and Recorded trials (deploy during a run in progress is now covered) for the switch and cleanup (newest 3 plus in use), with a disk-size note.
+- Add a check to run-stage-and-prod-on-a-mac.md that the 'current' switch is seen inside the container on OrbStack/Docker Desktop.
+- Add a dated clarification to ADR-0016 describing the release-folder deploy flow.
+
+**Files / areas**
+
+- `src/adops/templates/github/workflows/adops-stage.yml`
+- `src/adops/templates/github/workflows/adops-prod.yml`
+- `src/adops/templates/demo/docker-compose.yml`
+- `src/adops/templates/plain/docker-compose.yml`
+- `tests/unit/interface/test_init_command.py`
+- `tests/e2e/conftest.py`
+- `docs/playbooks/run-stage-and-prod-on-a-mac.md`
+- `docs/adr/0016-promotion-runs-on-a-self-hosted-runner-per-server.md`
+- `docs/playbooks/promotion.md`
+
+**How to verify**
+
+- **Deploy steps in the right order with no live git or compose restart** — `uv run pytest tests/unit/interface/test_init_command.py -v` includes YAML-parsing tests (yaml.safe_load of the generated files) asserting index(validate) < index(server-release) < index(reload) < index(run) for both workflows
+- **Validated checkout mounted read-only at /checkout, never over /project** — A YAML-parsing test in tests/unit/interface/test_init_command.py asserts the step contains `-v "$GITHUB_WORKSPACE":/checkout:ro` (or equivalent `:ro`), `--project-directory "$ADOPS_SERVER_DIR"`, `--from /checkout` and the commit variable
+- **Mount, project dir and compose project name unchanged** — A test parses both src/adops/templates/plain/docker-compose.yml and src/adops/templates/demo/docker-compose.yml and asserts ADOPS_PROJECT == '/project/current' and the `./:/project` volume and DAGSTER_HOME are present on every service that had them
+- **Replacement script test shows .env and .adops survive a switch** — `grep -n 'git fetch\|git checkout' tests/unit/interface/test_init_command.py` finds no remaining old-flow assertions
+- **e2e Server fixture uses releases/<commit> plus current** — `grep -n 'releases\|current' tests/e2e/conftest.py` shows the fixture builds the new layout with a relative link (os.symlink('releases/<c>', ...))
+
+**Done when** — Generated stage and prod deploy workflows that switch release folders, verified by rewritten YAML-parsing unit tests in tests/unit/interface/test_init_command.py., and every check under *How to verify* passes its bar.
+
+**Depends on** — Add a Server release command
+
+**Guards**
+
+- g7: every changed workflow step asserted by parsing the generated YAML in test_init_command.py
+- g3: no new template file; plain and demo compose change together and still ship in the wheel
+- g4: e2e Server fixture moved to the new layout so the existing e2e job stays green within 20 minutes
+- g2: no new src/adops Python code beyond templates
+
+<details><summary>Reference — full rubric</summary>
+
+| Dimension | Rule | Pass criteria | Failure examples | minScore |
+|---|---|---|---|---|
+| workflow-steps-and-forbidden-commands | Both generated adops-stage.yml and adops-prod.yml run validate, then server-release, then the code-location reload, then `adops run --all --env <env> --project /project/current`, with no git fetch/checkout aimed at the Server folder and no compose up/down/restart/stop/start. | `uv run pytest tests/unit/interface/test_init_command.py -v` includes YAML-parsing tests (yaml.safe_load of the generated files) asserting index(validate) < index(server-release) < index(reload) < index(run) for both workflows<br>The same tests assert no step's `run` text contains 'git fetch', 'git checkout' against $ADOPS_SERVER_DIR, or `docker compose` with up/down/restart/stop/start<br>The run step contains `--project /project/current` and `--env stage` / `--env prod` respectively | Tests use substring search on the raw template text, so a forbidden command in a comment or a templated variable slips through or falsely fails<br>stage workflow updated but prod still has the old git checkout step<br>The run step still uses the default project path, so the deploy's own run reads the root of the mount | 9 |
+| checkout-mount-read-only | The server-release step runs inside the daemon service via `docker compose --project-directory "$ADOPS_SERVER_DIR" run` with $GITHUB_WORKSPACE mounted at /checkout:ro, and passes --from /checkout and the commit SHA. | A YAML-parsing test in tests/unit/interface/test_init_command.py asserts the step contains `-v "$GITHUB_WORKSPACE":/checkout:ro` (or equivalent `:ro`), `--project-directory "$ADOPS_SERVER_DIR"`, `--from /checkout` and the commit variable<br>No mount in the step targets /project | Mount lacks :ro, so a bug in prepare could write into the runner's checkout<br>`docker compose run` without --rm leaves a stopped container per deploy, filling disk<br>--commit uses ${{ github.sha }} in the prod workflow where the release tag's commit is a different ref | 8 |
+| compose-identity-unchanged | Plain and demo docker-compose.yml set ADOPS_PROJECT=/project/current while keeping `./:/project`, DAGSTER_HOME=/project/server and no new `name:`, so volumes and run history survive. | A test parses both src/adops/templates/plain/docker-compose.yml and src/adops/templates/demo/docker-compose.yml and asserts ADOPS_PROJECT == '/project/current' and the `./:/project` volume and DAGSTER_HOME are present on every service that had them<br>`git diff src/adops/templates/*/docker-compose.yml` shows no change to volume names, top-level `name:` or service names<br>`uv build && unzip -l dist/*.whl \| grep docker-compose.yml` shows both templates ship (g3) | Only the daemon service gets ADOPS_PROJECT=/project/current; the webserver/code-server still loads from /project and shows stale definitions<br>workspace.yaml working_directory changed to /project/current, which re-resolves lazily against the plan's decision<br>Demo compose updated, plain forgotten | 8 |
+| switch-keeps-shared-state | The old real-git folder-update test is replaced by one that performs a release switch on real temporary folders and shows the shared .env and .adops/ contents are reachable from the new current and unchanged. | `grep -n 'git fetch\\|git checkout' tests/unit/interface/test_init_command.py` finds no remaining old-flow assertions<br>`uv run pytest tests/unit/interface/test_init_command.py -k 'keeps or shared' -v` passes a test that writes a cursor file into .adops/ and a secret into .env, switches to a new release, and reads both through current/.adops and current/.env | Test checks only that current/.env exists, which passes even if the release copied a stale .env from the checkout<br>Old git-script test deleted with no replacement | 8 |
+| e2e-fixture-new-layout | tests/e2e/conftest.py lays the demo Project out as releases/<commit> with a relative 'current' link and shared root .env/.adops, and the existing e2e Server cases stay green. | `grep -n 'releases\\|current' tests/e2e/conftest.py` shows the fixture builds the new layout with a relative link (os.symlink('releases/<c>', ...))<br>`uv run pytest tests/e2e -m e2e` passes within the 20-minute budget (g4)<br>`grep -n 'current' docs/playbooks/run-stage-and-prod-on-a-mac.md` shows a check command that runs `readlink`/`ls` on /project/current inside the container after a switch | Fixture creates an absolute symlink using the host tmp path, which works on Linux CI with identical paths but dangles inside the container<br>Fixture keeps files at the root too, so tests pass even if ADOPS_PROJECT still points at /project | 8 |
+
+Healer hint: Most likely failure is an absolute symlink or missing ADOPS_PROJECT on one compose service making e2e read the wrong folder; build links with relative targets and set ADOPS_PROJECT on every service in both plain and demo templates, then re-run the YAML-parsing tests.
+
+</details>
+
+### Phase 5 — Test a deploy during a held scheduled run
+
+Technical ID: `e2e-deploy-during-held-run` · Server runtime · cross-cutting · small blast radius
+
+**Goal** — One e2e case proves that a scheduled stage run held on the Warehouse lock finishes on the old release's files and saves the old Step Fingerprint, while the next run uses the new release, and that the held run's folder is not deleted.
+
+**Why** — Unit tests prove the parts; only a real Server container shows the whole deploy is safe while a run is in progress, which promotion.md lists as untried. It reuses the existing lock-holding fixtures and the session-scoped Server image so it fits the 20-minute e2e job.
+
+**Changes**
+
+- Build the Server folder in the new layout with commit A as 'current' and at least 3 newer dummy release folders, so commit A's folder can survive cleanup only because the held run uses it; prepare commit B changing one Pipeline.
+- Hold the stage Warehouse lock with held_postgres_lock/held_duckdb_lock, let a scheduled run start and wait, then run the deploy steps (server-release for commit B and the code reload).
+- Release the lock and assert the held run's Run Log and saved stage Step Fingerprint match commit A, releases/<A> still exists, and the next run uses commit B.
+- Reuse the session-scoped server_image fixture; build no second image and use no remote Git.
+
+**Files / areas**
+
+- `tests/e2e/test_server.py`
+- `tests/e2e/conftest.py`
+
+**How to verify**
+
+- **Held run completes on commit A's files and fingerprint** — `uv run pytest tests/e2e/test_server.py -m e2e -k held -v` passes
+- **Cleanup really had to spare the held folder** — The test creates ≥3 dummy release folders with creation/mtime later than A (set explicitly with os.utime or ordered creation) before deploy
+- **The next run uses commit B** — The test triggers or waits for a run after the held one and asserts its adops/release tag names releases/<B> and its Run Log shows B's marker
+- **Reuses shared fixtures and stays within the e2e job** — `grep -n 'server_image\|held_postgres_lock\|held_duckdb_lock' tests/e2e/test_server.py` shows the new test uses them; `grep -n 'docker build\|git clone\|git push' tests/e2e/test_server.py` finds nothing new
+
+**Done when** — A passing e2e test in tests/e2e/test_server.py showing a held scheduled run finishes on the old release folder while the next run uses the new one., and every check under *How to verify* passes its bar.
+
+**Depends on** — Change deploys to switch release folders, Pin each Server run to its release folder
+
+**Guards**
+
+- g4: reuses session-scoped server_image and existing lock fixtures; one added case measured to keep the e2e job under 20 minutes
+
+<details><summary>Reference — full rubric</summary>
+
+| Dimension | Rule | Pass criteria | Failure examples | minScore |
+|---|---|---|---|---|
+| held-run-finishes-on-old | A scheduled stage run that started and is waiting on the held Warehouse lock, when released after commit B is deployed, finishes using commit A's Pipeline definition and saves commit A's Step Fingerprint. | `uv run pytest tests/e2e/test_server.py -m e2e -k held -v` passes<br>The test asserts the held run's Run Log contains a marker unique to commit A's changed Pipeline and the saved stage Step Fingerprint equals the fingerprint computed from commit A's Step, not B's<br>The test asserts the held run's adops/release tag names releases/<A><br>The test confirms the run had actually STARTED (resolved its folder) before the deploy, e.g. by polling run status before calling server-release | The run is still QUEUED when the deploy happens, so it legitimately starts on B and the test asserts nothing about pinning<br>Commit A and B differ only in a comment, so fingerprints are equal and the assertion is vacuous<br>The lock is released before server-release finishes, so the run completes before the switch | 8 |
+| held-folder-survives-cleanup | At deploy time at least 3 release folders newer than A exist, so releases/<A> survives only because the held run uses it, and it still exists after the deploy. | The test creates ≥3 dummy release folders with creation/mtime later than A (set explicitly with os.utime or ordered creation) before deploy<br>After server-release, the test asserts releases/<A> exists and at least one other old dummy folder was deleted (proving cleanup ran)<br>`grep -n 'utime\\|releases' tests/e2e/test_server.py tests/e2e/conftest.py` shows the folder timing set up | Only 1 or 2 newer folders exist, so keep-newest-3 saves A and the in-use path is never exercised<br>Dummy folders are named so they sort after A but created before it; cleanup sorts by time and A is newest anyway<br>Cleanup never ran (deletes nothing) because an untagged run existed, and the test passes for the wrong reason | 9 |
+| next-run-uses-new | A run started after the deploy uses releases/<B>: its tag names B and its Run Log or fingerprint reflects B's change. | The test triggers or waits for a run after the held one and asserts its adops/release tag names releases/<B> and its Run Log shows B's marker<br>The test asserts /project/current inside the container reads `releases/<B>` (docker exec readlink) | The code location is not reloaded, so the next run still uses A's definitions and the test only checks the tag<br>Test reads the link from the host only, missing a container-side mismatch | 8 |
+| fits-e2e-budget | The case uses the session-scoped server_image and held_postgres_lock/held_duckdb_lock fixtures, builds no new image, uses no remote Git, and the full e2e job still finishes inside 20 minutes. | `grep -n 'server_image\\|held_postgres_lock\\|held_duckdb_lock' tests/e2e/test_server.py` shows the new test uses them; `grep -n 'docker build\\|git clone\\|git push' tests/e2e/test_server.py` finds nothing new<br>`uv run pytest tests/e2e -m e2e --durations=10` shows the new case's time and the total under 20 minutes<br>Waits use bounded polling with a timeout, not fixed long sleeps | Test waits on the real 300 s retry backoff, adding 5+ minutes<br>A fixed time.sleep(60) to 'let the schedule tick' instead of polling run status<br>The new case rebuilds the image with a different tag for commit B | 8 |
+
+Healer hint: Most likely the deploy happens before the scheduled run has actually started (still QUEUED), making the test vacuous or flaky; poll the Dagster run status until STARTED with the lock held before calling server-release.
+
+</details>
+
+## Discovery Findings
+
+| Area | Finding | File | Implication |
+|---|---|---|---|
+| server runtime: containers and mount | Both dagster_daemon and dagster_webserver (YAML anchor *server, profile server) bind-mount `./:/project` from the compose project directory, with DAGSTER_HOME=/project/server and ADOPS_PROJECT=/project. The deploy's validate, `adops run --all` and chown steps are also `docker compose --project-directory "$ADOPS_SERVER_DIR" run dagster_daemon` containers using that same mount. | src/adops/templates/demo/docker-compose.yml | ADOPS_SERVER_DIR is both the compose project directory and the bind-mount source. The plain template (src/adops/templates/plain/docker-compose.yml) is identical here, so both must change together. |
+| server runtime: run launcher and code loading | server/dagster.yaml sets QueuedRunCoordinator with max_concurrent_runs: 1 and no run_launcher, so the DefaultRunLauncher is used. workspace.yaml loads python_module adops.interface.server:defs with working_directory /project, so each run worker imports defs from disk when it starts (load_definitions runs validate_project and reads adops.yaml and every pipelines/*.yaml). | src/adops/interface/server.py | A run that starts after a checkout fully uses the new version. Only reads made while a run is in progress can mix versions, and the plan must target those. |
+| server runtime: when files are read during a run | The op calls run_in_environment (interface/run_command.py:407). That reads adops.yaml, pipelines/<name>.yaml and .env first (line 419), then waits up to 30 min for the Warehouse lock (line 441). Inside the lock it reads pipelines/accepted/ (load_project_records, line 438), and for stage it reads the dbt tree to compute fingerprints when the plan is built (_saving_fingerprints, run_pipeline.py:645). dbtRunner then reads /project/<step.project> only when the Transform Step runs (dbt_transform.py:136). | src/adops/interface/run_command.py | A checkout during a run can give one run old Pipeline YAML with new records or dbt, and save a stage fingerprint of tree A while dbt ran tree B. Saved Step Fingerprints become wrong, which breaks both Branch deferral and any 'rerun only Changed Steps' design. |
+| server runtime: retries re-read files | On a retryable failure the op raises RetryRequested (3 retries, 300 s apart) and re-runs run(name), which re-reads every Project file. | src/adops/infrastructure/dagster_server.py | One Dagster run can last 15+ minutes across retries and see different versions. Any idle wait must count a run waiting for a retry as busy (its status stays STARTED). |
+| conflict: symlink or new-folder switch needs a container restart | The bind-mount source `./` is resolved when the container is created, so repointing ADOPS_SERVER_DIR or a symlink to it does not change what running daemon/webserver containers see. ADR-0014 (clarification 2026-11-21) and promotion.md reject restarting the Server because it kills runs in progress, and the unit test test_deploys_reload_the_server_without_restarting_its_containers forbids compose up/down/restart/stop/start. | docs/adr/0014-schedules-run-on-a-pull-based-server.md | A 'new folder and switch' design must switch inside the stable mount, for example /project/current -> releases/<sha> with a relative symlink and workspace.yaml working_directory pointing there. Otherwise it must restart only when idle, which needs an ADR-0014 amendment and a changed unit test. |
+| conflict: the compose project name comes from the folder name | Neither compose template sets a top-level `name:`, so the compose project name (and with it the named volumes dagster_meta_data, warehouse_data and shop_data, and the container names) comes from the basename of ADOPS_SERVER_DIR. | src/adops/templates/plain/docker-compose.yml | Running compose from a new per-version folder would create a new compose project with empty Dagster run history and empty demo databases. The plan must keep a stable compose project directory, or pin `name:` or `-p`. |
+| needs: persisted state location shared across versions | present. Git-ignored state sits in the Project folder: .env; .adops/dlt/<env> (dlt state and Incremental cursors, dlt_sync.py:78); DuckDB Warehouse files and their .lock files (.adops/warehouse_*.duckdb, warehouse_lock.py:56); Run Logs at .adops/logs/<env> (run_log_store.py:9); Dagster compute logs at .adops/dagster/compute_logs. Dagster run, schedule and event storage is Postgres in the dagster_meta volume, and the trial notes in promotion.md mention root-owned files Dagster writes into server/logs. | src/adops/templates/demo/gitignore | Every version folder must share .env and .adops/, by symlink or by mounting the shared .adops over it. server/ is tracked in Git (workspace.yaml, dagster.yaml) but gets runtime files written into it, so where DAGSTER_HOME points needs a decision. |
+| precedent: running from a separate checkout that shares .adops | The validate step and the pull-request workflow already run adops from $GITHUB_WORKSPACE, mounted at /project, with `-v "$ADOPS_SERVER_DIR/.adops:/project/.adops"`, and the Branch run (`adops run --all --branch`) executes from that fresh checkout. | src/adops/templates/github/workflows/adops-pull-request.yml | The deploy's own stage/prod run could run from the validated checkout with the shared .adops and .env, without touching the live folder. Only the Server's scheduled runs then need the switch. |
+| needs: a way to query in-progress runs | present. dagster_server.py defines IN_PROGRESS (QUEUED, NOT_STARTED, STARTING, STARTED) and STALE; the schedule's evaluate calls instance.get_runs(RunsFilter(...)), and clear_stale_runs and recover_command.py open DagsterInstance.get() from the daemon container. The only GraphQL use is the reloadRepositoryLocation curl in the workflows. | src/adops/infrastructure/dagster_server.py | An `adops server-idle`/wait command can follow the server-recover pattern: an interface command that calls an infrastructure function. It must stay out of domain/application (guard g6) and be fully covered by unit tests (guard g2). |
+| deploy runs show up as Dagster runs | The deploy's `adops run` uses DagsterOrchestrator.execute_in_process against DagsterInstance.get(). In demo that instance is the root dagster.yaml (via _dagster_environ); in plain it is DAGSTER_HOME=/project/server. Both point at the same Postgres, with job name = Pipeline name, and the run bypasses the QueuedRunCoordinator. | src/adops/infrastructure/dagster_orchestrator.py | An idle check by status would also see the deploy's own in-process runs, and those runs do not take the single run slot. Only the per-Pipeline Warehouse lock keeps them apart from scheduled runs. |
+| needs: stopping scheduled launches during the switch without killing runs | unknown. No code pauses Schedules or the QueuedRunCoordinator. Schedules are default_status RUNNING, and clear_stale_runs' docstring says runs execute only inside the daemon container (the DefaultRunLauncher's run workers are subprocesses there), so stopping the daemon container kills runs in progress. | src/adops/infrastructure/dagster_server.py | Without a pause, 'wait for idle' has a race: a Schedule tick or a queued run can launch between the idle check and the checkout. The plan must close it by switching atomically (a symlink rename), by pausing Schedules over GraphQL or the instance (not yet verified against Dagster 1.13), or by reading files only inside the lock. |
+| needs: Warehouse lock usable as an idle barrier | present, but not enough on its own. warehouse_lock is a Postgres session advisory lock (fixed key) or flock on <duckdb>.lock, waiting up to 30 min. It is taken per Pipeline run in _holding_lock after adops.yaml, the Pipeline YAML and .env are read and before records, the plan and fingerprints. `run --all` takes it once per Pipeline, and Branch runs and drop-branch share stage's lock. | src/adops/infrastructure/warehouse_lock.py | A deploy holding the lock during checkout still leaves a waiting run with old Pipeline text and new dbt/records. To reuse the lock, move all Project file reads (including run-worker defs) inside it. Even then, a run that is between two of its Steps does not hold a lock the deploy can see. |
+| needs: Step Fingerprints saved in stage | present. saves_stage_fingerprint(env) is true only for "stage". FingerprintSavingStep saves each Step's fingerprint to <stage warehouse>.adops._adops_step_fingerprints right after that Step (Checks included) passes. A fingerprint is sha256 of the canonical Step JSON, plus the dbt project tree for a Transform (minus target/logs/dbt_packages/.adops/*.pyc). | src/adops/domain/branch_environment.py | 'Stage reruns only Changed Steps' can compare current_fingerprints(new version) with WarehouseFingerprintStore.load(pipeline) from stage, and reuse first_changed_step. Stage must still save fingerprints for the Steps it reruns. |
+| needs: Step Fingerprints in prod | missing. Prod never saves fingerprints (saves_stage_fingerprint is stage only), and the store is only ever built for STAGE or the deploy Environment, with no prod comparison path. | src/adops/application/run_pipeline.py | For prod to rerun only Changed Steps, prod must start saving its own fingerprints in prod's Warehouse adops schema. The first prod deploy, with no rows, must run everything; Branch runs keep reading stage only. |
+| Changed Steps semantics: first changed Step onward | first_changed_step returns the index of the first Step whose (name, fingerprint) pair differs in Step order. A Branch run reruns every Step from that index on (steps[first:]) and defers the earlier ones (StepStatus.DEFERRED); there is no dependency graph. plan_branch_run raises StageNotRunError when stage has no rows. | src/adops/domain/branch_environment.py | Stage can reuse run_pipeline's existing `first` slicing, but with stage's default schemas instead of a Branch's; read_layout is Branch-only. It needs an output wording other than 'deferred to stage' and a choice for an unchanged Pipeline (skip it, or record a 'nothing changed' Run Log). |
+| conflict: stale fingerprint rows and ordering | _save upserts by (pipeline, step) with saved_order = max+1 and never deletes rows. A removed or renamed Step keeps its old low saved_order, so load() returns it first and every later comparison differs at index 0. | src/adops/infrastructure/step_fingerprint_store.py | Once a Step is removed, a 'stage reruns only Changed Steps' deploy would rerun the whole Pipeline on every deploy. The plan should prune rows for Steps no longer in the Pipeline after a passing run, or compare by name. |
+| conflict: Changes that never change a fingerprint | Fingerprints cover only Step JSON and the dbt tree. adops.yaml (Sources, Warehouse, Targets), .env and accepted-change records (decisions.md 2026-11-22: records 'never change Step Fingerprints') are not covered, and records are applied only when a Sync Step runs. | docs/roadmaps/agentic-dataops/decisions.md | A deploy that only adds an accepted-change record or edits adops.yaml would rerun nothing, and the record would wait for the next Schedule. The plan must decide whether a new record for a Pipeline or a settings change counts as a change. |
+| conflict: Pipelines with no Schedule and Incremental Syncs | ADR-0014 says 'a Pipeline with no Schedule runs only then' (on deploy), and its 2026-11-21 clarification says deploy runs every Pipeline. A skipped Sync Step keeps its dlt Incremental cursor in .adops/dlt/<env>, so its data only goes stale until the next run, with nothing corrupted. | docs/adr/0014-schedules-run-on-a-pull-based-server.md | Running only Changed Steps means an unscheduled Pipeline no longer refreshes on every merge. The plan must accept and document that or keep a full run for unscheduled Pipelines, and amend the ADR-0014 clarification. |
+| needs: a CLI option to run only Changed Steps | missing. `adops run` (interface/run_command.py:219) has only PIPELINE, --all, --env, --branch and --project, and there is no --changed or similar anywhere in src/adops. --branch cannot be combined with --env (BRANCH_WITH_ENV). | src/adops/interface/run_command.py | Add a new option (for example `--changed`, valid only with --env stage\|prod) and route it through run_pipeline's existing `first` parameter, with 100% branch coverage (guard g2). |
+| needs: the daemon picks up a code reload | present (recorded in docs, not in code). promotion.md says the daemon refreshes its copy every 60 seconds, and the 2026-11-27 trial saw a new Schedule picked up without a restart. Because python_module code is loaded from disk, the daemon's code server and the run workers read the files in the bind mount directly. | docs/playbooks/promotion.md | A switch inside the mount (symlink) is picked up by new runs without a restart. The reload step must keep pointing at location name `adops.interface.server:defs`, which the unit test derives from workspace.yaml. |
+| tests: unit tests that parse the workflows | tests/unit/interface/test_init_command.py (DEPLOY_WORKFLOWS, lines 37-40, 858-1080) parses the generated stage/prod YAML. It asserts step order validate < folder update < reload < `adops run --all --env <env>` == second-to-last step, the exact git fetch/checkout lines (and runs that script against real git repos), the reload GraphQL text, and that no compose up/down/restart is used. | tests/unit/interface/test_init_command.py | These tests must be rewritten in the same change (guard g7). test_folder_update_moves_the_server_to_the_new_version_and_keeps_its_local_files should become a test that the new switch script keeps .env and .adops. |
+| tests: e2e coverage of Server and deploy | tests/e2e/test_server.py covers a scheduled stage run and crash recovery (server-recover), and test_demo_sync.py covers Branch deferral and two stage runs not overlapping on the Warehouse. No e2e test runs the deploy workflow steps (reload, checkout, run --all) or a deploy during a run in progress, and promotion.md's trials list that case as untried. | tests/e2e/test_server.py | Add an e2e test that holds a scheduled run (for example with the existing held_postgres_lock/held_duckdb_lock fixtures), runs the deploy steps and asserts the run's files did not change. It must fit the 20-minute e2e job (guard g4). |
+| docs to update | Docs that describe the deploy: promotion.md ('What the workflows do' table, 'After a deploy', the Warehouse lock section, Recorded trials); ADR-0016 (the deploy flow and 'one Warehouse lock'); ADR-0014's 2026-11-21 clarification ('runs every Pipeline') and its 'Pipeline with no Schedule' consequence; ADR-0006's Changed Step definition (stage only); decisions.md; docs/playbooks/run-stage-and-prod-on-a-mac.md; the comment headers of the workflows. | docs/adr/0016-promotion-runs-on-a-self-hosted-runner-per-server.md | The plan needs a docs phase: amend ADR-0014/0016 with a dated clarification, extend the Changed Step wording in ADR-0006 to stage/prod deploys, and update both playbooks. MAP.md row 18 is the source of the task. |
+| guard g7: generated workflows verified by parsing YAML | Applies: the task changes src/adops/templates/github/workflows/adops-stage.yml and adops-prod.yml. | docs/roadmaps/.tmp/h17/stage0-guards.json | Every new or changed workflow step (idle wait, folder switch, changed-only run) must be asserted by parsing the generated YAML in tests/unit/interface/test_init_command.py. |
+| guard g2 and g5: 100% coverage, no pragma | Applies to any new src/adops code: the idle-check command, the changed-only option, fingerprint saving in prod and pruning of stale rows. | pyproject.toml | Each new branch needs unit tests (fake DagsterInstance, fake fingerprint store). `pragma: no cover` is not allowed except for TYPE_CHECKING. |
+| guard g6: no framework in domain or application | Applies: the changed-step planning belongs in application/run_pipeline.py or domain/branch_environment.py, while the Dagster run query and any lock use must stay in infrastructure/interface. | src/adops/application/run_pipeline.py | Put the 'is the Server idle' logic behind a port, or keep it in infrastructure/dagster_server.py plus an interface command; never import dagster, dlt or typer into domain/application. |
+| guard g3 and g4: templates in the wheel, e2e in 20 min | Applies if new template files are added (for example a deploy helper script or a changed workspace.yaml/compose), and to any new e2e Server test. | .github/workflows/ci.yml | New template files must be included in the wheel and written by init_command (SERVER_CONFIG_FILES / _write_workflow_files). New e2e cases must reuse the session-scoped server_image fixture to stay inside the 20-minute job. |
+
+## Repo guards this plan works under
+
+| Guard | Enforces | When | Defined in | Phases |
+|---|---|---|---|---|
+| g1 | ruff check passes (E,F,W,I,B,UP, line length 100) | on pull request / push | `.github/workflows/ci.yml` | all (repo-wide) |
+| g2 | unit tests pass with 100% line+branch coverage of the adops package | on pull request / push | `.github/workflows/ci.yml + pyproject.toml [tool.coverage]` | 1, 2, 3, 4 |
+| g3 | project templates ship in the built wheel | on pull request / push | `.github/workflows/ci.yml` | 4 |
+| g4 | demo Project end to end in Docker passes within the 20-minute e2e job | on pull request / push | `.github/workflows/ci.yml` | 4, 5 |
+| g5 | no pragma: no cover except TYPE_CHECKING | on review | `docs/roadmaps/agentic-dataops/decisions.md (horizon 1)` | 1, 2, 3 |
+| g6 | domain and application layers import no framework (dlt, dagster, typer, os.environ); engines sit behind ports | on review | `docs/roadmaps/agentic-dataops/decisions.md (horizon 1)` | 1, 2, 3 |
+| g7 | generated workflows are verified by parsing the generated YAML in unit tests | on review | `docs/roadmaps/agentic-dataops/decisions.md (horizon 8)` | 4 |
+
+## Out of Scope
+
+- Rerunning only Changed Steps on deploy (prod fingerprints, stale fingerprint pruning, adops.yaml/record state, adops run --changed, ADR-0014/0006 clarifications): held for horizon 18 to keep this horizon within 7 phases; deploys keep running every Pipeline until then.
+- Waiting for the Server to be idle or pausing Schedules/the QueuedRunCoordinator during a deploy: the user chose the folder switch, and deploys never wait.
+- Restarting or recreating Server containers on deploy: ADR-0014 and the existing unit test forbid it, and the switch happens inside the stable mount.
+- Automatic migration of existing Servers to the releases/current layout: the user chose one-time manual steps in promotion.md plus a clear stop message.
+- A rollback command, or keeping more than 3 releases for manual rollback: deleting all but the newest 3 is cleanup only, and a guided rollback is separate work.
+- A Step dependency graph (rerunning only a Changed Step's real dependents and skipping later independent Steps): Changed Steps keep the existing 'first changed Step onward' meaning.
+- Treating .env or Secret changes as a reason to rerun: .env is not in Git and is shared across releases, so a deploy cannot see a change to it.
+- Changing how Branch runs pick Changed Steps or which Environment they defer to: Branch runs keep comparing against stage only.
+- Changes to the CLI's `adops run --all` for hand use: it keeps running every Pipeline. Only deploys switch to the changed-only option.
+- Running Changed Steps on a Schedule tick: scheduled runs still run the whole Pipeline, and only deploys become incremental.
+- A prod Server e2e test or a real-runner trial of the new deploy: CI e2e covers stage only (h16 decision protects the 20-minute job). A real-runner retrial can be a later manual trial.
+- Freshness alerts for Pipelines that are no longer refreshed on merge: these are MAP #19, the next candidate.
+- Fixing the first PR's red Branch run ('stage has no Step Fingerprints') message, and the adops-stage run that starts on push before the runner exists: separate open discoveries, not this task.
+- Several Environments or Servers per machine: h16 decision of one Server per machine stands.
+- B1 domain: Add the changed-only deploy plan rule (adops.yaml change -> every Pipeline in full; new accepted-change record -> that Pipeline in full; no Schedule -> full; no saved fingerprints -> full; else from first_changed_step; none changed -> 'unchanged, nothing rerun') and widen saves_stage_fingerprint to stage and prod — held: horizon ceiling
+- B2 infrastructure: Save prod Step Fingerprints in prod's Warehouse adops schema and prune rows for Steps no longer in a Pipeline (step_fingerprint_store.py) — held: horizon ceiling
+- B3 infrastructure: Add per-Environment saved deploy state (adops.yaml hash, seen accepted-change record ids) — held: horizon ceiling
+- B4 application+interface: Add `adops run --changed` (only with --env stage|prod) through run_pipeline's `first` slicing, switch both deploy workflows to it, and add dated clarifications to ADR-0014 and ADR-0006 — held: horizon ceiling
+
+## Success Criteria
+
+- Done when ALL hold, each proved by a unit test that parses the generated YAML (g7) or by code covered 100% line+branch with no new pragma (g2/g5), plus one e2e case inside the 20-minute job (g4): (1) adops-stage.yml and adops-prod.yml never run git fetch/checkout into the live Server folder and never compose up/down/restart/stop/start; they validate, run `adops server-release` with the validated checkout mounted read-only at /checkout, reload `adops.interface.server:defs`, then run every Pipeline from /project/current. (2) Bind mount, compose project directory and compose project name are unchanged by a switch, so Dagster run history and demo data survive. (3) A run resolves 'current' once at start and reads adops.yaml, pipelines/, pipelines/accepted/, .env and the dbt tree only from that folder for its whole life, retries included; one e2e case holds a scheduled stage run, deploys a new commit, and shows the held run finishes on the old files and fingerprint while the next run uses the new ones. (4) After a switch, every release folder except the newest 3, the current one and any folder a run in progress uses is deleted; a run in progress never loses its folder (the e2e makes ≥3 newer folders so this is really tested). (5) server-release stops before changing any file on the old or half-moved layout, and when the new commit's docker-compose.yml or server/*.yaml differ from the live top-level copies, each time naming the matching section of docs/playbooks/promotion.md, which gives the one-time manual move and the manual config-update step. (6) ADR-0016 has a dated clarification; promotion.md, run-stage-and-prod-on-a-mac.md and the workflow headers describe the new flow. (7) Plain and demo templates change together, templates ship in the wheel (g3), ruff passes (g1).
+- Pin each Server run to its release folder: A passing unit test that loads the Server code location through Dagster's real loader, switches 'current' mid-run, and shows the run and its retry read only the release folder resolved at run start and tag the run with it.
+- Add release folder layout check, switch and cleanup: src/adops/infrastructure/release_folders.py with unit tests covering layout detection, release preparation, atomic 'current' switch and cleanup selection at 100% line+branch.
+- Add a Server release command: A working `adops server-release` command with unit tests proving it refuses the old layout without changing files, switches 'current', and never deletes a folder a run in progress uses.
+- Change deploys to switch release folders: Generated stage and prod deploy workflows that switch release folders, verified by rewritten YAML-parsing unit tests in tests/unit/interface/test_init_command.py.
+- Test a deploy during a held scheduled run: A passing e2e test in tests/e2e/test_server.py showing a held scheduled run finishes on the old release folder while the next run uses the new one.
+
+## Alignment Preview
+
+- Accepted on the first preview, no redirect. Concerns raised and applied: top-level Server config (docker-compose.yml, server/*.yaml) is refused when it changes; the checkout is mounted read-only at /checkout; the e2e makes ≥3 newer release folders so in-use protection is really tested; domain shape relabelled technical; success definition cut to the folder switch.
+- Orchestrator fixes after decomposition: 2 phase names rewritten in plain words; the docs phase folded into the release-command and deploy-workflow phases (keeps 5 phases, so the stop message and its playbook section land together); release preparation changed from `git archive` to a file copy because the Server image has no git.
+
+## Quality Gate
+
+- Path: full. One critic pass. 0 blockers raised, so no verification call. 1 major issue (`grounded-in-discovery`, 5/6): the deploy's in-process run and Branch runs were not tagged. Healed directly: phase 1 also tags in-process runs, and cleanup ignores tags outside releases/.
+- Accepted debt (minor):
+  - phase-blast-radius: Each phase is small or medium, has one named deliverable and at most 3 inputs. Phase 0 is a declared cross-cutting small slice with 4 files. Phase 3 (deploy-workflows-use-release-folders) sits at the edge: 8 filesAffecte…
+  - valid-dependencies: Every dependency is load-bearing. release-command consumes phase 0's tag constant and phase 1's functions. deploy-workflows consumes server-release. The e2e case consumes the new-layout fixture and the run tag. Phases 0 …
+  - testable-rubrics: Every phase has 4-5 rubric dimensions with concrete commands, grep checks, adversarial failure examples and minScores. One dimension mixes concerns: phases[3].rubric 'e2e-fixture-new-layout' includes a pass criterion abo…
+- Verdict: passed.
+
+## Cost
+
+- Agent calls: 7 (discovery, analysis, decompose, preview concerns, rubrics, next-horizon brief, critic; no patch, verify or healer call) against a budget of 8–10.
+
+## Full analysis
+
+- **Domain shape:** technical — Every phase of this horizon is file-system, container and workflow mechanics for deploys (release folders, an atomic link switch, run pinning); the Promotion business rules for which Steps a deploy reruns are held for horizon 18, which is business-shaped.
+
+| Term | Meaning |
+|---|---|
+| Promotion | GitOps deploy of a merged or released commit to the stage or prod Server through the generated adops-stage/adops-prod workflows on that Server's self-hosted runner. |
+| Server | The long-lived Dagster daemon+webserver for exactly one Environment (stage or prod). It runs Schedules from the bind-mounted Server folder, which now holds releases/<commit> folders and a 'current' link. |
+| Release folder | releases/<commit>: one checked-out version of the Project inside the Server folder, sharing .env and .adops/. A run uses one release folder for its whole life. |
+| Step Fingerprint | sha256 of a Step's canonical JSON (plus the dbt tree for a Transform), saved per Pipeline and Step in the Environment's Warehouse adops schema after the Step's Checks pass. It is now saved in prod as well as stage. |
+| Environment | A named target (dev, stage, prod, or a Branch Environment) with its own Warehouse and settings. A deploy compares fingerprints only within its own Environment. |
+| Pipeline | A YAML-defined, ordered list of Sync/Transform/Reverse Sync Steps, which may have a Schedule. A Pipeline with no Schedule always runs in full on deploy. |
+
+**Assumptions**
+
+- confirmed: deploy way is a new folder, then a switch. Each version is checked out into releases/<commit> inside the Server folder. A 'current' link is switched in one atomic step. Each run resolves the link once at run start, so an old run finishes on old files while new runs use new ones. Deploys never wait for the Server to be idle.
+- confirmed: the horizon-8 decision 'merge→stage runs every Pipeline, not only changed ones' is replaced. Stage AND prod deploys rerun only Changed Steps, prod starts saving its own Step Fingerprints in prod's Warehouse, and a deploy with no saved fingerprints runs everything.
+- confirmed: changes that alter no fingerprint use safe defaults. A new accepted-change record reruns that Pipeline in full, any adops.yaml change reruns every Pipeline, a Pipeline with no Schedule still runs in full on every deploy, and otherwise each Pipeline reruns from its first Changed Step.
+- confirmed: existing Servers move to the new layout by one-time manual steps in docs/playbooks/promotion.md, done while idle. A deploy that finds the old layout stops with a clear message that points there.
+- confirmed: old releases/<commit> folders are cleaned up after a switch. The deploy deletes all but the newest 3 and keeps any folder a run in progress still uses.
+- The switch happens inside the stable bind mount: the Server folder stays the compose project directory and the mount source, and only /project/current changes. This avoids a container restart (ADR-0014 / promotion.md forbid one) and keeps the compose project name and volumes. The link is relative, so it resolves the same on the host and in the container.
+- 'Changed Steps' keeps its existing meaning: rerun from the first Step whose (name, fingerprint) differs, in Step order. There is no dependency graph. This reuses first_changed_step and run_pipeline's existing `first` slicing, using the Environment's default schemas rather than Branch schemas.
+- 'An adops.yaml change' and 'a new accepted-change record' are found by comparing against state saved in that Environment's Warehouse adops schema at the last deploy: a hash of adops.yaml, and the record ids found in pipelines/accepted/ compared with ids already applied or seen. Git diff is not used, because ADR-0006 / the h6 decision rule out Git for Changed Steps. A record the Environment has already applied is not new.
+- A Pipeline with no Changed Step is skipped and gets a Run Log line saying nothing changed. It is not run.
+- The deploy's own changed-only run runs from the newly switched releases/<commit> folder (with the shared .env and .adops/), resolved once, under the existing per-Pipeline Warehouse lock. It still bypasses the QueuedRunCoordinator, as today.
+- .env and .adops/ (dlt state and Incremental cursors, DuckDB files and locks, Run Logs, compute logs) stay one shared copy at the Server folder root. Every release folder reaches them by symlink or by an overlay mount. Runtime files Dagster writes under server/ stay valid across switches.
+- Telling whether a release folder is still in use is done in infrastructure/interface code. It reads the Dagster instance's in-progress runs (IN_PROGRESS statuses) and the folder each run recorded, for example a run tag set at run start. Domain and application stay framework-free (g6).
+- confirmed: horizon 17 is the release-folder switch only (5 phases); rerun only Changed Steps (rerun rules, prod fingerprints + stale-row pruning, saved adops.yaml/record state, adops run --changed in deploys, ADR-0014/0006 clarifications) is horizon 18
+- confirmed: server-release refuses with a message pointing at promotion.md when the new commit's top-level docker-compose.yml or server/*.yaml differ from the live copies; updating them is a manual step
+- confirmed: the validated checkout is mounted read-only at /checkout for server-release
+- confirmed: the release copy skips .git, .env and .adops; cleanup deletes nothing if any in-progress run has no release tag; only ADOPS_PROJECT points at /project/current, workspace.yaml is unchanged
+- Every run (scheduled, deploy, hand, Branch) is tagged adops/release with its resolved project folder; cleanup protects only tagged folders under releases/, ignores tags outside it (Branch checkouts), and deletes nothing while an untagged in-progress run exists (healed at the gate)
+
+**Risks**
+
+- Dagster's run worker and code server load `adops.interface.server:defs` from workspace.yaml's working_directory. If that path is /project/current, the daemon or a run worker may resolve it lazily, or again on a retry (RetryRequested re-runs run(name)). The run would then read new files partway through. The resolved path must be fixed once at run start and carried through retries (a run tag or an explicit realpath), and this is not yet verified against Dagster 1.13.
+- Deploy runs execute in-process and show up as Dagster runs. A scheduled run can also be waiting 3x300 s for a retry while its status stays STARTED. Both must count as 'in use' when choosing which release folders to delete, or cleanup will delete a folder a run still needs.
+- Atomically switching a symlink (rename over 'current') through a Docker bind mount may behave differently on OrbStack or Docker Desktop on macOS than on Linux. A Postgres-Warehouse Server may run on macOS (h16 decision), so the Mac guide must be re-checked.
+- Stale fingerprint rows (upserted with max+1 order and never deleted) make the first index differ after a Step is removed or renamed. Without pruning or a by-name comparison, every later deploy reruns the whole Pipeline, and Branch deferral against stage is affected too.
+- Running only Changed Steps means unchanged Sync Steps no longer refresh on each merge. A scheduled Pipeline's data stays as fresh as its Schedule. This changes behaviour users saw before and must be documented. Incremental cursors stay correct.
+- Moving prod to fingerprint-based reruns means the first prod deploy after upgrade runs everything. A wrong fingerprint saved in prod (for example under a mixed version) would silently skip a needed rerun. The per-run folder lock exists to prevent that.
+- Many unit tests in tests/unit/interface/test_init_command.py fix the old deploy step order, the exact git fetch/checkout lines and `adops run --all --env <env>` as the second-to-last step. They must be rewritten in the same change (g7), and the real-git script test must be replaced with one for the switch script.
+- The h8 decision 'update the Server Project folder by local git fetch, reload, then run --all' and the h7 decision 'Server built from a bind-mounted Project' stand. The new layout must keep the bind-mounted Project (the Server folder) and only change what sits inside it, or a decision is broken without the user's say.
+- The h8 decision 'adops run --all takes the Warehouse lock once per Pipeline' stands. The changed-only run must keep per-Pipeline locking, not hold one lock for the whole deploy.
+- The new e2e case (a held scheduled run plus a deploy) must reuse the session-scoped server_image fixture and fit the 20-minute e2e job (g4). Building a second image or a real git remote could push it over.
+- Old-layout detection must be exact: an old-layout folder, a half-migrated folder and a fresh Server all need a defined outcome. Otherwise a deploy may change live files or refuse a correctly migrated Server.
+- Disk use: three releases plus checkouts on a small Server or Mac host. The user was burned by a full disk before, so the playbook should note the size.

@@ -543,7 +543,7 @@ def test_transform_step_runs_as_a_dagster_job_with_no_password_in_storage(
         Unused(),  # type: ignore[arg-type]
         Unused(),  # type: ignore[arg-type]
         Unused(),
-        orchestrator=DagsterOrchestrator(),
+        orchestrator=DagsterOrchestrator(tmp_path),
         transform=password_transform(tmp_path, root),
     )
 

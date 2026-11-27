@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 import socket
 import subprocess
 import threading
@@ -9,13 +11,20 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 import psycopg
 import pytest
 import yaml
 from demo_project import WAREHOUSE_DATABASES, Demo, connect, dagster_meta, init_demo, warehouse
+from dotenv import dotenv_values
 
 import adops
+from adops.application.run_pipeline import current_fingerprints
+from adops.domain.loader import load_pipeline
+from adops.infrastructure.dagster_server import RELEASE_TAG
+from adops.infrastructure.release_folders import KEEP_NEWEST
+from adops.infrastructure.step_fingerprint_store import FINGERPRINT_TABLE, ProjectTree
 from adops.infrastructure.warehouse_lock import ADVISORY_LOCK_KEY
 
 pytestmark = pytest.mark.e2e
@@ -118,10 +127,11 @@ class Server:
 
 
 @pytest.fixture
-def server(demo, server_image):
+def server(server_demo, server_image):
     """The demo's Server on stage, with its own Dagster database so no earlier run interferes."""
+    demo = server_demo
     project = demo.project
-    add_schedule(project / "pipelines" / "shop_sync.yaml", EVERY_MINUTE)
+    add_schedule(project / "current" / "pipelines" / "shop_sync.yaml", EVERY_MINUTE)
     dagster_db = f"dagster_{uuid.uuid4().hex[:8]}"
     create_dagster_database(demo.env, dagster_db)
     set_env(
@@ -175,8 +185,9 @@ def test_schedule_launches_a_successful_stage_run(server):
     wait_for_scheduled_success(server)
     server.stop()
 
+    served = replace(server.demo, project=server.demo.project / "current")
     loaded = {
-        table: warehouse(server.demo, f"SELECT count(*) FROM raw_shop.{table}", "stage")[0][0]
+        table: warehouse(served, f"SELECT count(*) FROM raw_shop.{table}", "stage")[0][0]
         for table in ("customers", "orders")
     }
     assert loaded == {"customers": 20, "orders": 100}
@@ -203,7 +214,7 @@ time.sleep(3600)
 
 
 def duckdb_lock_path(demo):
-    settings = yaml.safe_load((demo.project / "adops.yaml").read_text())
+    settings = yaml.safe_load((demo.project / "current" / "adops.yaml").read_text())
     return f"/project/{settings['environments']['stage']['warehouse']['path']}.lock"
 
 
@@ -258,13 +269,13 @@ def stage_lock_is_free(demo, image):
 
 
 @pytest.fixture
-def stage_warehouse_lock(demo, server_image):
+def stage_warehouse_lock(server_demo, server_image):
     """Held before the Server starts, so its first scheduled run waits on it in STARTED."""
     with ExitStack() as held:
-        if demo.warehouse_kind == "duckdb":
-            held.enter_context(held_duckdb_lock(demo, server_image))
+        if server_demo.warehouse_kind == "duckdb":
+            held.enter_context(held_duckdb_lock(server_demo, server_image))
         else:
-            held.enter_context(held_postgres_lock(demo))
+            held.enter_context(held_postgres_lock(server_demo))
         yield held
 
 
@@ -308,7 +319,7 @@ class AlertReceiver:
 
 
 @pytest.fixture
-def alert_receiver(demo):
+def alert_receiver(server_demo):
     """A webhook on the host; the Server reaches it because it runs with host networking."""
     receiver = AlertReceiver("")
 
@@ -324,7 +335,7 @@ def alert_receiver(demo):
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     receiver.url = f"http://127.0.0.1:{httpd.server_address[1]}/hook"
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    set_env(demo.project, ALERT_WEBHOOK_URL=receiver.url)
+    set_env(server_demo.project, ALERT_WEBHOOK_URL=receiver.url)
     try:
         yield receiver
     finally:
@@ -364,3 +375,160 @@ def test_server_recovers_from_crash_and_next_tick_succeeds(
     finally:
         took = time.monotonic() - began
         print(f"\nrecovery case [{server.demo.warehouse_kind}] took {took:.0f}s")
+
+
+DEPLOYED = "commit-b"
+STEP_ONLY_IN_HELD_RELEASE = "reverse_sync_customer_stats"
+STEP_ONLY_IN_DEPLOYED = "push_customer_stats"
+CODE_LOCATION = "adops.interface.server:defs"
+RELOAD_QUERY = (
+    "mutation($name: String!) { reloadRepositoryLocation(repositoryLocationName: $name) {"
+    " __typename ... on WorkspaceLocationEntry { loadStatus } } }"
+)
+
+
+def release_of(server_dir):
+    return Path(os.readlink(server_dir / "current")).name
+
+
+def add_releases_newer_than(server_dir, held, count):
+    """Real-looking release folders whose age, read from their .adops link, falls after `held`'s."""
+    releases = server_dir / "releases"
+    base = (releases / held / ".adops").lstat().st_mtime
+    os.utime(releases / held / ".adops", (base - 1000, base - 1000), follow_symlinks=False)
+    names = [f"between-{index}" for index in range(1, count + 1)]
+    for index, name in enumerate(names, start=1):
+        (releases / name).mkdir()
+        link = releases / name / ".adops"
+        link.symlink_to(Path("..", "..", ".adops"))
+        os.utime(link, (base - 1000 + index, base - 1000 + index), follow_symlinks=False)
+    return names
+
+
+def checkout_with_renamed_step(server_dir, held, checkout):
+    shutil.copytree(server_dir / "releases" / held, checkout, symlinks=True)
+    for shared in (".env", ".adops"):
+        (checkout / shared).unlink()
+    pipeline = checkout / "pipelines" / f"{PIPELINE}.yaml"
+    renamed = pipeline.read_text().replace(
+        f"name: {STEP_ONLY_IN_HELD_RELEASE}\n", f"name: {STEP_ONLY_IN_DEPLOYED}\n"
+    )
+    assert renamed != pipeline.read_text()
+    pipeline.write_text(renamed)
+    return checkout
+
+
+def step_fingerprints(project):
+    pipeline = load_pipeline((project / "pipelines" / f"{PIPELINE}.yaml").read_text())
+    return dict(current_fingerprints(pipeline.steps, ProjectTree(project)))
+
+
+def run_tag(env, run_id, key):
+    rows = dagster_meta(
+        env, "SELECT value FROM run_tags WHERE run_id = %s AND key = %s", run_id, key
+    )
+    return rows[0][0] if rows else None
+
+
+def wait_for_release_tag(server, run_id):
+    """The run worker tags the folder it resolved before reading any Project file."""
+    deadline = time.monotonic() + LOCK_HELD_DEADLINE_SECONDS
+    while (tag := run_tag(server.demo.env, run_id, RELEASE_TAG)) is None:
+        if time.monotonic() > deadline:
+            pytest.fail(f"run {run_id} never recorded its release folder")
+        time.sleep(1)
+    return tag
+
+
+def server_release(server, checkout, commit):
+    command = [
+        *server.compose, "run", "--rm", "--no-deps", "-T", "-v", f"{checkout}:/checkout:ro",
+        SERVER_SERVICES[0], "adops", "server-release",
+        "--server-dir", "/project", "--from", "/checkout", "--commit", commit,
+    ]  # fmt: skip
+    result = subprocess.run(command, cwd=server.demo.project, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result.stdout.splitlines()
+
+
+def reload_code_location(server):
+    port = dotenv_values(server.demo.project / ".env")["DAGSTER_WEBSERVER_PORT"]
+    body = json.dumps({"query": RELOAD_QUERY, "variables": {"name": CODE_LOCATION}}).encode()
+    request = Request(
+        f"http://127.0.0.1:{port}/graphql", body, {"Content-Type": "application/json"}
+    )
+    with urlopen(request, timeout=60) as response:
+        reloaded = json.load(response)["data"]["reloadRepositoryLocation"]
+    assert reloaded == {"__typename": "WorkspaceLocationEntry", "loadStatus": "LOADED"}
+
+
+def link_inside_container(server):
+    readlink = [*server.compose, "exec", "-T", SERVER_SERVICES[0], "readlink", "/project/current"]
+    result = subprocess.run(
+        readlink, cwd=server.demo.project, capture_output=True, text=True, check=True
+    )
+    return result.stdout.strip()
+
+
+def reported_step_names(env, run_id, candidates):
+    """Which of `candidates` the run's Dagster events name; its step output lists every Step."""
+    events = " ".join(
+        event
+        for (event,) in dagster_meta(env, "SELECT event FROM event_logs WHERE run_id = %s", run_id)
+    )
+    return {name for name in candidates if f'"{name}"' in events}
+
+
+def saved_stage_fingerprints(served):
+    rows = warehouse(
+        served,
+        f"SELECT step, fingerprint FROM adops.{FINGERPRINT_TABLE} WHERE pipeline = '{PIPELINE}'",
+        "stage",
+    )
+    return dict(rows)
+
+
+def test_deploy_while_a_run_is_held_keeps_its_release_folder(
+    stage_warehouse_lock, server, server_image, tmp_path
+):
+    began = time.monotonic()
+    project = server.demo.project
+    env = server.demo.env
+    held_release = release_of(project)
+    between = add_releases_newer_than(project, held_release, KEEP_NEWEST)
+    checkout = checkout_with_renamed_step(project, held_release, tmp_path / "checkout")
+    held_fingerprints = step_fingerprints(project / "releases" / held_release)
+    deployed_fingerprints = step_fingerprints(checkout)
+    assert STEP_ONLY_IN_HELD_RELEASE not in deployed_fingerprints
+    try:
+        held_run = wait_for_started_run(server)
+        assert wait_for_release_tag(server, held_run) == f"/project/releases/{held_release}"
+
+        released = server_release(server, checkout, DEPLOYED)
+        reload_code_location(server)
+
+        assert run_status_and_created(env, held_run)[0] == "STARTED"
+        assert f"current: releases/{DEPLOYED}" in released
+        assert link_inside_container(server) == f"releases/{DEPLOYED}"
+        assert f"deleted: releases/{between[0]}" in released
+        assert not (project / "releases" / between[0]).exists()
+        assert (project / "releases" / held_release / "pipelines").is_dir()
+
+        stage_warehouse_lock.close()
+        assert wait_for_scheduled_success(server) == held_run
+        next_run = wait_for_scheduled_success(server, ignoring={held_run})
+
+        assert run_tag(env, next_run, RELEASE_TAG) == f"/project/releases/{DEPLOYED}"
+        step_names = (STEP_ONLY_IN_HELD_RELEASE, STEP_ONLY_IN_DEPLOYED)
+        assert reported_step_names(env, held_run, step_names) == {STEP_ONLY_IN_HELD_RELEASE}
+        assert reported_step_names(env, next_run, step_names) == {STEP_ONLY_IN_DEPLOYED}
+        server.stop()
+
+        saved = saved_stage_fingerprints(replace(server.demo, project=project / "current"))
+        only_held = STEP_ONLY_IN_HELD_RELEASE
+        assert saved[only_held] == held_fingerprints[only_held]
+        assert saved[STEP_ONLY_IN_DEPLOYED] == deployed_fingerprints[STEP_ONLY_IN_DEPLOYED]
+        assert held_fingerprints[only_held] != deployed_fingerprints[STEP_ONLY_IN_DEPLOYED]
+    finally:
+        took = time.monotonic() - began
+        print(f"\nheld-run deploy case [{server.demo.warehouse_kind}] took {took:.0f}s")

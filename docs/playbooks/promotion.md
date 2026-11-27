@@ -16,16 +16,16 @@ or a setting to click. Your Assistant can run the commands for you.
 |---|---|---|---|
 | `adops-pull-request.yml` | a pull request is opened or updated (`opened`, `synchronize`, `reopened`) | `adops validate`, then `adops run --all --branch <branch>`: every Pipeline in that pull request's Branch Environment | the stage Server (runner label `adops-stage`) |
 | `adops-pull-request.yml` | a pull request is closed or merged (`closed`) | `adops drop-branch <branch>`: removes that Branch Environment | the stage Server (runner label `adops-stage`) |
-| `adops-stage.yml` | a change is merged to `main` | validates the new version, moves the stage Server's Project folder to it, reloads the Server's Pipelines and Schedules, then `adops run --all --env stage` | the stage Server (runner label `adops-stage`) |
-| `adops-prod.yml` | a release is published | the same as stage, for the release's tag, then `adops run --all --env prod`, after a required reviewer approves | the prod Server (runner label `adops-prod`, environment `prod`) |
+| `adops-stage.yml` | a change is merged to `main` | validates the new version, copies it into the stage Server's `releases/<commit>` and points `current` at it (`adops server-release`, which also deletes old release folders), reloads the Server's Pipelines and Schedules, then `adops run --all --env stage` from `current` | the stage Server (runner label `adops-stage`) |
+| `adops-prod.yml` | a release is published | the same as stage, for the release's tag, then `adops run --all --env prod` from `current`, after a required reviewer approves | the prod Server (runner label `adops-prod`, environment `prod`) |
 
 A pull request from a **fork** (a copy of your repository under someone else's account) is a
 **Fork PR**. It only gets `adops validate`, on a machine GitHub provides, with no access to your
 Servers or secrets. Its Branch run is skipped; to run it, a maintainer pushes the same change to a
 branch in your own repository.
 
-If a validate fails, the Server's Project folder is not touched and the Server keeps running the last
-good version.
+If a validate fails, no file in the Server folder changes and the Server keeps running the last good
+version. A deploy never runs `git` in the Server folder and never restarts the Server's containers.
 
 ## Before you start
 
@@ -56,8 +56,8 @@ In the commands below, replace these placeholders once, everywhere they appear:
 
 ## Step 1 — Put the Project on the Server machine as a Git clone
 
-The workflows move this folder to each new version with `git`, so it must be a clone of your
-repository, not a copied folder.
+Clone your repository once to get its files onto the machine. The workflows never run `git` in this
+folder: each deploy copies the new version into its own folder under `releases/`.
 
 ```sh
 sudo mkdir -p <your-server-folder>
@@ -88,6 +88,10 @@ prod machine**. A prod machine left at `stage` runs stage's Schedules while its 
 Environment. Add a `stage` Environment to `adops.yaml` (same shape as `dev`, pointing at the stage
 Warehouse) and merge it before you start the Server, or the Server and `adops-stage.yml` both fail.
 For prod, step 6 below comes first.
+
+Before you start the Server, lay the folder out as release folders: do steps 2 and 3 of
+[One-time move to release folders](#one-time-move-to-release-folders). The Server reads the Project
+from the `current` link, so it does not start without it.
 
 Start the Server once:
 
@@ -241,10 +245,96 @@ cancel that run under **Actions**, then re-run it when step 3 is done.)
    to stage.
 3. Publish a release. `adops prod` waits for approval, then deploys to prod.
 
+## One-time move to release folders
+
+From this version on, a deploy never changes the files a run in progress is reading. It copies the
+new version into its own folder, `<your-server-folder>/releases/<commit>`, then points a link named
+`current` at it in one step. A run reads the folder `current` named when it started, to the end,
+retries included. `adops server-release` does this, and it stops with
+`... has the old layout ...` or `... is half moved ...` until the Server folder has been moved once,
+by hand, as below. It changes no file when it stops.
+
+1. **Make sure no run is in progress.** On the Dagster page, open **Runs**: nothing may be Queued,
+   Starting or Started. Wait for it to finish if it is.
+2. Copy the version the Server runs now into its release folder, and link the shared `.env` and
+   `.adops/` into it:
+
+   ```sh
+   cd <your-server-folder>
+   commit=$(sudo -u <runner-user> git rev-parse HEAD)
+   sudo -u <runner-user> mkdir -p .adops "releases/$commit"
+   sudo -u <runner-user> sh -c "git archive HEAD | tar -x -C releases/$commit"
+   sudo -u <runner-user> ln -s ../../.env "releases/$commit/.env"
+   sudo -u <runner-user> ln -s ../../.adops "releases/$commit/.adops"
+   ```
+
+3. Create the `current` link. It must be **relative** (`releases/<commit>`, not a path starting with
+   `/`): the containers see the Server folder at `/project`, so an absolute link would point at
+   nothing inside them, and `adops server-release` refuses it.
+
+   ```sh
+   sudo -u <runner-user> ln -s "releases/$commit" current
+   ```
+
+4. Keep `.env`, `.adops/`, `server/`, `docker-compose.yml` and `Dockerfile` where they are, at the
+   root of `<your-server-folder>`. Every version shares them. The other Project files at the root are no
+   longer read; you may leave them.
+5. Point the Server at `current`. A Project made with this version of `adops init` already has
+   `ADOPS_PROJECT: /project/current` in `docker-compose.yml`; skip to the command below. In an
+   older one, under `dagster_daemon:` → `environment:`, change `ADOPS_PROJECT: /project` to
+   `ADOPS_PROJECT: /project/current`. Make the same change in your Project's `docker-compose.yml`
+   and merge it, so the next deploy does not stop with "This commit changes the Server config".
+   Then recreate the containers once (no run is in progress, step 1):
+
+   ```sh
+   sudo -u <runner-user> docker compose --profile server up -d
+   ```
+
+6. Check it with the next deploy: its log shows `current: releases/<commit>` for the new commit.
+
+## When a deploy changes the Server config
+
+`docker-compose.yml` and the `server/*.yaml` files at the root of `<your-server-folder>` are shared by
+every release and read when the containers start, so a deploy never changes them. When a commit
+adds, removes or changes one of them, `adops server-release` stops with
+`This commit changes the Server config: <files>` and changes no file. Copy them by hand:
+
+1. Make sure no run is in progress (Dagster page → **Runs**), because the next command restarts the
+   Server, and a restart kills runs in progress.
+2. On the Server machine, bring each named file to that commit's version:
+
+   ```sh
+   cd <your-server-folder>
+   sudo -u <runner-user> git fetch origin
+   sudo -u <runner-user> sh -c 'git show <commit>:docker-compose.yml > docker-compose.yml'
+   sudo -u <runner-user> sh -c 'git show <commit>:server/<file>.yaml > server/<file>.yaml'
+   sudo -u <runner-user> docker compose --profile server up -d
+   ```
+
+   For a file the commit removed, delete it from `server/` instead.
+3. Open the deploy that stopped and click **Re-run jobs**.
+
+### Which release folders a deploy deletes
+
+After switching `current`, `adops server-release` deletes old release folders, keeping the newest 3,
+the one `current` names, and every folder a run in progress is reading. Each run records its folder
+when it starts. Two cases:
+
+- A run that has not recorded a folder yet (it is queued, or it started before this version of
+  adops) may be reading any folder, so **nothing is deleted** while it is in progress, and the log
+  says `Old release folders were kept`. The next deploy after it finishes deletes them.
+- Branch runs read the pull request's checkout, not a release folder, so they keep no release
+  folder.
+
+Each release folder is a full copy of the Project without `.git`, `.env` and `.adops/`, so the Server
+folder needs room for about 4 of them (the newest 3 plus the one being copied), more while long runs
+hold older ones. Check with `du -sh <your-server-folder>/releases`.
+
 ## After a deploy: Schedules pick up the change by themselves
 
-The stage and prod workflows reload the Server's Pipelines and Schedules after moving its folder to
-the new version. The Dagster page shows the new version at once. The Dagster daemon, which starts
+The stage and prod workflows reload the Server's Pipelines and Schedules after `current` points at
+the new release. A run already in progress keeps reading the release folder it started with, to the
+end, retries included; runs that start after the switch read the new one. The Dagster page shows the new version at once. The Dagster daemon, which starts
 scheduled runs, picks up new, removed or changed Schedules within about 60 seconds, because it
 refreshes its own copy every 60 seconds. **Do not restart the Server to pick up a change**: a restart
 kills runs that are in progress, which the reload exists to avoid.
@@ -295,3 +385,7 @@ sudo -u <runner-user> docker compose --profile server run --rm --no-deps dagster
 |---|---|---|
 | 2026-11-26 | Stage Server on a Mac (OrbStack, Postgres Warehouse), runner run with `./run.sh`, a fresh private demo repository, Server image built from a wheel | **PR → Branch run, merge → stage and drop on close all passed.** The first deploy failed at the reload step: the workflows asked Dagster for the location `adops.interface.server`, but Dagster names it `adops.interface.server:defs`. Fixed the same day. After that, merge → stage passed (22 s), a pull request adding a dbt model got a Branch run that deferred the unchanged Sync to stage and built only the Transform (17 s), and closing it dropped its schemas. Not yet tried: release → prod, a Linux runner as a service, root-owned `.adops/` files, a reload during a run in progress. |
 | 2026-11-27 | Prod Server on an AWS `m7i-flex.large` VM (Ubuntu 24.04, 2 cores, 8 GB), runner installed as a systemd service, a fresh private demo repository, Server image built from a wheel | **Release → prod passed.** `v0.1.0` made the first prod deploy (26 s; prod Warehouse built, 20 rows written to `shop_prod`). `v0.2.0` added a dbt model and a `schedule:` line: the deploy updated the folder although Dagster had left root-owned files in `.adops/` and `server/logs` (Git ignores them), the reload picked up the new Schedule as RUNNING without a container restart, and prod built the model (25 s). Required reviewers were refused on the private repository (GitHub Free). Not tried: a deploy while a run is in progress. |
+
+Both trials used the earlier deploy, which moved the Server folder with `git checkout` and so could
+change files under a run in progress. The release-folder deploy (copy into `releases/<commit>`, switch
+`current`) is built for that case; no real-Server trial of it is recorded yet.

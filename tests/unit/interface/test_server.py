@@ -1,14 +1,20 @@
 import json
+import os
 import re
+import shutil
+from collections.abc import Iterator
+from functools import partial
 from pathlib import Path
 
 import pytest
 import yaml
-from dagster import Definitions
+from dagster import DagsterInstance, Definitions, execute_job, instance_for_test
+from dagster._core.definitions.reconstruct import ReconstructableJob, ReconstructableRepository
 from typer.testing import CliRunner
 
 from adops.application.ports import RunResult, StepReport, StepStatus, WarehouseLocked
 from adops.application.run_pipeline import InOrderOrchestrator
+from adops.infrastructure.dagster_server import RELEASE_TAG, build_server_definitions
 from adops.interface import cli, run_command, server
 from adops.interface.server import ServerConfigError, load_definitions
 
@@ -36,8 +42,14 @@ def environ(project: Path, environment: str = "stage") -> dict[str, str]:
 def captured(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     calls: dict[str, object] = {}
 
-    def capture(pipelines, time_zone, run, on_failure):
-        calls.update(pipelines=pipelines, time_zone=time_zone, run=run, on_failure=on_failure)
+    def capture(pipelines, time_zone, run, on_failure, *, release):
+        calls.update(
+            pipelines=pipelines,
+            time_zone=time_zone,
+            run=run,
+            on_failure=on_failure,
+            release=release,
+        )
         return Definitions()
 
     monkeypatch.setattr(server, "build_server_definitions", capture)
@@ -360,3 +372,125 @@ def test_a_webhook_variable_emptied_after_load_sends_nothing(alerting, monkeypat
 
     assert not job.execute_in_process(raise_on_error=False).success
     assert webhook.requests == []
+
+
+ACCEPTED_RECORD = "pipeline: shop_sync\ntable: orders\nchanges: [customer_id dropped]\n"
+RELEASE_MARKER = re.compile(r"^# release (\w+)$", re.MULTILINE)
+
+
+def make_release(project: Path, releases: Path, name: str) -> Path:
+    folder = releases / name
+    shutil.copytree(project, folder, symlinks=True)
+    for relative in ("adops.yaml", "pipelines/shop_sync.yaml"):
+        path = folder / relative
+        path.write_text(f"{path.read_text()}# release {name}\n")
+    (folder / ".env").write_text(
+        f"RELEASE_MARKER={name}\nWAREHOUSE_PASSWORD={SENTINEL}\nSHOP_PASSWORD={SENTINEL}\n"
+    )
+    (folder / "pipelines" / "accepted").mkdir()
+    (folder / "pipelines" / "accepted" / f"from_{name}.yaml").write_text(ACCEPTED_RECORD)
+    (folder / "dbt" / "release.txt").write_text(name)
+    return folder.resolve()
+
+
+def switch_current(server_dir: Path, release: str) -> None:
+    (server_dir / "current.new").symlink_to(Path("releases") / release)
+    os.replace(server_dir / "current.new", server_dir / "current")
+
+
+class ReleaseServer:
+    """A Server folder with releases/A and releases/B and a relative 'current' link to A."""
+
+    def __init__(self, project: Path) -> None:
+        self.dir = project.parent / "server"
+        releases = self.dir / "releases"
+        self.folders = {name: make_release(project, releases, name) for name in "AB"}
+        switch_current(self.dir, "A")
+        self.reads: list[dict[str, object]] = []
+        self.switch_to: str | None = None
+
+    def run_pipeline(self, pipeline_text, settings_text, *args, records) -> RunResult:
+        env, transform, fingerprinting = args[1], args[6], args[8]
+        dbt = fingerprinting.files.read_tree("dbt")
+        self.reads.append(
+            {
+                "adops.yaml": RELEASE_MARKER.findall(settings_text),
+                "pipelines/shop_sync.yaml": RELEASE_MARKER.findall(pipeline_text),
+                ".env": env["RELEASE_MARKER"],
+                "pipelines/accepted/": [record.id for record in records],
+                "dbt tree": dbt["release.txt"].decode(),
+                "dbt runner": transform.project_root,
+            }
+        )
+        if self.switch_to is None:
+            return RunResult("shop_sync", "stage", (StepReport("sync_shop", StepStatus.PASSED),))
+        switch_current(self.dir, self.switch_to)
+        self.switch_to = None
+        unreachable = StepReport("sync_shop", StepStatus.FAILED, error="down", retryable=True)
+        return RunResult("shop_sync", "stage", (unreachable,))
+
+    def expected_reads(self, release: str) -> dict[str, object]:
+        return {
+            "adops.yaml": [release],
+            "pipelines/shop_sync.yaml": [release],
+            ".env": release,
+            "pipelines/accepted/": [f"from_{release}"],
+            "dbt tree": release,
+            "dbt runner": self.folders[release],
+        }
+
+
+@pytest.fixture
+def release_server(project, locks, monkeypatch) -> Iterator[ReleaseServer]:
+    for name in ("RELEASE_MARKER", "WAREHOUSE_PASSWORD", "SHOP_PASSWORD"):
+        monkeypatch.delenv(name, raising=False)
+    served = ReleaseServer(project)
+    monkeypatch.setattr(run_command, "run_pipeline", served.run_pipeline)
+    monkeypatch.setattr(
+        server, "build_server_definitions", partial(build_server_definitions, retry_delay_seconds=0)
+    )
+    monkeypatch.setenv("ADOPS_PROJECT", str(served.dir / "current"))
+    monkeypatch.setenv("ADOPS_ENVIRONMENT", "stage")
+    yield served
+
+
+def run_through_dagster_loader(instance: DagsterInstance) -> dict[str, str]:
+    """Loads `adops.interface.server:defs` the way a new Dagster run worker does, runs shop_sync.
+
+    Each run worker is a new process; Dagster memoises the loaded job per process, so the cache
+    is cleared here to stand in for that new process.
+    """
+    ReconstructableJob.get_definition.cache_clear()
+    ReconstructableJob.get_repository_definition.cache_clear()
+    repository = ReconstructableRepository.for_module("adops.interface.server", "defs")
+    with execute_job(repository.get_reconstructable_job("shop_sync"), instance) as result:
+        assert result.success
+        stored = instance.get_run_by_id(result.run_id)
+    assert stored is not None
+    return dict(stored.tags)
+
+
+def test_a_run_and_its_retry_read_only_the_release_current_named_at_start(release_server):
+    release_server.switch_to = "B"
+
+    with instance_for_test() as instance:
+        tags = run_through_dagster_loader(instance)
+
+    assert (release_server.dir / "current").resolve() == release_server.folders["B"]
+    assert release_server.reads == [release_server.expected_reads("A")] * 2
+    assert tags[RELEASE_TAG] == str(release_server.folders["A"])
+    assert all(SENTINEL not in value for value in tags.values())
+
+
+def test_a_run_worker_started_after_the_switch_reads_the_new_release(release_server):
+    with instance_for_test() as instance:
+        first = run_through_dagster_loader(instance)
+        switch_current(release_server.dir, "B")
+        second = run_through_dagster_loader(instance)
+
+    assert release_server.reads == [
+        release_server.expected_reads("A"),
+        release_server.expected_reads("B"),
+    ]
+    assert first[RELEASE_TAG] == str(release_server.folders["A"])
+    assert second[RELEASE_TAG] == str(release_server.folders["B"])

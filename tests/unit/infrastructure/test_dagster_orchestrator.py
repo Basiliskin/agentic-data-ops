@@ -32,12 +32,14 @@ from adops.infrastructure.dagster_orchestrator import (
     JobCompileError,
     compile_job,
 )
+from adops.infrastructure.dagster_server import RELEASE_TAG
 
 SOURCE_PASSWORD = "s3cr3t-dagster-source-sentinel"
 WAREHOUSE_PASSWORD = "s3cr3t-dagster-warehouse-sentinel"
 CURSOR_SENTINEL = "cursor-sentinel-2031"
 SENTINELS = (SOURCE_PASSWORD, WAREHOUSE_PASSWORD, CURSOR_SENTINEL)
 ENV = {"SHOP_DB_PASSWORD": SOURCE_PASSWORD, "WAREHOUSE_PASSWORD": WAREHOUSE_PASSWORD}
+RELEASE = Path("/srv/adops/releases/4f2a9c1")
 
 SETTINGS = """
 environments:
@@ -188,7 +190,7 @@ def run(sync: RecordingSync, orchestrator: Orchestrator | None = None) -> RunRes
         sync,
         FakeSnapshotStore(),
         FixedClock(),
-        orchestrator or DagsterOrchestrator(),
+        orchestrator or DagsterOrchestrator(RELEASE),
     )
 
 
@@ -242,7 +244,16 @@ class NamedTask:
 
 
 def test_dagster_orchestrator_is_an_orchestrator():
-    assert isinstance(DagsterOrchestrator(), Orchestrator)
+    assert isinstance(DagsterOrchestrator(RELEASE), Orchestrator)
+
+
+def test_each_run_is_tagged_with_the_release_folder_it_reads():
+    run(RecordingSync())
+
+    with DagsterInstance.get() as instance:
+        stored = instance.get_run_by_id(only_run_id())
+    assert stored is not None
+    assert stored.tags[RELEASE_TAG] == str(RELEASE)
 
 
 def test_compiled_job_has_one_op_per_step_chained_in_pipeline_order():
@@ -510,7 +521,7 @@ def test_no_target_password_or_preview_key_reaches_dagster_storage(dagster_home:
         RecordingSync(),
         FakeSnapshotStore(),
         FixedClock(),
-        DagsterOrchestrator(),
+        DagsterOrchestrator(RELEASE),
         reverse_sync=engine,
     )
 

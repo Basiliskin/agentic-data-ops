@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import uuid
 
@@ -12,6 +13,10 @@ from demo_project import (
     use_shipped_duckdb_warehouse,
 )
 from dotenv import dotenv_values
+
+RELEASE = "e2e"
+SERVER_FOLDER_FILES = ("docker-compose.yml", "Dockerfile", "server")
+SHARED = (".env", ".adops")
 
 
 @pytest.fixture(scope="module")
@@ -41,3 +46,22 @@ def demo(request, stack, tmp_path):
         reset_postgres_warehouses(env)
     reseed_shop(stack, env)
     return Demo(project, env, request.param)
+
+
+@pytest.fixture
+def server_demo(demo):
+    """The demo moved to a Server folder's layout: releases/<commit> plus a relative 'current'."""
+    root = demo.project
+    release = root / "releases" / RELEASE
+    release.mkdir(parents=True)
+    (root / ".adops").mkdir(exist_ok=True)
+    for path in list(root.iterdir()):
+        if path.name in SERVER_FOLDER_FILES:
+            copy = shutil.copytree if path.is_dir() else shutil.copy2
+            copy(path, release / path.name)
+        elif path.name not in {*SHARED, "releases"}:
+            shutil.move(path, release / path.name)
+    for name in SHARED:
+        os.symlink(os.path.join("..", "..", name), release / name)
+    os.symlink(os.path.join("releases", RELEASE), root / "current")
+    return demo

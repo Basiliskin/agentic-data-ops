@@ -28,6 +28,7 @@ from adops.application.alerts import notify_stale_run
 from adops.application.ports import RunResult, StepReport, StepStatus
 from adops.domain.schedule import WEEKDAYS, Schedule
 from adops.infrastructure.dagster_server import (
+    RELEASE_TAG,
     STALE_RUN_FAILURE,
     build_server_definitions,
     clear_stale_runs,
@@ -36,6 +37,7 @@ from adops.infrastructure.dagster_server import (
 SECRET = "s3cr3t-server-sentinel"
 UNREACHABLE = "Step extract: the Source shop is unreachable"
 CHECK_FAILED = "Step extract: Check not_null failed on orders.id"
+RELEASE = "/srv/adops/releases/4f2a9c1"
 
 
 def passed() -> RunResult:
@@ -91,6 +93,7 @@ class Server:
             "Europe/Berlin",
             run=self.run,
             on_failure=self.alerts.append,
+            release=RELEASE,
             retry_delay_seconds=0,
         )
 
@@ -278,6 +281,7 @@ def test_no_secret_reaches_dagster_storage(
         "UTC",
         run=run,
         on_failure=lambda result: None,
+        release=RELEASE,
         retry_delay_seconds=0,
     ).resolve_job_def("orders")
     with DagsterInstance.get() as instance:
@@ -287,6 +291,19 @@ def test_no_secret_reaches_dagster_storage(
     files = [path.read_bytes() for path in home.rglob("*") if path.is_file()]
     assert files
     assert all(SECRET.encode() not in content for content in files)
+
+
+def test_a_run_and_its_retries_are_tagged_with_the_release_folder():
+    server = Server(unreachable(), passed())
+
+    with DagsterInstance.ephemeral() as instance:
+        outcome = execute(server, instance)
+        stored = instance.get_run_by_id(outcome.run_id)
+
+    assert outcome.success
+    assert server.runs == ["orders", "orders"]
+    assert stored is not None
+    assert stored.tags[RELEASE_TAG] == RELEASE
 
 
 def test_the_default_retry_delay_is_five_minutes():

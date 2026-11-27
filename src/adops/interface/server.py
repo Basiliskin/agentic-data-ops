@@ -60,6 +60,7 @@ def load_definitions(environ: Mapping[str, str]) -> Definitions:
         settings.timezone,
         _runner(project, environment, first_steps),
         _on_failure(project, settings.alert_webhook_env),
+        release=str(project),
     )
 
 

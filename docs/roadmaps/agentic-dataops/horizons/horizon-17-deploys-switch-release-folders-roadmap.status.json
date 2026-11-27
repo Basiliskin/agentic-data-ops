@@ -1,0 +1,318 @@
+{
+  "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-17-deploys-switch-release-folders-roadmap.json",
+  "roadmapTask": "MAP #18 (first half): deploys never change files under a run in progress — deploy into a new release folder and switch a 'current' link atomically; rerunning only Changed Steps is held for horizon 18.",
+  "roadmapRevision": 0,
+  "createdAt": "2026-11-27T07:35:48Z",
+  "updatedAt": "2026-11-27T09:48:32Z",
+  "phases": [
+    {
+      "phaseId": "pin-run-to-release-folder",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-27T07:35:48Z",
+      "completedAt": "2026-11-27T07:58:16Z",
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,docs/roadmaps/agentic-dataops/horizons/horizon-17-deploys-switch-release-folders-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-17-deploys-switch-release-folders-roadmap.md | changed: src/adops/infrastructure/dagster_server.py, src/adops/infrastructure/dagster_orchestrator.py, src/adops/interface/run_command.py, src/adops/interface/server.py, tests/unit/infrastructure/test_dagster_server.py, tests/unit/infrastructure/test_dagster_orchestrator.py, tests/unit/interface/test_server.py, tests/unit/infrastructure/test_dbt_transform.py, tests/unit/interface/test_run_command.py | RELEASE_TAG=adops/release in dagster_server.py; the Pipeline op tags its run with the folder load_definitions resolved; DagsterOrchestrator(release) tags in-process runs, build_orchestrator(project) passes the folder run_command resolved; tests load server:defs through ReconstructableRepository.for_module, switch current mid-run with a forced retry, and check a new worker reads B. Unplanned test edits are signature updates for build_orchestrator/DagsterOrchestrator.",
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-27T07:45:48Z",
+          "gate": "uv run ruff check",
+          "detail": "E501 Line too long (102 > 100) src/adops/interface/run_command.py:350",
+          "resolvedBy": "gate-fix",
+          "resolution": "split the run_in_environment call over one argument per line",
+          "attempt": 1,
+          "by": "execute"
+        },
+        {
+          "kind": "gate",
+          "at": "2026-11-27T07:45:48Z",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "54 setup errors: ADOPS_TEST_POSTGRES_DSN is not set",
+          "resolvedBy": "gate-fix",
+          "resolution": "reran with ADOPS_TEST_POSTGRES_DSN pointing at the running adops-test-pg container; no code change",
+          "attempt": 1,
+          "by": "execute"
+        }
+      ],
+      "baseRef": "15a72ef04451ab90d68beb3bd11713372f801594",
+      "baseDirty": true,
+      "unplannedFiles": [
+        "tests/unit/infrastructure/test_dbt_transform.py",
+        "tests/unit/interface/test_run_command.py",
+        "docs/roadmaps/agentic-dataops/discoveries.md"
+      ],
+      "gradeResult": {
+        "phaseId": "pin-run-to-release-folder",
+        "dimensionScores": [
+          {
+            "dimensionId": "resolve-once-per-worker",
+            "score": 9,
+            "pass": true,
+            "evidence": "Only resolve is in load_definitions (server.py:44); op calls add_run_tags and run(name); in_process_executor keeps retries in the same worker; retry test passes. 9 not 10: no multiprocess-executor coverage, safe because executor is pinned."
+          },
+          {
+            "dimensionId": "real-loader-switch-test",
+            "score": 8,
+            "pass": true,
+            "evidence": "Loads server:defs via ReconstructableRepository.for_module + execute_job; relative current link switched mid-run; markers per folder for adops.yaml, pipeline yaml, .env, accepted ids, dbt tree, dbt runner root. Rubric grep terms do not literally match; new process simulated by cache clear."
+          },
+          {
+            "dimensionId": "release-run-tag",
+            "score": 8,
+            "pass": true,
+            "evidence": "Single RELEASE_TAG literal imported elsewhere; scheduled/retried runs tagged in op, in-process runs via execute_in_process(tags); secret-not-in-tags asserted in test_server. Tag set at op start, so a run failing before its op has none."
+          },
+          {
+            "dimensionId": "new-worker-sees-new-folder",
+            "score": 9,
+            "pass": true,
+            "evidence": "Reload after switch reads B and tags B; no module-level resolve or cache in server.py. 9 not 10: process boundary simulated by clearing caches."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": "ruff check: pass; pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass, 100% coverage; pytest tests/e2e -m e2e: pass; hand mutation checks: resolve-in-closure and absolute()-instead-of-resolve both caught"
+    },
+    {
+      "phaseId": "release-folders-adapter",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-27T08:00:45Z",
+      "completedAt": "2026-11-27T08:17:33Z",
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/next-horizon-brief.md,docs/roadmaps/agentic-dataops/state.md,src/adops/infrastructure/dagster_orchestrator.py,src/adops/infrastructure/dagster_server.py,src/adops/interface/run_command.py,src/adops/interface/server.py,tests/unit/infrastructure/test_dagster_orchestrator.py,tests/unit/infrastructure/test_dagster_server.py,tests/unit/infrastructure/test_dbt_transform.py,tests/unit/interface/test_run_command.py,tests/unit/interface/test_server.py,docs/roadmaps/agentic-dataops/horizons/horizon-17-deploys-switch-release-folders-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-17-deploys-switch-release-folders-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-17-deploys-switch-release-folders-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-17-deploys-switch-release-folders-roadmap.status.last_good.json | changed: src/adops/infrastructure/release_folders.py, tests/unit/infrastructure/test_release_folders.py (both new) | layout()/current_release() accept only a relative current -> releases/<name> read with os.readlink into real folders; prepare_release copies the checkout minus top-level .git/.env/.adops into releases/<c>.tmp (symlinks kept), links .env/.adops as ../../<name>, os.replace into place, no-op if releases/<c> exists, stale tmp removed; switch_current symlinks current.tmp then os.replace over current; select_releases_to_delete keeps newest 3 by creation time (lstat of the .adops link), current and in-use names, returns [] on an untagged run.",
+      "failures": [],
+      "baseRef": "15a72ef04451ab90d68beb3bd11713372f801594",
+      "baseDirty": true,
+      "unplannedFiles": [],
+      "gradeResult": {
+        "phaseId": "release-folders-adapter",
+        "dimensionScores": [
+          {
+            "dimensionId": "layout-detection-exact",
+            "score": 9,
+            "pass": true,
+            "evidence": "current_release uses os.readlink + PurePosixPath parts == ('releases',<name>) + _is_real_dir (release_folders.py:45-56). Tests cover old, half-moved (no current / no releases), absolute, dangling, real dir, outside (4 params), .tmp/.. targets, symlinked releases/ and release; 15 pass."
+          },
+          {
+            "dimensionId": "prepare-release-atomic-idempotent",
+            "score": 9,
+            "pass": true,
+            "evidence": "Copies into <c>.tmp after _remove(stale), with symlinks=True and a top-level-only ignore (lines 64-72); then os.replace. Tests: readlink '../../.env'/.adops, nested dbt/.adops kept, link kept, inode+mtime unchanged on rerun, stale tmp dir/link. grep finds no git call. The .env-not-copied check is only implicit."
+          },
+          {
+            "dimensionId": "switch-current-atomic",
+            "score": 9,
+            "pass": true,
+            "evidence": "Lines 80-83: _remove(current.tmp), symlink_to('releases/<c>'), os.replace over current. 'current' is never unlinked (the unlink at :152 only hits staging). Tests: readlink=='releases/abc', replaces existing, leftover current.tmp, missing release raises and current unchanged. Switching over a real 'current' directory is untested."
+          },
+          {
+            "dimensionId": "cleanup-selection-safe",
+            "score": 9,
+            "pass": true,
+            "evidence": "select_releases_to_delete (lines 100-117) sorts by created, returns [] when untagged, keeps {current,*in_use} by name. Tests: fff oldest/aaa newest, in-use 'b' 5th newest of 6, old current 'a', untagged with non-empty in_use returns [], .tmp and files excluded; real-folder tests age by the link's lstat time."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": "ruff check: pass; pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass, 100% coverage; pytest tests/e2e -m e2e: pass (11 passed)"
+    },
+    {
+      "phaseId": "release-command",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-27T08:23:56Z",
+      "completedAt": "2026-11-27T08:41:27Z",
+      "notes": "already dirty at start (earlier phases of this horizon, uncommitted): docs/roadmaps/agentic-dataops/*.md, dagster_orchestrator.py, dagster_server.py, run_command.py, server.py, release_folders.py, their tests, horizon-17 roadmap files | changed: src/adops/interface/release_command.py (new), tests/unit/interface/test_release_command.py (new), src/adops/interface/cli.py, src/adops/infrastructure/dagster_server.py (+ReleasesInUse, in_use_release_folders), src/adops/infrastructure/release_folders.py (+delete_release, unplanned), docs/playbooks/promotion.md (2 new sections + cleanup subsection) | server-release: layout check, then server config diff (docker-compose.yml + union of server/*.yaml on both sides), both before any write; then prepare_release, switch_current, query NOT_FINISHED_STATUSES runs for adops/release tags under <server>/releases, delete via releases_to_delete; untagged unfinished run pauses cleanup.",
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-27T08:29:14Z",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "ERROR tests/unit/infrastructure/test_connection_probe.py::test_a_reachable_postgres_connects_without_creating_anything (Postgres-backed tests; coverage 98.61%)",
+          "resolvedBy": "gate-fix",
+          "resolution": "environment only: set ADOPS_TEST_POSTGRES_DSN to the local adops-test-pg container (port 55432) as CI sets it; no code change; 100% coverage"
+        }
+      ],
+      "baseRef": "15a72ef04451ab90d68beb3bd11713372f801594",
+      "baseDirty": true,
+      "unplannedFiles": [
+        "src/adops/infrastructure/release_folders.py"
+      ],
+      "gradeResult": {
+        "phaseId": "release-command",
+        "overallPass": true,
+        "dimensions": [
+          {
+            "dimensionId": "refuse-without-touching",
+            "score": 9,
+            "minScore": 9,
+            "passed": true
+          },
+          {
+            "dimensionId": "in-use-from-instance",
+            "score": 9,
+            "minScore": 8,
+            "passed": true
+          },
+          {
+            "dimensionId": "happy-path-order",
+            "score": 9,
+            "minScore": 8,
+            "passed": true
+          },
+          {
+            "dimensionId": "stop-message-anchor-exists",
+            "score": 9,
+            "minScore": 8,
+            "passed": true
+          }
+        ],
+        "summary": "Layout and Server config checked before any write; prepare, switch, then cleanup protecting folders of unfinished runs (NOT_FINISHED_STATUSES) with an untagged-run pause; 19 tests pass. Gaps: private Dagster import; no clear message if the Dagster instance fails after the switch."
+      },
+      "gateRun": [
+        "ruff check: pass",
+        "pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass, 100%",
+        "pytest tests/e2e -m e2e: pass (11 tests, 12m33s)"
+      ]
+    },
+    {
+      "phaseId": "deploy-workflows-use-release-folders",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-27T08:47:29Z",
+      "completedAt": "2026-11-27T09:18:05Z",
+      "notes": "Already dirty at start (horizon 17 phases 1-3, uncommitted): docs/playbooks/promotion.md, docs/roadmaps/agentic-dataops/*.md, src/adops/infrastructure/dagster_orchestrator.py, dagster_server.py, release_folders.py, src/adops/interface/cli.py, run_command.py, server.py, release_command.py, and their unit tests. | Changed: src/adops/templates/github/workflows/adops-stage.yml, adops-prod.yml, src/adops/templates/demo/docker-compose.yml, plain/docker-compose.yml, tests/unit/interface/test_init_command.py, tests/e2e/conftest.py, tests/e2e/test_server.py, docs/playbooks/promotion.md, docs/playbooks/run-stage-and-prod-on-a-mac.md, docs/adr/0016-....md. Deploys now validate, run `adops server-release --server-dir /project --from /checkout --commit <HEAD>` with the checkout mounted :ro, reload, then `adops run --all --env <env> --project /project/current`; compose ADOPS_PROJECT=/project/current; e2e Server fixture (server_demo in conftest) moves the demo to releases/e2e + relative current. test_server.py only switches its fixtures to server_demo. Mac playbook also gained a make-the-current-link step (fresh Server needs it).",
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-27T09:04:37Z",
+          "gate": "uv run pytest tests/e2e -m e2e",
+          "detail": "FAILED test_schedule_launches_a_successful_stage_run[duckdb]: FileNotFoundError .../shop/adops.yaml (test helper warehouse() read the Server folder root, not current/)",
+          "resolvedBy": "gate-fix",
+          "resolution": "test_schedule_launches_a_successful_stage_run reads the DuckDB Warehouse through current/ (replace(demo, project=.../current))"
+        }
+      ],
+      "baseRef": "15a72ef04451ab90d68beb3bd11713372f801594",
+      "baseDirty": true,
+      "unplannedFiles": [
+        "tests/e2e/test_server.py",
+        "docs/roadmaps/agentic-dataops/discoveries.md"
+      ],
+      "gateRun": [
+        "uv run ruff check: pass",
+        "uv run pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass, 2107 passed, 100% coverage",
+        "uv build --wheel + unzip -l: both docker-compose.yml templates and both deploy workflows ship (g3)",
+        "uv run pytest tests/e2e -m e2e: pass, 11 passed in 692s (first run 1 failed, fixed)"
+      ],
+      "gradeResult": {
+        "phaseId": "deploy-workflows-use-release-folders",
+        "overallPass": true,
+        "dimensions": [
+          {
+            "dimensionId": "workflow-steps-and-forbidden-commands",
+            "score": 9,
+            "minScore": 9,
+            "pass": true
+          },
+          {
+            "dimensionId": "checkout-mount-read-only",
+            "score": 9,
+            "minScore": 8,
+            "pass": true
+          },
+          {
+            "dimensionId": "compose-identity-unchanged",
+            "score": 9,
+            "minScore": 8,
+            "pass": true,
+            "gaps": "no test asserts absence of top-level name:; checked by diff"
+          },
+          {
+            "dimensionId": "switch-keeps-shared-state",
+            "score": 9,
+            "minScore": 8,
+            "pass": true
+          },
+          {
+            "dimensionId": "e2e-fixture-new-layout",
+            "score": 9,
+            "minScore": 8,
+            "pass": true
+          }
+        ],
+        "summary": "Deploys validate, server-release with read-only /checkout, reload, run from /project/current; YAML-parsing tests plus a real switch test.",
+        "gradedAt": "2026-11-27T09:18:05Z"
+      }
+    },
+    {
+      "phaseId": "e2e-deploy-during-held-run",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-27T09:21:27Z",
+      "completedAt": "2026-11-27T09:48:32Z",
+      "notes": "already dirty at start (earlier phases, uncommitted): docs/adr/0016-promotion-runs-on-a-self-hosted-runner-per-server.md docs/playbooks/promotion.md docs/playbooks/run-stage-and-prod-on-a-mac.md docs/roadmaps/agentic-dataops/blockers.md docs/roadmaps/agentic-dataops/decisions.md docs/roadmaps/agentic-dataops/discoveries.md docs/roadmaps/agentic-dataops/next-horizon-brief.md docs/roadmaps/agentic-dataops/state.md src/adops/infrastructure/dagster_orchestrator.py src/adops/infrastructure/dagster_server.py src/adops/interface/cli.py src/adops/interface/run_command.py src/adops/interface/server.py src/adops/templates/demo/docker-compose.yml src/adops/templates/github/workflows/adops-prod.yml src/adops/templates/github/workflows/adops-stage.yml src/adops/templates/plain/docker-compose.yml tests/e2e/conftest.py tests/e2e/test_server.py tests/unit/infrastructure/test_dagster_orchestrator.py tests/unit/infrastructure/test_dagster_server.py tests/unit/infrastructure/test_dbt_transform.py tests/unit/interface/test_init_command.py tests/unit/interface/test_run_command.py tests/unit/interface/test_server.py docs/roadmaps/agentic-dataops/horizons/horizon-17-deploys-switch-release-folders-roadmap.json docs/roadmaps/agentic-dataops/horizons/horizon-17-deploys-switch-release-folders-roadmap.md docs/roadmaps/agentic-dataops/horizons/horizon-17-deploys-switch-release-folders-roadmap.status.json docs/roadmaps/agentic-dataops/horizons/horizon-17-deploys-switch-release-folders-roadmap.status.last_good.json src/adops/infrastructure/release_folders.py src/adops/interface/release_command.py tests/unit/infrastructure/test_release_folders.py tests/unit/interface/test_release_command.py ; tests/e2e/test_server.py and conftest.py snapshotted to scratch to separate this phase's diff || changed: tests/e2e/test_server.py (+166 lines vs start snapshot; conftest.py unchanged). Adds test_deploy_while_a_run_is_held_keeps_its_release_folder: holds the stage Warehouse lock, waits for the first scheduled run to be STARTED and tagged releases/<A>, adds 3 release folders newer than A (os.utime on their .adops links), runs adops server-release for commit-b (a copy of A with reverse_sync_customer_stats renamed push_customer_stats) and the GraphQL reload, then frees the lock and asserts: held run tag/step metadata/fingerprint row are A's, releases/<A> kept, between-1 deleted, current is releases/commit-b inside the container, next scheduled run is tagged and reports commit-b. Amendment 1: Run Log evidence replaced by Dagster step-output metadata (scheduled runs write no Run Log).",
+      "failures": [
+        {
+          "at": "2026-11-27T09:31:52Z",
+          "kind": "gate",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "54 setup errors: ADOPS_TEST_POSTGRES_DSN is not set (local env had no test Postgres); coverage 98.61% as a result",
+          "resolvedBy": "gate-fix",
+          "resolution": "set ADOPS_TEST_POSTGRES_DSN to the already-running adops-test-pg container (port 55432); no code changed; 100% coverage"
+        }
+      ],
+      "baseRef": "15a72ef04451ab90d68beb3bd11713372f801594",
+      "baseDirty": true,
+      "amendments": [
+        {
+          "by": "execute",
+          "reason": "changes[2] asks to assert on the held run's Run Log, but scheduled Server runs write no Run Log (only CLI and MCP runs do). The evidence a scheduled run does leave is its Dagster step-output metadata, keyed by Step name, and the stage fingerprint rows it saves.",
+          "grounding": "decisions.md horizon 11: 'Only CLI runs and MCP run/preview write Run Logs, by wrapping run_project; scheduled Server runs write none'; dagster_server._pipeline_job adds output metadata {step.name: status}.",
+          "before": {
+            "changes": [
+              "Release the lock and assert the held run's Run Log and saved stage Step Fingerprint match commit A, releases/<A> still exists, and the next run uses commit B."
+            ]
+          },
+          "after": {
+            "changes": [
+              "Release the lock and assert the held run's Dagster step-output metadata (Step names; scheduled runs write no Run Log) and saved stage Step Fingerprint match commit A, releases/<A> still exists, and the next run uses commit B. Commit B renames one Step, so A's Step name and its fingerprint row can only come from a run that read A's Pipeline."
+            ]
+          },
+          "at": "2026-11-27T09:21:43Z"
+        }
+      ],
+      "unplannedFiles": [],
+      "gateRun": "ruff check: pass; ADOPS_TEST_POSTGRES_DSN=… uv run pytest tests/unit --cov: pass (100%); uv run pytest tests/e2e/test_server.py -m e2e -k held -v: 2 passed (postgres 97s, duckdb 117s); uv run pytest tests/e2e -m e2e --durations=10: 13 passed in 1031.78s (17:11), new case 116.87s postgres + 112.15s duckdb; g3 not run (no template changes)",
+      "gradeResult": {
+        "phaseId": "e2e-deploy-during-held-run",
+        "dimensionScores": [
+          {
+            "dimensionId": "held-run-finishes-on-old",
+            "score": 8,
+            "pass": true,
+            "evidence": "Deploy only after STARTED + adops/release tag polled; held run still STARTED after deploy; A/B differ by a Step rename; held run's step-output metadata names A's Step; saved fingerprint row equals A's host-computed fingerprint. Gap: the only A/B difference is Pipeline YAML, read before the lock, so post-lock reads (dbt tree) from A are shown only via the tag and A's folder surviving."
+          },
+          {
+            "dimensionId": "held-folder-survives-cleanup",
+            "score": 9,
+            "pass": true,
+            "evidence": "3 between-N folders with .adops link mtimes set via os.utime(follow_symlinks=False) between A and B; asserts 'deleted: releases/between-1' and its absence, and releases/<A>/pipelines still exists. Not asserting between-2/3 kept."
+          },
+          {
+            "dimensionId": "next-run-uses-new",
+            "score": 9,
+            "pass": true,
+            "evidence": "GraphQL reload asserted LOADED; readlink inside container equals releases/commit-b; next run tag /project/releases/commit-b, step metadata names push_customer_stats, fingerprint row equals B's."
+          },
+          {
+            "dimensionId": "fits-e2e-budget",
+            "score": 9,
+            "pass": true,
+            "evidence": "Uses server_image and held_*_lock via stage_warehouse_lock; no build/clone/push; 116.87s + 112.15s; full e2e 17:11 < 20 min; bounded polling only. ~3 min headroom left."
+          }
+        ],
+        "overallPass": true
+      }
+    }
+  ]
+}

@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from adops.domain.pipeline import SyncStep
 from adops.domain.reverse_sync import ReverseSyncStep
 from adops.domain.transform import TransformStep
 from adops.infrastructure.git_start import GitStart
+from adops.infrastructure.release_folders import prepare_release, switch_current
 from adops.interface import cli, init_command
 from adops.interface.run_command import DAGSTER_FILE
 
@@ -389,7 +391,7 @@ def test_server_services_run_from_the_bind_mounted_project(project):
         assert service["volumes"] == ["./:/project"]
         assert service["environment"] == {
             "DAGSTER_HOME": "/project/server",
-            "ADOPS_PROJECT": "/project",
+            "ADOPS_PROJECT": "/project/current",
         }
         assert service["depends_on"] == {"dagster_meta": {"condition": "service_healthy"}}
     assert services["dagster_daemon"]["command"] == [
@@ -831,7 +833,9 @@ def test_workflows_carry_the_installed_adops_version(project):
     assert f"adops=={adops.__version__}" in (project / PULL_REQUEST_WORKFLOW).read_text()
 
 
-FOLDER_UPDATE = 'git -C "$ADOPS_SERVER_DIR" checkout --detach FETCH_HEAD'
+SERVER_RELEASE = "dagster_daemon adops server-release"
+CHECKOUT_MOUNT = '-v "$GITHUB_WORKSPACE:/checkout:ro"'
+RUN_FROM_CURRENT = "--project /project/current"
 
 
 def deploy_job(project, environment):
@@ -886,20 +890,21 @@ def test_only_the_prod_deploy_waits_for_reviewer_approval(project):
 
 
 @pytest.mark.parametrize("environment", ["stage", "prod"])
-def test_deploy_validates_the_checkout_before_moving_the_server_folder(project, environment):
+def test_deploy_validates_the_checkout_before_switching_the_server_release(project, environment):
     job = deploy_job(project, environment)
     steps = job["steps"]
 
     validate = step_index(job, "dagster_daemon adops validate")
-    update = step_index(job, FOLDER_UPDATE)
+    release = step_index(job, SERVER_RELEASE)
     reload = step_index(job, "reloadRepositoryLocation")
     run = step_index(job, f"dagster_daemon adops run --all --env {environment}")
-    assert 0 < validate < update < reload < run == len(steps) - 2
+    assert 0 < validate < release < reload < run == len(steps) - 2
     assert steps[0]["with"]["fetch-depth"] == 0
     assert steps[validate]["run"].startswith(SERVER_COMPOSE_RUN)
     assert '-v "$GITHUB_WORKSPACE:/project"' in steps[validate]["run"]
     assert steps[run]["run"] == (
         f"{SERVER_COMPOSE_RUN} -T dagster_daemon adops run --all --env {environment}"
+        f" {RUN_FROM_CURRENT}"
     )
     assert "if" not in job and "continue-on-error" not in job
     assert all("continue-on-error" not in step for step in steps)
@@ -917,19 +922,31 @@ def test_deploy_always_gives_the_checkout_back_and_never_chowns_server_state(pro
     )
 
 
-@pytest.mark.parametrize(
-    ("environment", "version"), [("stage", '"$GITHUB_SHA"'), ("prod", '"refs/tags/$RELEASE_TAG"')]
-)
-def test_deploy_moves_the_server_folder_by_a_local_fetch_only(project, environment, version):
-    text = (project / DEPLOY_WORKFLOWS[environment]).read_text()
-    update = step_script(deploy_job(project, environment), FOLDER_UPDATE)
+@pytest.mark.parametrize("environment", ["stage", "prod"])
+def test_release_step_copies_the_read_only_checkout_inside_the_server_container(
+    project, environment
+):
+    commit, *command = step_script(deploy_job(project, environment), SERVER_RELEASE).splitlines()
+    command = " ".join(" ".join(command).replace("\\", " ").split())
 
-    assert update.splitlines() == [
-        f'git -C "$ADOPS_SERVER_DIR" fetch "$GITHUB_WORKSPACE" {version}',
-        FOLDER_UPDATE,
-    ]
-    for forbidden in ("reset --hard", "git clean", "persist-credentials: true"):
-        assert forbidden not in text
+    assert commit == 'commit=$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)'
+    assert command == (
+        f"{SERVER_COMPOSE_RUN} -T {CHECKOUT_MOUNT} {SERVER_RELEASE}"
+        ' --server-dir /project --from /checkout --commit "$commit"'
+    )
+    assert re.findall(r'-v "([^"]+)"', command) == ["$GITHUB_WORKSPACE:/checkout:ro"]
+
+
+@pytest.mark.parametrize("environment", ["stage", "prod"])
+def test_deploys_never_change_live_files_with_git_or_restart_the_server(project, environment):
+    job = deploy_job(project, environment)
+
+    assert job["steps"][0]["with"]["persist-credentials"] is False
+    for command in commands(job):
+        for line in command.replace("\\\n", " ").splitlines():
+            assert not re.search(r"\bgit\b.*\b(fetch|checkout|reset|clean)\b", line), line
+            assert 'git -C "$ADOPS_SERVER_DIR"' not in line, line
+            assert not re.search(r"docker compose\b.* (up|down|restart|stop|start)\b", line), line
 
 
 def test_prod_deploys_the_published_release_tag(project):
@@ -942,40 +959,59 @@ def test_prod_deploys_the_published_release_tag(project):
     assert "RELEASE_TAG" not in stage["env"]
 
 
+def server_folder(path, project):
+    """A Server folder on the release layout, serving `project` as release 'old'."""
+    (path / ".adops" / "dlt" / "stage").mkdir(parents=True)
+    (path / ".adops" / "dlt" / "stage" / "cursor").write_text("cursor")
+    (path / ".env").write_text("WAREHOUSE_PASSWORD=secret\n")
+    shutil.copy(project / "docker-compose.yml", path)
+    shutil.copytree(project / "server", path / "server")
+    prepare_release(path, project, "old")
+    switch_current(path, "old")
+    return path
+
+
 @pytest.mark.parametrize("environment", ["stage", "prod"])
-def test_folder_update_moves_the_server_to_the_new_version_and_keeps_its_local_files(
-    tmp_path, demo, environment
+def test_release_step_switch_keeps_the_server_env_and_adops_state(
+    tmp_path, monkeypatch, demo, environment
 ):
+    monkeypatch.setenv("DAGSTER_HOME", str(tmp_path))
     workspace = tmp_path / "workspace"
-    server = tmp_path / "server"
+    shutil.copytree(demo, workspace)
+    (workspace / ".env").write_text("WAREHOUSE_PASSWORD=stale-checkout-copy\n")
     git("init", "-q", "-b", "main", str(workspace), cwd=tmp_path)
-    (workspace / ".gitignore").write_text(".env\n.adops/\n")
-    (workspace / "version").write_text("old\n")
     git("add", ".", cwd=workspace)
-    git("commit", "-qm", "old", cwd=workspace)
-    git("clone", "-q", str(workspace), str(server), cwd=tmp_path)
-    (server / ".env").write_text("WAREHOUSE_PASSWORD=secret\n")
-    (server / ".adops").mkdir()
-    (server / ".adops" / "warehouse.duckdb").write_text("state")
-    (workspace / "version").write_text("new\n")
-    git("commit", "-qam", "new", cwd=workspace)
-    git("tag", "-a", "v1", "-m", "v1", cwd=workspace)
-    new = git("rev-parse", "HEAD", cwd=workspace)
+    git("commit", "-qm", "new", cwd=workspace)
+    commit = git("rev-parse", "HEAD", cwd=workspace)
+    server = server_folder(tmp_path / "server", demo)
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "docker").write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$DOCKER_ARGS"\n')
+    (fake / "docker").chmod(0o755)
     env = {
         **GIT_ENV,
+        "PATH": f"{fake}{os.pathsep}{os.environ['PATH']}",
         "ADOPS_SERVER_DIR": str(server),
         "GITHUB_WORKSPACE": str(workspace),
-        "GITHUB_SHA": new,
-        "RELEASE_TAG": "v1",
+        "DOCKER_ARGS": str(tmp_path / "docker-args"),
     }
 
-    script = step_script(deploy_job(demo, environment), FOLDER_UPDATE)
+    script = step_script(deploy_job(demo, environment), SERVER_RELEASE)
     subprocess.run(["bash", "-e", "-c", script], env=env, check=True, capture_output=True)
+    argv = (tmp_path / "docker-args").read_text().splitlines()
+    assert argv[argv.index("-v") + 1] == f"{workspace}:/checkout:ro"
+    in_container = {"/project": str(server), "/checkout": str(workspace)}
+    result = runner.invoke(
+        cli.app, [in_container.get(arg, arg) for arg in argv[argv.index("adops") + 1 :]]
+    )
 
-    assert git("rev-parse", "HEAD", cwd=server) == new
-    assert (server / "version").read_text() == "new\n"
-    assert (server / ".env").read_text() == "WAREHOUSE_PASSWORD=secret\n"
-    assert (server / ".adops" / "warehouse.duckdb").read_text() == "state"
+    assert result.exit_code == 0, result.output
+    current = server / "current"
+    assert os.readlink(current) == f"releases/{commit}"
+    assert (current / "adops.yaml").read_bytes() == (workspace / "adops.yaml").read_bytes()
+    assert (current / ".env").read_text() == "WAREHOUSE_PASSWORD=secret\n"
+    assert (current / ".adops" / "dlt" / "stage" / "cursor").read_text() == "cursor"
+    assert (server / "releases" / "old" / "adops.yaml").is_file()
 
 
 @pytest.mark.parametrize("environment", ["stage", "prod"])
@@ -992,12 +1028,6 @@ def test_deploy_reloads_the_code_location_the_server_workspace_names(project, en
     assert 'curl --fail --silent --show-error -X POST "http://127.0.0.1:$port/graphql"' in script
     assert "port=$(grep -E '^DAGSTER_WEBSERVER_PORT=' \"$ADOPS_SERVER_DIR/.env\" | cut" in script
     assert not re.search(r'(^|[\s;])(source|\.) +"?\$\{?ADOPS_SERVER_DIR', script)
-
-
-def test_deploys_reload_the_server_without_restarting_its_containers(project):
-    for name in DEPLOY_WORKFLOWS.values():
-        text = (project / name).read_text()
-        assert not re.search(r"docker compose\b.* (up|down|restart|stop|start)\b", text), name
 
 
 def reload_result(typename, status="LOADED", location="RepositoryLocation"):
