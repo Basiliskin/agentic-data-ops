@@ -21,11 +21,11 @@ You don't need to know Git or Docker. Once you're set up, your assistant handles
 ## Install
 
 ```sh
-uv tool install git+https://github.com/Basiliskin/agentic-data-ops
+uv tool install adops
 adops --version
 ```
 
-adops isn't on PyPI yet. When it is, this will become `uv tool install adops`.
+To install the latest code from GitHub instead: `uv tool install git+https://github.com/Basiliskin/agentic-data-ops`.
 
 ## Quickstart: the demo shop (about 10 minutes)
 
@@ -192,11 +192,11 @@ can be committed safely.
 
 ## Going further
 
-- **Run stage and prod**: [Run stage and prod locally on a Mac](docs/playbooks/run-stage-and-prod-on-a-mac.md)
-- **Pull request → stage → prod through GitHub**: [Promotion](docs/playbooks/promotion.md)
-- **Check the quickstart and Assistant example still work**: [Try the Assistant on the demo](docs/playbooks/try-the-assistant.md)
-- **Why it's built this way**: [Architecture decisions](docs/adr/)
-- **What the words mean**: [Glossary](GLOSSARY.md)
+- **Run stage and prod**: [Run stage and prod locally on a Mac](https://github.com/Basiliskin/agentic-data-ops/blob/main/docs/playbooks/run-stage-and-prod-on-a-mac.md)
+- **Pull request → stage → prod through GitHub**: [Promotion](https://github.com/Basiliskin/agentic-data-ops/blob/main/docs/playbooks/promotion.md)
+- **Check the quickstart and Assistant example still work**: [Try the Assistant on the demo](https://github.com/Basiliskin/agentic-data-ops/blob/main/docs/playbooks/try-the-assistant.md)
+- **Why it's built this way**: [Architecture decisions](https://github.com/Basiliskin/agentic-data-ops/blob/main/docs/adr/)
+- **What the words mean**: [Glossary](https://github.com/Basiliskin/agentic-data-ops/blob/main/GLOSSARY.md)
 
 ## How it works (for data engineers)
 
@@ -217,4 +217,4 @@ can be committed safely.
 
 ## License
 
-[Apache-2.0](LICENSE)
+[Apache-2.0](https://github.com/Basiliskin/agentic-data-ops/blob/main/LICENSE)
