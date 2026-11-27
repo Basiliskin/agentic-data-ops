@@ -5,6 +5,7 @@ from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 from adops.domain.checks import CheckResult, LoadFacts, SourceFacts
+from adops.domain.deploy_rerun import DeployState
 from adops.domain.pipeline import SyncStep, SyncTable
 from adops.domain.reverse_sync import ReverseSyncStep
 from adops.domain.reverse_sync_diff import Diff, PreviewSample, Row
@@ -173,11 +174,24 @@ class SchemaSnapshotStore(Protocol):
 
 @runtime_checkable
 class StepFingerprintStore(Protocol):
-    """Keeps each Step's Step Fingerprint from stage's last successful run, in Step order."""
+    """Keeps each Step's Step Fingerprint from its Environment's last passing run, in Step order."""
 
     def load(self, pipeline: str) -> Mapping[str, str]: ...
 
     def save(self, pipeline: str, step: str, fingerprint: str) -> None: ...
+
+
+@runtime_checkable
+class DeployStateStore(Protocol):
+    """An Environment's Deploy State: its Settings Marker and the record ids it has run with."""
+
+    def load(self) -> DeployState: ...
+
+    def save_seen_records(self, pipeline: str, record_ids: Collection[str]) -> None:
+        """Add the ids to the seen ones; ids seen before stay seen."""
+        ...
+
+    def save_marker(self, marker: str) -> None: ...
 
 
 @runtime_checkable
@@ -200,9 +214,10 @@ class StepStatus(StrEnum):
     CHECK_FAILED = "check_failed"
     SKIPPED = "skipped"
     DEFERRED = "deferred"
+    UNCHANGED = "unchanged"
 
 
-SUCCEEDED = frozenset({StepStatus.PASSED, StepStatus.DEFERRED})
+SUCCEEDED = frozenset({StepStatus.PASSED, StepStatus.DEFERRED, StepStatus.UNCHANGED})
 
 
 @dataclass(frozen=True)

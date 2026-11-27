@@ -18,6 +18,7 @@ from fakes import (
     TARGET_PASSWORD,
     TARGET_ROWS,
     WAREHOUSE_PASSWORD,
+    FakeDeployStateStore,
     FakeFingerprintStore,
     FakeProjectFiles,
     FakeReverseSync,
@@ -34,6 +35,7 @@ from fakes import (
 from adops.application import run_pipeline as run_pipeline_module
 from adops.application.ports import (
     Clock,
+    DeployStateStore,
     Orchestrator,
     ProjectFiles,
     ResolvedConnection,
@@ -57,6 +59,7 @@ from adops.application.run_pipeline import (
     BranchSourcesNotParameterizedError,
     BreakingChangeError,
     CheckFailedError,
+    DeployRun,
     EmptySourceTableError,
     InOrderOrchestrator,
     PlannedReverseSyncStep,
@@ -1813,6 +1816,175 @@ def test_a_fingerprint_store_failure_fails_the_step_without_its_text():
 
     assert statuses(result)[:2] == [("customers", StepStatus.FAILED), ("build", StepStatus.SKIPPED)]
     assert result.steps[0].error == "Step customers: step fingerprint store: RuntimeError"
+
+
+PROD_SETTINGS = BRANCH_SETTINGS + "  prod:\n" + BRANCH_SETTINGS.split("  stage:\n")[1].replace(
+    "stage.duckdb", "prod.duckdb"
+)
+
+
+def run_deploy(
+    deploy: DeployRun,
+    environment: str = STAGE,
+    records: tuple[AcceptedChangeRecord, ...] = (),
+    orchestrator: CountingOrchestrator | None = None,
+    transform: FakeTransform | None = None,
+    sync: RecordingSync | None = None,
+    env=BRANCH_ENV,
+) -> RunResult:
+    return run_pipeline(
+        BRANCH_PIPELINE,
+        PROD_SETTINGS,
+        environment,
+        env,
+        sync or RecordingSync(),
+        FakeSnapshotStore(),
+        FixedClock(),
+        orchestrator,
+        transform or FakeTransform(),
+        FakeReverseSync(),
+        records=records,
+        deploy=deploy,
+    )
+
+
+def shop_record(record_id: str, pipeline: str = "shop") -> AcceptedChangeRecord:
+    return AcceptedChangeRecord(record_id, pipeline, "customers", ())
+
+
+def test_the_deploy_state_fake_satisfies_its_port():
+    assert isinstance(FakeDeployStateStore(), DeployStateStore)
+
+
+def test_an_unchanged_deploy_runs_nothing_and_passes_with_every_step_unchanged():
+    store, sync, orchestrator = FakeDeployStateStore(), RecordingSync(), CountingOrchestrator()
+
+    result = run_deploy(DeployRun(None, store), sync=sync, orchestrator=orchestrator)
+
+    assert orchestrator.plans == [] and sync.calls == []
+    assert statuses(result) == [(name, StepStatus.UNCHANGED) for name in STEP_NAMES]
+    assert result.succeeded and not result.retryable
+    assert store.seen_saves == []
+
+
+def test_an_unchanged_deploy_needs_no_secret():
+    result = run_deploy(DeployRun(None, FakeDeployStateStore()), env=StrictEnv({}))
+
+    assert result.succeeded
+
+
+@pytest.mark.parametrize("environment", [STAGE, "prod"])
+def test_a_from_step_deploy_marks_earlier_steps_unchanged_and_runs_every_later_one(environment):
+    store, sync, orchestrator = FakeDeployStateStore(), RecordingSync(), CountingOrchestrator()
+
+    result = run_deploy(DeployRun(1, store), environment, sync=sync, orchestrator=orchestrator)
+
+    [plan] = orchestrator.plans
+    assert [task.name for task in plan.steps] == ["build", "push_stats"]
+    assert sync.calls == []
+    assert statuses(result) == [
+        ("customers", StepStatus.UNCHANGED),
+        ("build", StepStatus.PASSED),
+        ("push_stats", StepStatus.PASSED),
+    ]
+    assert result.environment == environment
+    assert result.succeeded
+    assert store.seen_saves == [("shop", ())]
+
+
+def test_a_full_deploy_runs_every_step_and_saves_only_this_pipelines_records():
+    store, orchestrator = FakeDeployStateStore(), CountingOrchestrator()
+    records = (shop_record("r1"), shop_record("other", pipeline="billing"), shop_record("r2"))
+
+    result = run_deploy(DeployRun(0, store), records=records, orchestrator=orchestrator)
+
+    [plan] = orchestrator.plans
+    assert [task.name for task in plan.steps] == STEP_NAMES
+    assert [status for _, status in statuses(result)] == [StepStatus.PASSED] * 3
+    assert store.seen_saves == [("shop", ("r1", "r2"))]
+    assert store.load().seen_record_ids == {"r1", "r2"}
+
+
+def test_a_failed_deploy_step_marks_no_record_seen():
+    store = FakeDeployStateStore()
+    failing = FakeTransform(transform_result(dbt_test("unique_id", status="fail")))
+
+    result = run_deploy(DeployRun(0, store), records=(shop_record("r1"),), transform=failing)
+
+    assert statuses(result) == [
+        ("customers", StepStatus.PASSED),
+        ("build", StepStatus.CHECK_FAILED),
+        ("push_stats", StepStatus.SKIPPED),
+    ]
+    assert not result.succeeded
+    assert store.seen_saves == []
+
+
+def test_a_deploy_state_save_failure_fails_the_run_without_its_text():
+    store = FakeDeployStateStore(fail_save=RuntimeError(f"connect {WAREHOUSE_PASSWORD}"))
+
+    result = run_deploy(DeployRun(1, store), records=(shop_record("r1"),))
+
+    assert not result.succeeded
+    assert statuses(result) == [
+        ("customers", StepStatus.UNCHANGED),
+        ("build", StepStatus.PASSED),
+        ("push_stats", StepStatus.FAILED),
+    ]
+    assert result.steps[-1].error == "Step push_stats: deploy state store: RuntimeError"
+    assert not result.steps[-1].retryable
+    assert_no_secret_in(repr(result), *(step.error or "" for step in result.steps))
+
+
+def test_a_run_cannot_be_both_a_branch_run_and_a_deploy_run():
+    with pytest.raises(ValueError, match="not both"):
+        run_pipeline(
+            BRANCH_PIPELINE,
+            BRANCH_SETTINGS,
+            BRANCH,
+            BRANCH_ENV,
+            RecordingSync(),
+            FakeSnapshotStore(),
+            FixedClock(),
+            branch=BranchRun(BRANCH, {}, None),
+            deploy=DeployRun(None, FakeDeployStateStore()),
+        )
+
+
+def test_a_passing_prod_run_saves_prods_own_step_fingerprints():
+    store, files = FakeFingerprintStore(), dbt_files()
+
+    result = run_pipeline(
+        BRANCH_PIPELINE,
+        PROD_SETTINGS,
+        "prod",
+        BRANCH_ENV,
+        RecordingSync(),
+        FakeSnapshotStore(),
+        FixedClock(),
+        None,
+        FakeTransform(),
+        FakeReverseSync(),
+        StepFingerprinting(store, files),
+    )
+
+    assert result.succeeded and result.environment == "prod"
+    assert store.saves == [("shop", name) for name in STEP_NAMES]
+    assert store.fingerprints["shop"] == fingerprints_of(files)
+
+
+@pytest.mark.parametrize(
+    "steps",
+    [
+        (StepReport("a", StepStatus.UNCHANGED), StepReport("b", StepStatus.FAILED, retryable=True)),
+        (StepReport("a", StepStatus.UNCHANGED), StepReport("b", StepStatus.PASSED)),
+    ],
+)
+def test_unchanged_steps_never_count_as_the_first_failure(steps):
+    result = RunResult("shop", "prod", steps)
+
+    assert result.retryable is (steps[-1].status is StepStatus.FAILED)
+    assert result.succeeded is (steps[-1].status is StepStatus.PASSED)
 
 
 def every_step_error_class() -> set[type[StepError]]:

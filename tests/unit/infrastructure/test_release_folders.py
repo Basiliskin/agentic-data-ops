@@ -157,6 +157,49 @@ def test_prepare_links_shared_state_relatively(server, checkout):
     assert (release / ".adops").resolve() == (server / ".adops").resolve()
 
 
+def test_prepare_creates_shared_adops_so_nested_state_dirs_work(server, checkout):
+    (server / ".adops").rmdir()
+
+    release = prepare_release(server, checkout, "abc")
+
+    nested = release / ".adops" / "dlt" / "stage"
+    nested.mkdir(parents=True)
+    assert (server / ".adops").is_dir()
+    assert not (server / ".adops").is_symlink()
+    assert (server / ".adops" / "dlt" / "stage").is_dir()
+    assert not (server / ".env").is_symlink()
+
+
+def test_prepare_repairs_shared_adops_for_an_already_prepared_release(server, checkout):
+    release = prepare_release(server, checkout, "abc")
+    (server / ".adops").rmdir()
+
+    assert prepare_release(server, checkout, "abc") == release
+
+    (release / ".adops" / "dlt").mkdir(parents=True)
+    assert (server / ".adops" / "dlt").is_dir()
+
+
+def test_prepare_keeps_existing_shared_adops_across_releases(server, checkout):
+    (server / ".adops" / "kept.txt").write_text("existing\n")
+    first = prepare_release(server, checkout, "first")
+    (first / ".adops" / "written.txt").write_text("from first\n")
+
+    second = prepare_release(server, checkout, "second")
+
+    assert (second / ".adops" / "kept.txt").read_text() == "existing\n"
+    assert (second / ".adops" / "written.txt").read_text() == "from first\n"
+
+
+def test_prepare_does_not_create_a_missing_env(server, checkout):
+    (server / ".env").unlink()
+
+    release = prepare_release(server, checkout, "abc")
+
+    assert not (server / ".env").exists()
+    assert (release / ".env").is_symlink()
+
+
 def test_prepare_keeps_symlinks_in_the_checkout_as_links(server, checkout):
     release = prepare_release(server, checkout, "abc")
 

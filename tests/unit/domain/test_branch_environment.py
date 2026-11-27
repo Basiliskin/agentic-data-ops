@@ -146,11 +146,13 @@ def test_a_schema_layout_is_frozen():
         ("Stage", False),
         ("br_stage", False),
         ("stage_test", False),
-        ("prod", False),
+        ("prod", True),
+        ("Prod", False),
+        ("br_prod", False),
         ("dev", False),
     ],
 )
-def test_only_the_environment_named_exactly_stage_saves_fingerprints(name, saves):
+def test_only_the_environments_named_exactly_stage_or_prod_save_fingerprints(name, saves):
     assert saves_stage_fingerprint(name) is saves
 
 

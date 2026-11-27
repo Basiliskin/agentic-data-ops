@@ -9,6 +9,7 @@ from adops.domain.pipeline import Step, SyncStep
 from adops.domain.transform import TransformStep
 
 STAGE = "stage"
+FINGERPRINT_ENVIRONMENTS = frozenset({STAGE, "prod"})
 BRANCH_PREFIX = "br_"
 # Postgres silently truncates identifiers longer than 63 bytes.
 MAX_IDENTIFIER_BYTES = 63
@@ -47,7 +48,7 @@ def drop_prefix(env_name: str) -> str:
 
 
 def saves_stage_fingerprint(environment_name: str) -> bool:
-    return environment_name == STAGE
+    return environment_name in FINGERPRINT_ENVIRONMENTS
 
 
 @dataclass(frozen=True)

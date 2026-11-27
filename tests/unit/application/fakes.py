@@ -10,6 +10,7 @@ from adops.application.ports import (
     TransformResult,
 )
 from adops.domain.checks import LoadFacts, SourceFacts
+from adops.domain.deploy_rerun import DeployState
 from adops.domain.pipeline import SyncStep, SyncTable
 from adops.domain.reverse_sync import ReverseSyncStep
 from adops.domain.reverse_sync_diff import Diff, Row
@@ -427,6 +428,30 @@ class FakeFingerprintStore:
             raise self.fail_save
         self.saves.append((pipeline, step))
         self.fingerprints.setdefault(pipeline, {})[step] = fingerprint
+
+
+@dataclass
+class FakeDeployStateStore:
+    """Holds one Environment's Deploy State in memory and records every save."""
+
+    state: DeployState = field(default_factory=lambda: DeployState(None))
+    fail_save: Exception | None = None
+    seen_saves: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
+    marker_saves: list[str] = field(default_factory=list)
+
+    def load(self) -> DeployState:
+        return self.state
+
+    def save_seen_records(self, pipeline: str, record_ids: Collection[str]) -> None:
+        if self.fail_save is not None:
+            raise self.fail_save
+        self.seen_saves.append((pipeline, tuple(record_ids)))
+        seen = self.state.seen_record_ids | frozenset(record_ids)
+        self.state = DeployState(self.state.settings_marker, seen)
+
+    def save_marker(self, marker: str) -> None:
+        self.marker_saves.append(marker)
+        self.state = DeployState(marker, self.state.seen_record_ids)
 
 
 @dataclass

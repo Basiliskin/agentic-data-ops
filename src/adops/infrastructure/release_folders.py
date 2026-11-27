@@ -59,6 +59,7 @@ def current_release(server_dir: Path) -> str | None:
 def prepare_release(server_dir: Path, checkout: Path, commit: str) -> Path:
     """Copy the checkout into releases/<commit>; a commit already prepared is left as it is."""
     _check_release_name(commit)
+    (server_dir / ".adops").mkdir(exist_ok=True)
     releases = server_dir / RELEASES
     release = releases / commit
     if os.path.lexists(release):

@@ -55,6 +55,19 @@ def test_a_failure_without_an_error_message_uses_its_status():
     assert failure_alert(result).message == "check_failed"
 
 
+def test_unchanged_steps_are_passed_over_when_naming_the_failing_step():
+    result = RunResult(
+        "shop_sync",
+        "prod",
+        (
+            StepReport("sync_shop", StepStatus.UNCHANGED),
+            StepReport("transform", StepStatus.FAILED, error="dbt model orders failed"),
+        ),
+    )
+
+    assert failure_alert(result).step == "transform"
+
+
 def test_notify_failure_sends_one_alert_and_reports_nothing():
     sender = RecordingSender()
 

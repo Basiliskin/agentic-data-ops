@@ -1,11 +1,12 @@
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import assert_never
 
 from adops.application.ports import (
     MASK,
     Clock,
+    DeployStateStore,
     Orchestrator,
     ProjectFiles,
     ResolvedConnection,
@@ -207,6 +208,17 @@ class BranchRun:
     environment: str
     stage_fingerprints: Mapping[str, str]
     first_changed: int | None
+
+
+@dataclass(frozen=True)
+class DeployRun:
+    """A stage or prod deploy's run: Steps before `start_index` are unchanged in the Environment.
+
+    `start_index` is None when every Step is unchanged, so nothing needs to run.
+    """
+
+    start_index: int | None
+    store: DeployStateStore
 
 
 @dataclass(frozen=True)
@@ -561,17 +573,21 @@ def run_pipeline(
     branch: BranchRun | None = None,
     *,
     records: Sequence[AcceptedChangeRecord] = (),
+    deploy: DeployRun | None = None,
 ) -> RunResult:
     """Run a Pipeline; a Branch run uses stage's settings under the Branch Environment's name.
 
     Outside dev, the Pipeline's accepted-change records let Sync Steps past the Breaking Changes
-    they cover; dev accepts by hand with accept-schema.
+    they cover; dev accepts by hand with accept-schema. A deploy run reruns only from its start
+    Step and, once it passes, marks the Pipeline's records seen in the Environment's Deploy State.
     """
+    if branch is not None and deploy is not None:
+        raise ValueError("a run is either a Branch run or a deploy run, not both")
     pipeline = load_pipeline(pipeline_text)
     settings = load_project_settings(settings_text)
     if branch is None:
         environment = pick_environment(settings.environments, environment_name)
-        first: int | None = 0
+        first: int | None = 0 if deploy is None else deploy.start_index
     else:
         if branch.environment != environment_name:
             raise ValueError("a Branch run must run under its Branch Environment's name")
@@ -579,8 +595,12 @@ def run_pipeline(
         first = branch.first_changed
     ensure_sources_defined(pipeline, environment)
     ensure_targets_defined(pipeline, environment)
+    not_rerun = _deferred if deploy is None else _unchanged
     if first is None:
-        return RunResult(pipeline.name, environment_name, _deferred(pipeline.steps))
+        return RunResult(pipeline.name, environment_name, not_rerun(pipeline.steps))
+    pipeline_records = (
+        () if environment_name == DEV else [r for r in records if r.pipeline == pipeline.name]
+    )
     plan = _build_plan(
         pipeline,
         environment_name,
@@ -591,13 +611,34 @@ def run_pipeline(
         transform,
         reverse_sync,
         first,
-        () if environment_name == DEV else [r for r in records if r.pipeline == pipeline.name],
+        pipeline_records,
     )
     if fingerprinting is not None and saves_stage_fingerprint(environment_name):
         plan = _saving_fingerprints(plan, pipeline, fingerprinting)
-    result = (orchestrator or InOrderOrchestrator()).execute(plan, sync)
-    deferred = _deferred(pipeline.steps[:first])
-    return RunResult(result.pipeline, result.environment, deferred + result.steps)
+    executed = (orchestrator or InOrderOrchestrator()).execute(plan, sync)
+    result = RunResult(
+        executed.pipeline, executed.environment, not_rerun(pipeline.steps[:first]) + executed.steps
+    )
+    if deploy is not None and result.succeeded:
+        return _saving_seen_records(result, deploy.store, [r.id for r in pipeline_records])
+    return result
+
+
+def _saving_seen_records(
+    result: RunResult, store: DeployStateStore, record_ids: Sequence[str]
+) -> RunResult:
+    try:
+        store.save_seen_records(result.pipeline, record_ids)
+        return result
+    except Exception as error:
+        last = result.steps[-1]
+        # Only the type: the store's error text may hold a Warehouse secret.
+        failed = replace(
+            last,
+            status=StepStatus.FAILED,
+            error=f"Step {last.name}: deploy state store: {type(error).__name__}",
+        )
+    return RunResult(result.pipeline, result.environment, result.steps[:-1] + (failed,))
 
 
 def plan_branch_run(
@@ -655,6 +696,10 @@ def _saving_fingerprints(
 
 def _deferred(steps: Sequence[Step]) -> tuple[StepReport, ...]:
     return tuple(StepReport(step.name, StepStatus.DEFERRED) for step in steps)
+
+
+def _unchanged(steps: Sequence[Step]) -> tuple[StepReport, ...]:
+    return tuple(StepReport(step.name, StepStatus.UNCHANGED) for step in steps)
 
 
 def stage_environment(environments: Mapping[str, Environment]) -> Environment:

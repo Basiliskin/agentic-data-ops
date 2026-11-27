@@ -20,9 +20,10 @@ GENERATED_SUFFIXES = (".pyc",)
 
 
 class WarehouseFingerprintStore:
-    """The StepFingerprintStore port backed by a table in stage's adops schema.
+    """The StepFingerprintStore port backed by a table in the Environment's adops schema.
 
-    Rows come back in the order they were last saved, which is Step order for a stage run.
+    Rows come back in the order they were last saved, which is Step order for a stage or prod
+    run.
     """
 
     def __init__(

@@ -125,3 +125,9 @@
 - 2026-11-27 | horizon 17 | Release cleanup keeps the newest 3, current and every folder an in-progress run's adops/release tag names; nothing is deleted while an untagged run is in progress — user choice
 - 2026-11-27 | horizon 17 | Horizon 17 is the release-folder switch only; deploys keep running every Pipeline until horizon 18 adds changed-only reruns — user choice, keeps the horizon within 7 phases
 - 2026-11-27 | horizon 17 | server-release copies files, never calls git (the python:3.12-slim Server image has no git); the runner's checkout is mounted read-only at /checkout
+- 2026-11-27 | horizon 18 | Deploys run `adops run --all --changed` (only with --all and stage/prod); hand-typed `adops run --all` still runs every Step — user choice
+- 2026-11-27 | horizon 18 | Settings Marker = sha256 of canonical JSON of environments[<env>] + timezone + alert_webhook_env; comments, formatting and other Environments' blocks don't count — user choice
+- 2026-11-27 | horizon 18 | Deploy State (marker + seen Accepted-Change Record ids) gets its own table adops._adops_deploy_state in each Environment's Warehouse; _adops_applied_records is not widened
+- 2026-11-27 | horizon 18 | Stale fingerprint rows are ignored by Step name inside plan_deploy, never pruned; first_changed_step and Branch deferral are unchanged
+- 2026-11-27 | horizon 18 | Deploy skips use a new StepStatus UNCHANGED (in SUCCEEDED), printed 'unchanged in <env>'; never 'deferred' or 'skipped'
+- 2026-11-27 | horizon 18 | No real-runner trial in horizon 18; proof is unit tests plus one postgres-only stage e2e case — user choice

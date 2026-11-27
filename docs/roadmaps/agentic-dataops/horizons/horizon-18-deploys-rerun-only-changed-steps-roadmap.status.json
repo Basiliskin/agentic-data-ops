@@ -1,0 +1,196 @@
+{
+  "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-18-deploys-rerun-only-changed-steps-roadmap.json",
+  "roadmapTask": "rerun only Changed Steps on stage and prod deploys (MAP #18 part 2, per next-horizon-brief.md)",
+  "createdAt": "2026-11-27T10:15:09Z",
+  "updatedAt": "2026-11-27T13:56:32Z",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "create-adops-dir-before-release-links",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-27T10:15:09Z",
+      "baseRef": "d4859469b194695cb2cccd3288e4f121da84b3cc",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/horizons/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.status.json.last_good.json,docs/roadmaps/agentic-dataops/state.md,docs/roadmaps/agentic-dataops/archive/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.status.json.last_good.json,docs/roadmaps/agentic-dataops/horizons/horizon-18-deploys-rerun-only-changed-steps-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-18-deploys-rerun-only-changed-steps-roadmap.md || changed: src/adops/infrastructure/release_folders.py, tests/unit/infrastructure/test_release_folders.py — prepare_release now creates server_dir/.adops (exist_ok) before the already-prepared early return, so the release .adops link never dangles; 4 new tests.",
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-27T10:17:57Z",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "54 setup errors: ADOPS_TEST_POSTGRES_DSN is not set (no test Postgres running); coverage 98.61%",
+          "resolvedBy": "gate-fix",
+          "resolution": "set ADOPS_TEST_POSTGRES_DSN to the running adops-test-pg container; no code change"
+        }
+      ],
+      "completedAt": "2026-11-27T10:36:22Z",
+      "gateRun": [
+        "ruff check: pass",
+        "ruff format --check (changed files): pass",
+        "pytest tests/unit --cov (with ADOPS_TEST_POSTGRES_DSN): pass, 2111 passed, 100%",
+        "pytest tests/e2e -m e2e: pass"
+      ],
+      "gradeResult": {
+        "phaseId": "create-adops-dir-before-release-links",
+        "dimensions": [
+          {
+            "dimensionId": "adops-link-resolves-to-real-dir",
+            "score": 10,
+            "minScore": 8,
+            "pass": true,
+            "evidence": "release_folders.py:62 mkdir(exist_ok=True) before early return; test_prepare_creates_shared_adops_so_nested_state_dirs_work does dlt-style nested mkdir; 10: test_prepare_keeps_existing_shared_adops_across_releases proves existing .adops files are kept"
+          },
+          {
+            "dimensionId": "prepare-release-idempotent",
+            "score": 10,
+            "minScore": 7,
+            "pass": true,
+            "evidence": "one-line src diff, tests only added; 10: test_prepare_keeps_existing_shared_adops_across_releases reads through the second release a file written via the first"
+          }
+        ],
+        "overallPass": true,
+        "summary": "One-line mkdir before the early return fixes the dangling .adops link; 4 tests cover nested mkdir, repair of already-prepared roots, shared state across releases, no .env creation."
+      }
+    },
+    {
+      "phaseId": "deploy-rerun-rules-domain",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-27T10:37:53Z",
+      "baseRef": "d4859469b194695cb2cccd3288e4f121da84b3cc",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/horizons/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.status.json.last_good.json,docs/roadmaps/agentic-dataops/state.md,src/adops/infrastructure/release_folders.py,tests/unit/infrastructure/test_release_folders.py,docs/roadmaps/agentic-dataops/archive/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.status.json.last_good.json,docs/roadmaps/agentic-dataops/horizons/horizon-18-deploys-rerun-only-changed-steps-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-18-deploys-rerun-only-changed-steps-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-18-deploys-rerun-only-changed-steps-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-18-deploys-rerun-only-changed-steps-roadmap.status.last_good.json | changed: src/adops/domain/deploy_rerun.py (new), tests/unit/domain/test_deploy_rerun.py (new), src/adops/domain/branch_environment.py, tests/unit/domain/test_branch_environment.py, src/adops/application/ports.py, src/adops/infrastructure/step_fingerprint_store.py. Adds plan_deploy (Deploy Rerun Rules, binding order, by-name filter of stale saved rows), settings_marker (sha256 of one Environment block + timezone + alert_webhook_env), DeployState/DeployPlan values; saves_stage_fingerprint now true for stage and prod. The two unplanned files are docstring-only edits: they said fingerprints come only from stage.",
+      "unplannedFiles": [
+        "src/adops/application/ports.py",
+        "src/adops/infrastructure/step_fingerprint_store.py"
+      ],
+      "completedAt": "2026-11-27T11:00:24Z",
+      "gradeResult": {
+        "phaseId": "deploy-rerun-rules-domain",
+        "dimensionScores": [
+          {
+            "dimensionId": "rule-order-binding",
+            "score": 10,
+            "pass": true,
+            "evidence": "One test per outcome; adjacent full-rule pairs parametrized; every full rule proven to beat both a changed Step and no changed Step. Caveat: the full rules share an outcome, so order among them is not observable."
+          },
+          {
+            "dimensionId": "stale-row-by-name-filter",
+            "score": 10,
+            "pass": true,
+            "evidence": "Filter lives in plan_deploy; first_changed_step untouched; removed, renamed and all-stale cases tested; input rows proven unmodified."
+          },
+          {
+            "dimensionId": "settings-marker-scope",
+            "score": 10,
+            "pass": true,
+            "evidence": "Canonical sha256 of own block + timezone + alert_webhook_env; YAML-parsed comment, format and key-order cases; own-block edit parametrized over source/warehouse/target; secret rotation vs rename tested."
+          },
+          {
+            "dimensionId": "domain-pure-values",
+            "score": 10,
+            "pass": true,
+            "evidence": "Stdlib + adops.domain imports only; frozen dataclasses, frozenset; closed Enum kind and __post_init__ rejecting invalid combinations, tested."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": "ruff check: pass; pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass, 2154 passed, 100%; pytest tests/e2e -m e2e: pass, 13 passed"
+    },
+    {
+      "phaseId": "run-pipeline-deploy-path",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-27T13:33:32Z",
+      "baseRef": "d4859469b194695cb2cccd3288e4f121da84b3cc",
+      "baseDirty": true,
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/horizons/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.status.json.last_good.json,docs/roadmaps/agentic-dataops/state.md,src/adops/application/ports.py,src/adops/domain/branch_environment.py,src/adops/infrastructure/release_folders.py,src/adops/infrastructure/step_fingerprint_store.py,tests/unit/domain/test_branch_environment.py,tests/unit/infrastructure/test_release_folders.py,docs/roadmaps/agentic-dataops/archive/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.status.json.last_good.json,docs/roadmaps/agentic-dataops/horizons/horizon-18-deploys-rerun-only-changed-steps-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-18-deploys-rerun-only-changed-steps-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-18-deploys-rerun-only-changed-steps-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-18-deploys-rerun-only-changed-steps-roadmap.status.last_good.json,src/adops/domain/deploy_rerun.py,tests/unit/domain/test_deploy_rerun.py | changed: src/adops/application/ports.py (already dirty; StepStatus.UNCHANGED in SUCCEEDED, DeployStateStore Protocol), src/adops/application/run_pipeline.py (DeployRun, deploy= param: start None -> all UNCHANGED, index k -> Steps before k UNCHANGED; seen records saved only after a passing from-step/full run, save error fails the last Step with type only; branch+deploy refused), tests/unit/application/fakes.py (FakeDeployStateStore), tests/unit/application/test_run_pipeline.py (10 new tests incl. prod saves fingerprints), tests/unit/application/test_alerts.py (unplanned: alert skips UNCHANGED Steps). Amendment 1: DeployRun carries no record ids; they come from records filtered by Pipeline. | grader note: with fingerprinting on, the last Step fingerprint is saved before a failing seen-records save; safe because the unsaved records stay unseen and force a full rerun next deploy.",
+      "amendments": [
+        {
+          "at": "2026-11-27T13:33:32Z",
+          "by": "execute",
+          "reason": "changes[2] said DeployRun holds the record ids for this Pipeline; run_pipeline already receives records and the seen-records change filters them by r.pipeline, so a second copy on DeployRun would be redundant and could disagree.",
+          "grounding": "run_pipeline signature (run_pipeline.py:549-564) takes records: Sequence[AcceptedChangeRecord]; changes[3] filters records by r.pipeline == pipeline.name",
+          "before": {
+            "changes": [
+              "Add an optional deploy: DeployRun | None = None parameter to run_pipeline. DeployRun holds the start index (int, or None for unchanged), the record ids for this Pipeline and the DeployStateStore. When the index is None, return every Step as UNCHANGED. Otherwise build the plan with the existing _build_plan(first) slicing and mark the earlier Steps UNCHANGED."
+            ]
+          },
+          "after": {
+            "changes": [
+              "Add an optional deploy: DeployRun | None = None parameter to run_pipeline. DeployRun holds the start index (int, or None for unchanged) and the DeployStateStore; the record ids come from run_pipeline's records filtered to this Pipeline. When the index is None, return every Step as UNCHANGED. Otherwise build the plan with the existing _build_plan(first) slicing and mark the earlier Steps UNCHANGED."
+            ]
+          }
+        }
+      ],
+      "unplannedFiles": [
+        "tests/unit/application/test_alerts.py"
+      ],
+      "failures": [
+        {
+          "at": "2026-11-27T13:40:45Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "54 errors in postgres-parametrized infrastructure tests: ADOPS_TEST_POSTGRES_DSN is not set",
+          "resolvedBy": "gate-fix",
+          "resolution": "reran with ADOPS_TEST_POSTGRES_DSN pointing at the running adops-test-pg container (port 55432); no code change"
+        }
+      ],
+      "completedAt": "2026-11-27T13:56:32Z",
+      "gradeResult": {
+        "phaseId": "run-pipeline-deploy-path",
+        "dimensionScores": [
+          {
+            "dimensionId": "unchanged-status-distinct",
+            "score": 10,
+            "pass": true,
+            "evidence": "UNCHANGED in SUCCEEDED; unchanged and from-step (stage+prod) tests; DEFERRED only via _deferred on the non-deploy path. 10: alert test and retryable/succeeded parametrized test over UNCHANGED exist."
+          },
+          {
+            "dimensionId": "seen-records-after-pass-only",
+            "score": 10,
+            "pass": true,
+            "evidence": "save reached only via `deploy is not None and result.succeeded` after execute; failing-Step, sanitized failing-save and two-Pipeline filter tests. 10: all three named tests exist, plus retryable and load() checks."
+          },
+          {
+            "dimensionId": "branch-path-untouched",
+            "score": 10,
+            "pass": true,
+            "evidence": "test_run_pipeline.py diff is additions only; tests/unit/application 236 passed; keyword-only deploy=None; _deferred/stage_environment unedited. 10: branch+deploy refusal test."
+          },
+          {
+            "dimensionId": "port-protocol-only",
+            "score": 10,
+            "pass": true,
+            "evidence": "runtime_checkable Protocol with load/save_seen_records/save_marker returning domain DeployState; no infrastructure import in run_pipeline.py. 10: isinstance test of the fake against the Protocol."
+          },
+          {
+            "dimensionId": "prod-saves-fingerprints",
+            "score": 9,
+            "pass": true,
+            "evidence": "Truth table prod/stage True, dev/Branch False; prod run_pipeline test asserts saved Step names and values. 9: rows carry no Environment, checked only via result.environment."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": "ruff check: pass; pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass, 2167 passed, 100%; pytest tests/e2e -m e2e: pass, 13 passed"
+    },
+    {
+      "phaseId": "warehouse-deploy-state-store",
+      "status": "not-started",
+      "attempts": 0
+    },
+    {
+      "phaseId": "adops-run-changed-flag",
+      "status": "not-started",
+      "attempts": 0
+    },
+    {
+      "phaseId": "deploy-workflows-run-changed",
+      "status": "not-started",
+      "attempts": 0
+    }
+  ]
+}
