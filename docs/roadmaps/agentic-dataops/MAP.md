@@ -5,7 +5,7 @@ Pipelines (Sync, dbt Transform, Reverse Sync with Preview) run on Postgres or Du
 stage, prod and Branch Environments, operated by the user's own Assistant through MCP and six Skills,
 with Promotion through GitHub Actions.
 
-**As of:** 2026-11-26 · **Ordering:** whatever unblocks the most remaining work comes first; ties go
+**As of:** 2026-11-27 · **Ordering:** whatever unblocks the most remaining work comes first; ties go
 to whatever closes an open question. · **User goal:** none given; the vision is the whole goal.
 
 This file is regenerated on every run. It is a view, not a plan. Only the "Done" rows are fact; every
@@ -16,8 +16,7 @@ row marked `candidate` is a current best guess.
 All 16 horizons are complete; nothing is in flight and nothing is briefed as next. The core is
 built: Sync, dbt Transform, Reverse Sync with Preview, Postgres and DuckDB Warehouses, Branch
 Environments, Schedules on a Server, crash recovery, Breaking Changes accepted through Git, the MCP
-server, six Skills, and stage and prod running locally on a Mac. What remains for v1 is proof that the
-GitHub Actions Promotion works on a real runner, a full plain (non-demo) scaffold, production
+server, six Skills, and stage and prod running locally on a Mac. GitHub Actions Promotion was proven on real runners on 2026-11-26/27 (#17). What remains for v1 is a full plain (non-demo) scaffold, production
 playbooks, and three smaller gaps (Assistant safety edges, OTel/Grafana, PyAirbyte).
 
 ## The ordered path
@@ -25,7 +24,7 @@ playbooks, and three smaller gaps (Assistant safety edges, OTel/Grafana, PyAirby
 | # | What | Delivers | Unblocks | Status / Confidence |
 |---|---|---|---|---|
 | 1–16 | Horizons 1–16 | Everything listed under Done below | — | Done (fact) |
-| 17 | Promotion proven on a real self-hosted runner | PR → Branch run, merge → stage, release → prod actually run on the user's own Server machine | 4 open horizon-8 questions (real runner, Dagster reload, root-owned `.adops/` files, prod gate without Enterprise), the horizon-7 run-slot question, the horizon-13 record-in-Branch question, the live release → prod run, automatic Branch drop on PR close, the single-VM playbook. **2026-11-26 trial: PR → Branch run, merge → stage and drop on close passed on a Mac runner; reload-name bug fixed; release → prod still open** | candidate · likely |
+| 17 | Promotion proven on a real self-hosted runner | PR → Branch run, merge → stage, release → prod actually run on the user's own Server machine | Closed by the trials: real runner (Mac and Linux service), Dagster reload incl. a new Schedule, root-owned `.adops/` files (harmless), prod gate without Enterprise (only release publishers), release → prod, Branch drop on PR close. Moved to #18: a deploy during a run in progress. Still open: the horizon-7 run-slot question, the horizon-13 record-in-Branch question, the single-VM playbook | Done (trials 2026-11-26/27, outside a horizon) |
 | 18 | Deploys never change files under a run in progress | A stage/prod deploy no longer runs `git checkout` in the Server folder while a scheduled run is going (a Transform could pick up new dbt models halfway through an old run): deploy into a new folder and switch, or wait for the Server to be idle; a deploy reruns only Changed Steps instead of `run --all` | Safe Promotion with real data volumes; the "full reload on every merge" cost; finding 2.1 of the 2026-11-26 production-readiness review | candidate · likely (after 17) · user-requested |
 | 19 | Freshness alerts | Each Pipeline table can declare how stale it may get (e.g. `fresh_within: 26h`); the Server alerts when a table has not loaded in time, including when a Schedule silently stops or is paused, and sends a recovery notice | The most common real data incident goes unnoticed today; only failed runs alert | candidate · likely · user-requested |
 | 20 | More Verified Sources plus CDC Sync | MySQL and SQL Server Sources (and at least one SaaS API such as Stripe) through dlt as Verified Sources with E2E tests, and CDC Sync (defined in GLOSSARY.md, not built) so deleted rows are seen | adops useful beyond Postgres shops; Incremental Sync's blind spot for deletes; vision criterion 10 meaning more than "Postgres only" | candidate · likely · user-requested |

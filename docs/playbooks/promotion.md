@@ -211,7 +211,9 @@ When a release is published, the `adops-prod.yml` job **waits** until one of tho
 published release deploys to prod at once.
 
 On GitHub Free, Pro and Team, required reviewers work only on public repositories; a private
-repository needs GitHub Enterprise for them. Without them, limit who can publish releases instead:
+repository needs GitHub Enterprise for them. (Tried 2026-11-27: on a private repository GitHub
+refuses with "Please ensure the billing plan supports the required reviewers protection rule", so
+create the environment without reviewers.) Without them, limit who can publish releases instead:
 only people with write access to the repository can.
 
 ([GitHub: Managing environments for deployment](https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment))
@@ -292,3 +294,4 @@ sudo -u <runner-user> docker compose --profile server run --rm --no-deps dagster
 | Date | Where | Result |
 |---|---|---|
 | 2026-11-26 | Stage Server on a Mac (OrbStack, Postgres Warehouse), runner run with `./run.sh`, a fresh private demo repository, Server image built from a wheel | **PR → Branch run, merge → stage and drop on close all passed.** The first deploy failed at the reload step: the workflows asked Dagster for the location `adops.interface.server`, but Dagster names it `adops.interface.server:defs`. Fixed the same day. After that, merge → stage passed (22 s), a pull request adding a dbt model got a Branch run that deferred the unchanged Sync to stage and built only the Transform (17 s), and closing it dropped its schemas. Not yet tried: release → prod, a Linux runner as a service, root-owned `.adops/` files, a reload during a run in progress. |
+| 2026-11-27 | Prod Server on an AWS `m7i-flex.large` VM (Ubuntu 24.04, 2 cores, 8 GB), runner installed as a systemd service, a fresh private demo repository, Server image built from a wheel | **Release → prod passed.** `v0.1.0` made the first prod deploy (26 s; prod Warehouse built, 20 rows written to `shop_prod`). `v0.2.0` added a dbt model and a `schedule:` line: the deploy updated the folder although Dagster had left root-owned files in `.adops/` and `server/logs` (Git ignores them), the reload picked up the new Schedule as RUNNING without a container restart, and prod built the model (25 s). Required reviewers were refused on the private repository (GitHub Free). Not tried: a deploy while a run is in progress. |
