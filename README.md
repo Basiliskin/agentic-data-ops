@@ -4,7 +4,7 @@ Copy data from your app's database into a warehouse, turn it into useful tables 
 the results back to your app, with checks that stop bad data before it spreads. You run it on your
 own machines and drive it by talking to your AI assistant (such as Claude Code).
 
-> **Status: early (0.2).** Works end to end on the demo shop, in dev, stage and prod. Promotion
+> **Status: early (0.3).** Works end to end on the demo shop, in dev, stage and prod. Promotion
 > through GitHub (pull request → stage → release → prod) is proven on real self-hosted runners.
 > Starting your own Project from scratch is still thin (see [below](#start-your-own-project)).
 
