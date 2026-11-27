@@ -2,7 +2,20 @@
 name = "adops"
 dynamic = ["version"]
 description = "Self-hosted data pipelines: sync, transform and check data into a Postgres or DuckDB warehouse."
+readme = "README.md"
 requires-python = ">=3.12"
+authors = [{ name = "Dimitry Katz" }]
+keywords = ["data-pipelines", "dataops", "dbt", "dagster", "dlt", "mcp", "warehouse"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+]
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 dependencies = [
@@ -23,6 +36,11 @@ dependencies = [
     "mcp>=1.30,<2",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Basiliskin/agentic-data-ops"
+Source = "https://github.com/Basiliskin/agentic-data-ops"
+Issues = "https://github.com/Basiliskin/agentic-data-ops/issues"
+
 [project.scripts]
 adops = "adops.interface.cli:main"
 
@@ -39,6 +57,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.version]
 path = "src/adops/__init__.py"
+
+[tool.hatch.build.targets.sdist]
+include = ["src/adops", "tests", "README.md", "LICENSE", "GLOSSARY.md", "pyproject.toml", "uv.lock"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/adops"]
