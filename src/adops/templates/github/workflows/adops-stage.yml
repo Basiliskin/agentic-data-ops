@@ -2,7 +2,8 @@
 # Set the repository variable ADOPS_SERVER_DIR to the Server folder on that machine; it must hold
 # releases/ and a 'current' link (docs/playbooks/promotion.md, "One-time move to release folders").
 # The deploy copies the validated version into releases/<commit>, points current at it, reloads the
-# Server and runs every Pipeline from current. A failing validate changes no file on the Server.
+# Server and reruns, from current, only the Steps that changed since stage's last run. A failing
+# validate changes no file on the Server.
 name: adops stage
 
 on:
@@ -53,10 +54,10 @@ jobs:
               exit 1
             fi
           done
-      - name: Run every Pipeline in stage
+      - name: Rerun the Changed Steps in stage
         run: >-
           docker compose --project-directory "$ADOPS_SERVER_DIR" --profile server run --rm --no-deps -T
-          dagster_daemon adops run --all --env stage --project /project/current
+          dagster_daemon adops run --all --changed --env stage --project /project/current
       - name: Give the checkout back to the runner user
         if: always()
         run: >-

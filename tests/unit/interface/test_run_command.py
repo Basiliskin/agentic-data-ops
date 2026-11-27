@@ -37,8 +37,9 @@ from adops.application.run_pipeline import (
 from adops.domain.accepted_change_record import AcceptedChangeRecord
 from adops.domain.branch_environment import SchemaLayout
 from adops.domain.checks import LoadFacts, SourceFacts
+from adops.domain.deploy_rerun import DeployState, settings_marker
 from adops.domain.errors import PipelineValidationError
-from adops.domain.loader import load_pipeline
+from adops.domain.loader import load_pipeline, load_project_settings
 from adops.domain.pipeline import SyncStep, SyncTable
 from adops.domain.reverse_sync import ReverseSyncStep
 from adops.domain.reverse_sync_diff import Diff, Row
@@ -51,6 +52,7 @@ from adops.infrastructure.dbt_transform import (
     render_duckdb_profile,
     render_postgres_profile,
 )
+from adops.infrastructure.deploy_state_store import WarehouseDeployStateStore
 from adops.infrastructure.dlt_sync import DltSync
 from adops.infrastructure.postgres_reverse_sync import PostgresReverseSync
 from adops.infrastructure.schema_snapshot_store import WarehouseSnapshotStore
@@ -64,6 +66,7 @@ runner = CliRunner()
 REAL_BUILD_SNAPSHOT_STORE = run_command.build_snapshot_store
 REAL_BUILD_FINGERPRINT_STORE = run_command.build_fingerprint_store
 REAL_BUILD_WAREHOUSE_LOCK = run_command.build_warehouse_lock
+REAL_BUILD_DEPLOY_STATE_STORE = run_command.build_deploy_state_store
 DEFAULT_LAYOUT = SchemaLayout.default()
 
 SENTINEL = "s3cr3t-run-command-sentinel"
@@ -462,14 +465,16 @@ def test_adops_run_goes_through_run_in_environment_with_the_built_orchestrator(
 ):
     calls: list[tuple[object, ...]] = []
 
-    def capture(*args: object, lock_timeout: float) -> RunResult:
-        calls.append((*args, lock_timeout))
+    def capture(*args: object, lock_timeout: float, changed: bool) -> RunResult:
+        calls.append((*args, lock_timeout, changed))
         return RunResult("shop_sync", "dev", ())
 
     monkeypatch.setattr(run_command, "run_in_environment", capture)
 
     assert invoke(project).exit_code == 0
-    assert calls == [(project.resolve(), "shop_sync", "dev", orchestrator, DEFAULT_LOCK_TIMEOUT)]
+    assert calls == [
+        (project.resolve(), "shop_sync", "dev", orchestrator, DEFAULT_LOCK_TIMEOUT, False)
+    ]
 
 
 def test_run_passes_the_project_snapshot_store_to_the_pipeline(project, monkeypatch):
@@ -1310,7 +1315,12 @@ def run_project_calls(project, monkeypatch):
     failing: set[str] = set()
 
     def fake_run_project(
-        project_dir: Path, pipeline: str, environment: str, branch: str | None = None
+        project_dir: Path,
+        pipeline: str,
+        environment: str,
+        branch: str | None = None,
+        *,
+        changed: bool = False,
     ) -> RunResult:
         calls.append((project_dir, pipeline, environment, branch))
         status = StepStatus.FAILED if pipeline in failing else StepStatus.PASSED
@@ -1355,7 +1365,9 @@ def test_run_all_stops_at_a_pipeline_that_raises(project, run_project_calls, mon
     calls, _ = run_project_calls
     fake = run_command.run_project
 
-    def raise_on_b(project_dir: Path, pipeline: str, environment: str, branch=None) -> RunResult:
+    def raise_on_b(
+        project_dir: Path, pipeline: str, environment: str, branch=None, *, changed=False
+    ) -> RunResult:
         if pipeline == "b_pipe":
             calls.append((project_dir, pipeline, environment, branch))
             raise ProjectFileError("pipelines/b_pipe.yaml: file not found")
@@ -2000,3 +2012,388 @@ def test_a_halted_branch_passes_once_a_covering_record_is_added(
     assert passed.exit_code == 0, passed.output
     assert "  Applied accepted-change record r1 in br_feat" in passed.output.splitlines()
     assert (project / "pipelines" / "shop_sync.yaml").read_text() == BRANCH_PIPELINE
+
+
+DEPLOY_SETTINGS = (
+    BRANCH_SETTINGS
+    + """  prod:
+    warehouse: {type: postgres, host: prod-warehouse, port: 5435, database: w, user: w,
+                password_env: ADOPS_TEST_STAGE_PASSWORD}
+    sources:
+      shop: {type: postgres, host: localhost, port: 5432, database: s, user: s,
+             password_env: ADOPS_TEST_SHOP_PASSWORD}"""
+    + CRM_TARGET
+)
+
+DEPLOY_PIPELINE = BRANCH_PIPELINE + "schedule: daily at 06:00\n"
+
+DEPLOY_STEPS = ("sync_shop", "transform_shop", "push_stats")
+
+
+@dataclass
+class InMemoryDeployStateStore:
+    locks: object
+    marker: str | None = None
+    seen: dict[str, set[str]] = field(default_factory=dict)
+    markers_saved: list[str] = field(default_factory=list)
+    built_for: list[tuple[str, str, ResolvedWarehouse]] = field(default_factory=list)
+    load_error: Exception | None = None
+    save_error: Exception | None = None
+
+    def load(self) -> DeployState:
+        self.locks.mark("load deploy state")
+        if self.load_error is not None:
+            raise self.load_error
+        seen = frozenset(record for ids in self.seen.values() for record in ids)
+        return DeployState(self.marker, seen)
+
+    def save_seen_records(self, pipeline: str, record_ids) -> None:
+        self.seen.setdefault(pipeline, set()).update(record_ids)
+
+    def save_marker(self, marker: str) -> None:
+        self.locks.mark("save marker")
+        if self.save_error is not None:
+            raise self.save_error
+        self.marker = marker
+        self.markers_saved.append(marker)
+
+
+@pytest.fixture
+def deploy_store(lock, monkeypatch):
+    store = InMemoryDeployStateStore(lock)
+
+    def build(
+        project_dir: Path, environment: str, kind: str, warehouse: ResolvedWarehouse
+    ) -> InMemoryDeployStateStore:
+        store.built_for.append((environment, kind, warehouse))
+        return store
+
+    monkeypatch.setattr(run_command, "build_deploy_state_store", build)
+    return store
+
+
+@pytest.fixture
+def deploy_project(project, branch_project):
+    (project / "adops.yaml").write_text(DEPLOY_SETTINGS)
+    (project / "pipelines" / "shop_sync.yaml").write_text(DEPLOY_PIPELINE)
+    return project
+
+
+def marker_for(environment: str) -> str:
+    return settings_marker(load_project_settings(DEPLOY_SETTINGS), environment)
+
+
+def deployed(project: Path, fingerprints, deploy_store, environment: str) -> None:
+    """As if the last deploy of shop_sync to `environment` passed with today's files."""
+    fingerprints.saved["shop_sync"] = stage_fingerprints(project, DEPLOY_PIPELINE)
+    deploy_store.marker = marker_for(environment)
+
+
+def invoke_changed(project, *args):
+    return runner.invoke(
+        cli.app, ["run", "--all", "--changed", "--project", str(project), *args], env=WIDE
+    )
+
+
+def step_lines(result) -> list[str]:
+    return [line for line in result.output.splitlines() if line.startswith("step ")]
+
+
+def edit_model(project: Path) -> None:
+    (project / "dbt" / "models" / "customer_stats.sql").write_text("select 2 as customer_id\n")
+
+
+def test_changed_without_all_is_refused(project, run_project_calls):
+    calls, _ = run_project_calls
+
+    result = runner.invoke(
+        cli.app, ["run", "--changed", "--env", "stage", "--project", str(project)], env=WIDE
+    )
+
+    assert result.exit_code != 0
+    assert "--changed" in result.output and "needs --all" in result.output
+    assert "adops run --all --changed --env stage" in result.output
+    assert calls == []
+
+
+def test_changed_with_a_pipeline_name_is_refused(project, run_project_calls):
+    calls, _ = run_project_calls
+
+    result = runner.invoke(
+        cli.app,
+        ["run", "a_pipe", "--all", "--changed", "--env", "stage", "--project", str(project)],
+        env=WIDE,
+    )
+
+    assert result.exit_code != 0
+    assert "--changed" in result.output
+    assert "cannot be combined with a Pipeline name" in result.output
+    assert "adops run --all --changed --env stage" in result.output
+    assert calls == []
+
+
+def test_changed_with_branch_is_refused(project, run_project_calls):
+    calls, _ = run_project_calls
+
+    result = invoke_changed(project, "--branch", "x")
+
+    assert result.exit_code != 0
+    assert "--changed" in result.output and "cannot be combined with --branch" in result.output
+    assert "adops run --all --changed --env stage" in result.output
+    assert calls == []
+
+
+def test_changed_in_dev_is_refused(project, run_project_calls):
+    calls, _ = run_project_calls
+
+    result = invoke_changed(project, "--env", "dev")
+
+    assert result.exit_code != 0
+    assert "--changed" in result.output and "cannot be used with --env dev" in result.output
+    assert "adops run --all --changed --env stage" in result.output
+    assert calls == []
+
+
+def test_changed_without_env_is_refused_rather_than_running_dev(project, run_project_calls):
+    calls, _ = run_project_calls
+
+    result = invoke_changed(project)
+
+    assert result.exit_code != 0
+    assert "--changed" in result.output and "needs --env stage or --env prod" in result.output
+    assert calls == []
+
+
+def test_run_help_shows_the_changed_option():
+    result = runner.invoke(cli.app, ["run", "--help"], env=WIDE)
+
+    assert result.exit_code == 0
+    assert "--changed" in result.output
+
+
+def test_run_all_without_changed_reruns_every_step_even_when_nothing_changed(
+    deploy_project, fingerprint_store, deploy_store
+):
+    deployed(deploy_project, fingerprint_store, deploy_store, "stage")
+
+    result = invoke_all(deploy_project, "--env", "stage")
+
+    assert result.exit_code == 0, result.output
+    assert step_lines(result)[0].startswith("step sync_shop: passed")
+    assert "unchanged" not in result.output
+    assert deploy_store.built_for == [] and deploy_store.markers_saved == []
+
+
+def test_run_project_without_changed_reruns_every_step(
+    deploy_project, fingerprint_store, deploy_store
+):
+    deployed(deploy_project, fingerprint_store, deploy_store, "prod")
+
+    result = run_command.run_project(deploy_project, "shop_sync", "prod")
+
+    assert [step.status for step in result.steps] == [StepStatus.PASSED] * 3
+    assert deploy_store.built_for == []
+
+
+def test_an_unchanged_prod_deploy_reruns_nothing_and_logs_what_it_printed(
+    deploy_project, fingerprint_store, deploy_store, sync
+):
+    deployed(deploy_project, fingerprint_store, deploy_store, "prod")
+
+    result = invoke_changed(deploy_project, "--env", "prod")
+
+    assert result.exit_code == 0, result.output
+    assert step_lines(result) == [f"step {step}: unchanged in prod" for step in DEPLOY_STEPS]
+    assert "Pipeline shop_sync unchanged, nothing rerun in prod." in result.output
+    assert "deferred" not in result.output
+    assert sync.sources == []
+    assert the_run_log(deploy_project, "prod") == result.output
+    for environment, kind, warehouse in deploy_store.built_for:
+        assert (environment, kind) == ("prod", "postgres")
+        assert isinstance(warehouse, ResolvedConnection) and warehouse.host == "prod-warehouse"
+    assert len(deploy_store.built_for) == 2
+
+
+def test_a_changed_model_reruns_from_its_transform_and_logs_what_it_printed(
+    deploy_project, fingerprint_store, deploy_store, sync
+):
+    deployed(deploy_project, fingerprint_store, deploy_store, "stage")
+    edit_model(deploy_project)
+
+    result = invoke_changed(deploy_project, "--env", "stage")
+
+    assert result.exit_code == 0, result.output
+    assert step_lines(result)[:2] == [
+        "step sync_shop: unchanged in stage",
+        "step transform_shop: passed",
+    ]
+    assert step_lines(result)[2].startswith("step push_stats: passed")
+    assert "nothing rerun" not in result.output and "deferred" not in result.output
+    assert sync.sources == []
+    assert the_run_log(deploy_project, "stage") == result.output
+    assert fingerprint_store.saved["shop_sync"] == stage_fingerprints(
+        deploy_project, DEPLOY_PIPELINE
+    )
+
+
+def test_a_settings_change_reruns_every_step(deploy_project, fingerprint_store, deploy_store):
+    deployed(deploy_project, fingerprint_store, deploy_store, "stage")
+    deploy_store.marker = marker_for("prod")
+
+    result = invoke_changed(deploy_project, "--env", "stage")
+
+    assert result.exit_code == 0, result.output
+    assert [line.split(":")[1].split()[0] for line in step_lines(result)] == ["passed"] * 3
+    assert deploy_store.markers_saved == [marker_for("stage")]
+
+
+def test_the_deploy_plan_is_made_inside_the_lock_and_the_marker_saved_in_a_later_one(
+    deploy_project, fingerprint_store, deploy_store, lock
+):
+    deployed(deploy_project, fingerprint_store, deploy_store, "stage")
+
+    result = invoke_changed(deploy_project, "--env", "stage")
+
+    assert result.exit_code == 0, result.output
+    assert lock.events == [
+        ("enter", "stage"),
+        ("load deploy state",),
+        ("exit", "stage"),
+        ("enter", "stage"),
+        ("save marker",),
+        ("exit", "stage"),
+    ]
+    assert deploy_store.markers_saved == [marker_for("stage")]
+
+
+def record(record_id: str, pipeline: str) -> AcceptedChangeRecord:
+    return AcceptedChangeRecord(record_id, pipeline, "orders", ())
+
+
+def test_only_this_pipelines_unseen_records_rerun_it_in_full(
+    deploy_project, fingerprint_store, deploy_store, monkeypatch
+):
+    deployed(deploy_project, fingerprint_store, deploy_store, "stage")
+    records = [record("other_pipe_rec", "other_pipe")]
+    monkeypatch.setattr(run_command, "load_project_records", lambda _: tuple(records))
+
+    other_only = invoke_changed(deploy_project, "--env", "stage")
+    records.append(record("shop_rec", "shop_sync"))
+    new_record = invoke_changed(deploy_project, "--env", "stage")
+    seen_now = invoke_changed(deploy_project, "--env", "stage")
+
+    assert other_only.exit_code == new_record.exit_code == seen_now.exit_code == 0
+    assert step_lines(other_only)[0] == "step sync_shop: unchanged in stage"
+    assert step_lines(new_record)[0].startswith("step sync_shop: passed")
+    assert deploy_store.seen == {"shop_sync": {"shop_rec"}}
+    assert step_lines(seen_now)[0] == "step sync_shop: unchanged in stage"
+
+
+def test_a_failed_deploy_saves_no_marker_so_the_next_one_reruns_in_full(
+    deploy_project, fingerprint_store, deploy_store, sync
+):
+    deployed(deploy_project, fingerprint_store, deploy_store, "stage")
+    deploy_store.marker = "marker-from-old-settings"
+    sync.sync_error = RuntimeError("boom")
+
+    failed = invoke_changed(deploy_project, "--env", "stage")
+    sync.sync_error = None
+    next_deploy = invoke_changed(deploy_project, "--env", "stage")
+
+    assert failed.exit_code == 1
+    assert next_deploy.exit_code == 0, next_deploy.output
+    assert step_lines(next_deploy)[0].startswith("step sync_shop: passed")
+    assert deploy_store.markers_saved == [marker_for("stage")]
+
+
+def test_one_failing_pipeline_of_all_saves_no_marker(project, run_project_calls, deploy_store):
+    (project / "adops.yaml").write_text(DEPLOY_SETTINGS)
+    calls, failing = run_project_calls
+    failing.add("b_pipe")
+
+    result = invoke_changed(project, "--env", "stage")
+
+    assert result.exit_code == 1
+    assert [pipeline for _, pipeline, _, _ in calls] == ["a_pipe", "b_pipe"]
+    assert deploy_store.markers_saved == []
+
+
+def test_every_pipeline_passing_saves_the_marker_once(
+    project, run_project_calls, deploy_store, monkeypatch
+):
+    (project / "adops.yaml").write_text(DEPLOY_SETTINGS)
+    monkeypatch.setenv("ADOPS_TEST_STAGE_PASSWORD", STAGE_SECRET)
+    flags: list[bool] = []
+    inner = run_command.run_project
+
+    def recording(project_dir, pipeline, environment, branch=None, *, changed=False):
+        flags.append(changed)
+        return inner(project_dir, pipeline, environment, branch)
+
+    monkeypatch.setattr(run_command, "run_project", recording)
+
+    result = invoke_changed(project, "--env", "prod")
+
+    assert result.exit_code == 0, result.output
+    assert flags == [True, True, True]
+    assert deploy_store.markers_saved == [marker_for("prod")]
+    [(environment, _, warehouse)] = deploy_store.built_for
+    assert environment == "prod" and warehouse.host == "prod-warehouse"
+
+
+def test_a_marker_save_failure_names_only_the_error_type(
+    project, run_project_calls, deploy_store, monkeypatch
+):
+    (project / "adops.yaml").write_text(DEPLOY_SETTINGS)
+    monkeypatch.setenv("ADOPS_TEST_STAGE_PASSWORD", STAGE_SECRET)
+    deploy_store.save_error = RuntimeError(f"postgresql://w:{STAGE_SECRET}@prod-warehouse/w")
+
+    result = invoke_changed(project, "--env", "prod")
+
+    assert_clean_failure(result)
+    assert "Settings Marker not saved in prod: deploy state store: RuntimeError" in result.output
+    assert "the next deploy reruns every Pipeline in full" in result.output
+    assert_no_secret(result)
+
+
+def test_a_marker_save_without_the_warehouse_secret_says_which_is_missing(
+    project, run_project_calls, deploy_store, monkeypatch
+):
+    (project / "adops.yaml").write_text(DEPLOY_SETTINGS)
+    monkeypatch.delenv("ADOPS_TEST_STAGE_PASSWORD", raising=False)
+
+    result = invoke_changed(project, "--env", "stage")
+
+    assert_clean_failure(result)
+    assert "ADOPS_TEST_STAGE_PASSWORD" in result.output
+    assert deploy_store.markers_saved == []
+
+
+def test_an_unreadable_deploy_state_fails_the_first_step_naming_only_the_error_type(
+    deploy_project, fingerprint_store, deploy_store, sync
+):
+    deployed(deploy_project, fingerprint_store, deploy_store, "stage")
+    deploy_store.load_error = RuntimeError(f"postgresql://w:{STAGE_SECRET}@stage-warehouse/w")
+
+    result = invoke_changed(deploy_project, "--env", "stage")
+
+    assert_clean_failure(result)
+    assert step_lines(result) == [
+        "step sync_shop: failed",
+        "step transform_shop: skipped",
+        "step push_stats: skipped",
+    ]
+    assert "  Step sync_shop: deploy state store: RuntimeError" in result.output
+    assert_no_secret(result)
+    assert the_run_log(deploy_project, "stage") == result.output
+    assert sync.sources == [] and deploy_store.markers_saved == []
+
+
+def test_the_deploy_state_store_lives_in_the_environments_warehouse(tmp_path):
+    warehouse = ResolvedDuckDb(path=tmp_path / "prod.duckdb")
+
+    store = REAL_BUILD_DEPLOY_STATE_STORE(tmp_path, "prod", "duckdb", warehouse)
+
+    assert isinstance(store, WarehouseDeployStateStore)
+    assert vars(store)["_pipelines_dir"] == tmp_path / ".adops" / "dlt" / "prod"
+    assert vars(store)["_warehouse"] == warehouse

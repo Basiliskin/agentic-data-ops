@@ -17,3 +17,5 @@ Promotion (Branch Environment → stage → prod) runs as three GitHub Actions w
 - On GitHub Free, Pro and Team, required reviewers work only on public repositories, so a private repository needs GitHub Enterprise for the prod approval, or a narrower set of people who may publish releases.
 - A scheduled run waiting for the lock holds the Server's single run slot; a timeout fails and alerts.
 - Branch names that sanitize to the same Branch Environment name still share one Branch Environment (ADR-0006 clarification of 2026-11-21).
+
+**Clarification (2026-11-27, deploys rerun only Changed Steps):** The deploy's run step is now `adops run --all --changed --env stage|prod --project /project/current`, which reruns only each Pipeline's Changed Steps (ADR-0014 clarification of the same date). The Deploy Plan is made inside the Warehouse lock, so a scheduled run that overlaps a deploy waits for the lock and then runs against what the deploy saved; the two never write at once. This was proven by unit tests and one postgres-only stage case in the e2e suite, not on a real self-hosted runner: a retrial on a real runner is a follow-up.

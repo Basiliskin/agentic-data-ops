@@ -16,13 +16,32 @@ or a setting to click. Your Assistant can run the commands for you.
 |---|---|---|---|
 | `adops-pull-request.yml` | a pull request is opened or updated (`opened`, `synchronize`, `reopened`) | `adops validate`, then `adops run --all --branch <branch>`: every Pipeline in that pull request's Branch Environment | the stage Server (runner label `adops-stage`) |
 | `adops-pull-request.yml` | a pull request is closed or merged (`closed`) | `adops drop-branch <branch>`: removes that Branch Environment | the stage Server (runner label `adops-stage`) |
-| `adops-stage.yml` | a change is merged to `main` | validates the new version, copies it into the stage Server's `releases/<commit>` and points `current` at it (`adops server-release`, which also deletes old release folders), reloads the Server's Pipelines and Schedules, then `adops run --all --env stage` from `current` | the stage Server (runner label `adops-stage`) |
-| `adops-prod.yml` | a release is published | the same as stage, for the release's tag, then `adops run --all --env prod` from `current`, after a required reviewer approves | the prod Server (runner label `adops-prod`, environment `prod`) |
+| `adops-stage.yml` | a change is merged to `main` | validates the new version, copies it into the stage Server's `releases/<commit>` and points `current` at it (`adops server-release`, which also deletes old release folders), reloads the Server's Pipelines and Schedules, then `adops run --all --changed --env stage` from `current`, which reruns only the Changed Steps | the stage Server (runner label `adops-stage`) |
+| `adops-prod.yml` | a release is published | the same as stage, for the release's tag, then `adops run --all --changed --env prod` from `current`, after a required reviewer approves | the prod Server (runner label `adops-prod`, environment `prod`) |
 
 A pull request from a **fork** (a copy of your repository under someone else's account) is a
 **Fork PR**. It only gets `adops validate`, on a machine GitHub provides, with no access to your
 Servers or secrets. Its Branch run is skipped; to run it, a maintainer pushes the same change to a
 branch in your own repository.
+
+**A deploy reruns only what changed.** For each Pipeline, `--changed` reruns from the first Step
+whose definition changed since that Environment's last successful run, plus every Step after it. A
+Pipeline with no changed Step is not run, and its Steps show `unchanged in stage` (or `prod`) in the
+log; if it has a Schedule, its next scheduled run refreshes its data. A Pipeline runs in full when it
+has no Schedule, when that Environment has no saved Step Fingerprints for it yet (its first run
+there, or on prod its first deploy after upgrading adops), when that Environment's block in `adops.yaml` (or
+the time zone or alert webhook) changed, or when it has a new accepted-change record. To rerun
+everything by hand, run this in the Server folder on that machine (use `--env prod` on the prod
+Server):
+
+```sh
+docker compose --profile server run --rm --no-deps dagster_daemon adops run --all --env stage --project /project/current
+```
+
+**The first deploy to prod after upgrading adops** creates two new tables in prod's `adops` schema:
+`_adops_step_fingerprints` and `_adops_deploy_state`. That deploy runs every Pipeline in full, because
+prod has no saved fingerprints yet; later deploys rerun only the Changed Steps. The prod Warehouse
+user already writes to that schema, so no new rights are needed.
 
 If a validate fails, no file in the Server folder changes and the Server keeps running the last good
 version. A deploy never runs `git` in the Server folder and never restarts the Server's containers.

@@ -131,3 +131,5 @@
 - 2026-11-27 | horizon 18 | Stale fingerprint rows are ignored by Step name inside plan_deploy, never pruned; first_changed_step and Branch deferral are unchanged
 - 2026-11-27 | horizon 18 | Deploy skips use a new StepStatus UNCHANGED (in SUCCEEDED), printed 'unchanged in <env>'; never 'deferred' or 'skipped'
 - 2026-11-27 | horizon 18 | No real-runner trial in horizon 18; proof is unit tests plus one postgres-only stage e2e case — user choice
+- 2026-11-27 | horizon 18 | Generated stage and prod deploy workflows run `adops run --all --changed --env <env> --project /project/current`; unchanged scheduled Pipelines refresh on their Schedule, not on merge
+- 2026-11-27 | horizon 18 | prod saves Step Fingerprints after Checks pass, as stage does; Branch Environments still compare against and never write stage's fingerprints

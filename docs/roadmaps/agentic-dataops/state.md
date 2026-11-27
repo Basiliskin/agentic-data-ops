@@ -36,3 +36,4 @@
 - 2026-11-27 | horizon 17 | planned | 5 phases (pin runs to release folder, release folder module, server-release command, deploys switch release folders, e2e deploy during held run); gate passed (0 blockers, 1 major healed)
 - 2026-11-27 | horizon 17 | completed | 5 phases | 1 amendment (e2e Run Log evidence → Dagster step metadata, scheduled runs write no Run Log) | deploys switch release folders; held run keeps its folder (e2e)
 - 2026-11-27 | horizon 18 | planned | 6 phases | gate pass (1 major fixed, 0 debt)
+- 2026-11-27 | horizon 18 | completed | 6 phases done; 1 amendment, 0 overrides; stage and prod deploys run `adops run --all --changed`, rerunning only Changed Steps

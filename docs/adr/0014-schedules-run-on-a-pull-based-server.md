@@ -22,3 +22,8 @@ stage and prod each get a Server: an always-on machine running Dagster's schedul
 
 **Clarification (2026-11-23):**
 - Git-based acceptance of Breaking Changes (ADR-0015) did not come with horizon 8. It shipped in horizons 13 and 14: a committed accepted-change record in `pipelines/accepted/` is applied by stage and prod on their next run, and `adops accept-schema` in dev writes that record. `adops accept-schema --env stage|prod` only reads those Environments and writes the record, so nobody needs to run it on the Server.
+
+**Clarification (2026-11-27):**
+- Deploys rerun only Changed Steps. Accepting a new version on stage or prod now runs `adops run --all --changed --env stage|prod`: each Pipeline reruns from its first Step whose Step Fingerprint differs from that Environment's last successful run, plus every Step after it, and a Pipeline with no Changed Step is not run (its Steps print `unchanged in <env>`). This replaces the 2026-11-21 rule that every deploy runs every Pipeline.
+- A scheduled Pipeline whose Steps did not change no longer refreshes on merge or release; its next Schedule refreshes it. A Pipeline with no Schedule still runs in full on every deploy, because the deploy is the only time it runs. A Pipeline also runs in full when it has no saved fingerprints yet, when the Environment's settings changed, or when it has an Accepted-Change Record the Environment has not run with yet.
+- `adops run --all --env stage|prod` typed by hand still runs every Step of every Pipeline.

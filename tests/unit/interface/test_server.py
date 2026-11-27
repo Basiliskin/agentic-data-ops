@@ -409,7 +409,7 @@ class ReleaseServer:
         self.reads: list[dict[str, object]] = []
         self.switch_to: str | None = None
 
-    def run_pipeline(self, pipeline_text, settings_text, *args, records) -> RunResult:
+    def run_pipeline(self, pipeline_text, settings_text, *args, records, deploy) -> RunResult:
         env, transform, fingerprinting = args[1], args[6], args[8]
         dbt = fingerprinting.files.read_tree("dbt")
         self.reads.append(

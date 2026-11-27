@@ -897,13 +897,13 @@ def test_deploy_validates_the_checkout_before_switching_the_server_release(proje
     validate = step_index(job, "dagster_daemon adops validate")
     release = step_index(job, SERVER_RELEASE)
     reload = step_index(job, "reloadRepositoryLocation")
-    run = step_index(job, f"dagster_daemon adops run --all --env {environment}")
+    run = step_index(job, f"dagster_daemon adops run --all --changed --env {environment}")
     assert 0 < validate < release < reload < run == len(steps) - 2
     assert steps[0]["with"]["fetch-depth"] == 0
     assert steps[validate]["run"].startswith(SERVER_COMPOSE_RUN)
     assert '-v "$GITHUB_WORKSPACE:/project"' in steps[validate]["run"]
     assert steps[run]["run"] == (
-        f"{SERVER_COMPOSE_RUN} -T dagster_daemon adops run --all --env {environment}"
+        f"{SERVER_COMPOSE_RUN} -T dagster_daemon adops run --all --changed --env {environment}"
         f" {RUN_FROM_CURRENT}"
     )
     assert "if" not in job and "continue-on-error" not in job

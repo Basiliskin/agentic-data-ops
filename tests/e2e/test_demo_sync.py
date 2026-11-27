@@ -500,6 +500,38 @@ def outside_prod(demo):
     }
 
 
+CHANGED_DEPLOY = ("run", "--all", "--changed", "--env", "stage")
+
+
+@pytest.mark.parametrize("demo", ["postgres"], indirect=True)
+def test_a_changed_deploy_reruns_only_from_the_edited_model(demo):
+    project, env = demo.project, demo.env
+    pipeline = project / "pipelines" / "shop_sync.yaml"
+    # A Pipeline without a Schedule always reruns in full, so this one gets one.
+    pipeline.write_text(pipeline.read_text() + "schedule: daily at 06:00\n")
+    model = project / "dbt" / "models" / "customer_stats.sql"
+
+    code, output = adops_run(project, *CHANGED_DEPLOY)
+
+    assert code == 0, output
+    assert "step sync_shop: passed — customers 20 rows, orders 100 rows" in output.splitlines()
+
+    model.write_text("-- changed for the deploy\n" + model.read_text())
+
+    code, output = adops_run(project, *CHANGED_DEPLOY)
+
+    assert code == 0, output
+    assert_no_secret_or_row_value(output, env)
+    assert "step sync_shop: unchanged in stage" in output.splitlines()
+    assert_transform_passed(output)
+    assert "deferred" not in output
+
+    code, output = adops_run(project, *CHANGED_DEPLOY)
+
+    assert code == 0, output
+    assert "Pipeline shop_sync unchanged, nothing rerun in stage." in output.splitlines()
+
+
 @pytest.mark.parametrize("demo", ["postgres"], indirect=True)
 def test_prod_runs_write_only_to_prod_warehouse_and_target(demo):
     project, env = demo.project, demo.env

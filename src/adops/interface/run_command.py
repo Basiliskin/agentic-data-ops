@@ -11,6 +11,7 @@ from dotenv import dotenv_values
 
 from adops.application.ports import (
     Clock,
+    DeployStateStore,
     Orchestrator,
     ProjectFiles,
     ResolvedConnection,
@@ -30,9 +31,11 @@ from adops.application.ports import (
     WarehouseUnreachable,
 )
 from adops.application.run_pipeline import (
+    DeployRun,
     StageNotRunError,
     StepFingerprinting,
     WarehouseUnreachableError,
+    current_fingerprints,
     pick_environment,
     plan_branch_run,
     run_pipeline,
@@ -48,9 +51,17 @@ from adops.application.secrets import (
 )
 from adops.domain.accepted_change_record import AcceptedChangeRecord, load_accepted_record
 from adops.domain.branch_environment import (
+    FINGERPRINT_ENVIRONMENTS,
     STAGE,
     SchemaLayout,
     read_layout,
+)
+from adops.domain.deploy_rerun import (
+    DeployPlan,
+    DeployPlanKind,
+    DeployState,
+    plan_deploy,
+    settings_marker,
 )
 from adops.domain.environment import Environment
 from adops.domain.errors import PipelineValidationError
@@ -62,6 +73,7 @@ from adops.domain.transform import TransformStep
 from adops.infrastructure.clock import SystemClock
 from adops.infrastructure.dagster_orchestrator import DagsterOrchestrator, JobCompileError
 from adops.infrastructure.dbt_transform import DbtTransform
+from adops.infrastructure.deploy_state_store import WarehouseDeployStateStore
 from adops.infrastructure.dlt_sync import DltSync
 from adops.infrastructure.postgres_reverse_sync import PostgresReverseSync
 from adops.infrastructure.run_log_store import write_run_log
@@ -80,6 +92,7 @@ COMPUTE_LOG_DIR = Path(".adops") / "dagster" / "compute_logs"
 
 DEFAULT_LAYOUT = SchemaLayout.default()
 BRANCH_WITH_ENV = "cannot be combined with --env: a Branch Environment always derives from stage"
+CHANGED_FORM = "use `adops run --all --changed --env stage` or `--env prod`"
 
 
 class ProjectFileError(Exception):
@@ -172,6 +185,12 @@ def build_fingerprint_store(
     return WarehouseFingerprintStore(project, kind, warehouse, environment=environment)
 
 
+def build_deploy_state_store(
+    project: Path, environment: str, kind: str, warehouse: ResolvedWarehouse
+) -> DeployStateStore:
+    return WarehouseDeployStateStore(project, kind, warehouse, environment=environment)
+
+
 def build_project_files(project: Path) -> ProjectFiles:
     return ProjectTree(project)
 
@@ -234,6 +253,14 @@ def run(
             help="Run in this Git branch's Branch Environment, built from stage's settings.",
         ),
     ] = None,
+    changed: Annotated[
+        bool,
+        typer.Option(
+            "--changed",
+            help="With --all on stage or prod: rerun each Pipeline only from its first changed "
+            "Step since that Environment's last deploy.",
+        ),
+    ] = False,
     project: Annotated[Path, typer.Option(help="Project folder.")] = Path("."),
 ) -> None:
     """Run a Pipeline: sync its tables into the Warehouse, run its dbt Transforms and its Checks.
@@ -246,6 +273,8 @@ def run(
 
     Variables in the Project's .env are used unless the same name is set in your shell.
     """
+    if changed:
+        _refuse_changed_misuse(pipeline, run_all, env, branch)
     if env is not None and branch is not None:
         raise typer.BadParameter(BRANCH_WITH_ENV, param_hint="'--branch'")
     root = project.resolve()
@@ -264,7 +293,52 @@ def run(
     else:
         names = [pipeline]
     for name in names:
-        _run_one(root, name, env or "dev", branch)
+        _run_one(root, name, env or "dev", branch, changed)
+    if changed and env is not None:
+        _save_settings_marker_or_fail(root, env)
+
+
+def _refuse_changed_misuse(
+    pipeline: str | None, run_all: bool, env: str | None, branch: str | None
+) -> None:
+    if branch is not None:
+        problem = "cannot be combined with --branch"
+    elif pipeline is not None:
+        problem = "cannot be combined with a Pipeline name"
+    elif not run_all:
+        problem = "needs --all"
+    elif env is None:
+        problem = "needs --env stage or --env prod"
+    elif env not in FINGERPRINT_ENVIRONMENTS:
+        problem = f"cannot be used with --env {env}"
+    else:
+        return
+    raise typer.BadParameter(f"{problem}; {CHANGED_FORM}", param_hint="'--changed'")
+
+
+def _save_settings_marker_or_fail(project: Path, environment: str) -> None:
+    """Called only once every Pipeline passed, so a failed deploy reruns everything next time."""
+    try:
+        save_settings_marker(project, environment)
+    except RUN_ERRORS as error:
+        fail(*error_lines(error))
+    except Exception as error:
+        # Only the type: the store's error text may hold a Warehouse secret.
+        fail(
+            f"Settings Marker not saved in {environment}: deploy state store: "
+            f"{type(error).__name__}; the next deploy reruns every Pipeline in full"
+        )
+
+
+def save_settings_marker(
+    project: Path, environment: str, *, lock_timeout: float = DEFAULT_LOCK_TIMEOUT
+) -> None:
+    settings = load_project_settings(read_settings(project))
+    chosen = pick_environment(settings.environments, environment)
+    warehouse = resolve_environment_warehouse(chosen, project_env(project))
+    store = build_deploy_state_store(project, environment, chosen.warehouse.type, warehouse)
+    with build_warehouse_lock(warehouse, project, environment, lock_timeout):
+        store.save_marker(settings_marker(settings, environment))
 
 
 def pipeline_files(project: Path) -> list[Path]:
@@ -302,9 +376,9 @@ def _relative(project: Path, path: Path) -> str:
     return path.relative_to(project).as_posix()
 
 
-def _run_one(project: Path, pipeline: str, env: str, branch: str | None) -> None:
+def _run_one(project: Path, pipeline: str, env: str, branch: str | None, changed: bool) -> None:
     try:
-        result = run_project(project, pipeline, env, branch)
+        result = run_project(project, pipeline, env, branch, changed=changed)
     except RUN_ERRORS as error:
         fail(*error_lines(error))
     except Exception as error:
@@ -323,14 +397,16 @@ def run_project(
     branch: str | None = None,
     *,
     lock_timeout: float = DEFAULT_LOCK_TIMEOUT,
+    changed: bool = False,
 ) -> RunResult:
     """Run a Pipeline, waiting up to `lock_timeout` seconds for its Warehouse lock.
 
+    With `changed`, a stage or prod run reruns only from the Pipeline's first changed Step.
     Writes one Run Log holding what `adops run` prints for it, unless the Environment or
     Pipeline name cannot safely name a Run Log file.
     """
     try:
-        result = _run_project(project, pipeline, environment, branch, lock_timeout)
+        result = _run_project(project, pipeline, environment, branch, lock_timeout, changed)
     except RUN_ERRORS as error:
         # A Run Log problem never changes the run's outcome.
         with suppress(Exception):
@@ -342,7 +418,12 @@ def run_project(
 
 
 def _run_project(
-    project: Path, pipeline: str, environment: str, branch: str | None, lock_timeout: float
+    project: Path,
+    pipeline: str,
+    environment: str,
+    branch: str | None,
+    lock_timeout: float,
+    changed: bool,
 ) -> RunResult:
     with _scoped_environ(_dagster_environ(project)):
         if branch is None:
@@ -352,6 +433,7 @@ def _run_project(
                 environment,
                 build_orchestrator(project),
                 lock_timeout=lock_timeout,
+                changed=changed,
             )
         settings_text, pipeline_text = read_project_files(project, pipeline)
         return _run_branch(
@@ -415,10 +497,12 @@ def run_in_environment(
     orchestrator: Orchestrator,
     *,
     lock_timeout: float = DEFAULT_LOCK_TIMEOUT,
+    changed: bool = False,
 ) -> RunResult:
     """Run a Pipeline in a named Environment, holding its Warehouse lock for the whole run.
 
-    The Project files and .env are read at call time.
+    With `changed`, the Deploy Plan is made inside the lock, from the Environment's saved
+    fingerprints and Deploy State. The Project files and .env are read at call time.
     """
     settings_text, pipeline_text = read_project_files(project, pipeline)
     env = project_env(project)
@@ -427,6 +511,26 @@ def run_in_environment(
     warehouse = resolve_environment_warehouse(chosen, env)
 
     def run() -> RunResult:
+        records = load_project_records(project)
+        fingerprinting = _fingerprinting(project, environment, kind, warehouse)
+        deploy = None
+        if changed:
+            store = build_deploy_state_store(project, environment, kind, warehouse)
+            name = load_pipeline(pipeline_text).name
+            try:
+                state, saved = store.load(), fingerprinting.store.load(name)
+            except Exception as error:
+                return _deploy_state_unreadable(pipeline_text, environment, error)
+            deploy = _deploy_run(
+                store,
+                state,
+                saved,
+                settings_text,
+                pipeline_text,
+                environment,
+                fingerprinting,
+                records,
+            )
         return run_pipeline(
             pipeline_text,
             settings_text,
@@ -438,12 +542,56 @@ def run_in_environment(
             orchestrator,
             build_transform(project, kind),
             build_reverse_sync(project, environment, kind),
-            _fingerprinting(project, environment, kind, warehouse),
-            records=load_project_records(project),
+            fingerprinting,
+            records=records,
+            deploy=deploy,
         )
 
     return _holding_lock(
         project, environment, warehouse, pipeline_text, environment, run, lock_timeout
+    )
+
+
+def _deploy_run(
+    store: DeployStateStore,
+    state: DeployState,
+    saved_fingerprints: Mapping[str, str],
+    settings_text: str,
+    pipeline_text: str,
+    environment: str,
+    fingerprinting: StepFingerprinting,
+    records: Sequence[AcceptedChangeRecord],
+) -> DeployRun:
+    pipeline = load_pipeline(pipeline_text)
+    marker = settings_marker(load_project_settings(settings_text), environment)
+    unseen = [
+        record.id
+        for record in records
+        if record.pipeline == pipeline.name and record.id not in state.seen_record_ids
+    ]
+    plan = plan_deploy(
+        pipeline,
+        current_fingerprints(pipeline.steps, fingerprinting.files),
+        saved_fingerprints,
+        marker != state.settings_marker,
+        unseen,
+    )
+    return DeployRun(_start_index(plan), store)
+
+
+def _start_index(plan: DeployPlan) -> int | None:
+    if plan.kind is DeployPlanKind.FULL:
+        return 0
+    return plan.start_index
+
+
+def _deploy_state_unreadable(pipeline_text: str, environment: str, error: Exception) -> RunResult:
+    # Only the type: the store's error text may hold a Warehouse secret.
+    return _first_step_failed(
+        pipeline_text,
+        environment,
+        lambda step: f"Step {step}: deploy state store: {type(error).__name__}",
+        retryable=False,
     )
 
 
@@ -536,10 +684,21 @@ def _holding_lock(
 
 def _warehouse_unreachable(pipeline_text: str, environment: str) -> RunResult:
     """Reported as the first Step's failure, as a Sync would, so the Server retries it."""
+    name = load_pipeline(pipeline_text).name
+    return _first_step_failed(
+        pipeline_text,
+        environment,
+        lambda step: str(WarehouseUnreachableError(name, step)),
+        retryable=True,
+    )
+
+
+def _first_step_failed(
+    pipeline_text: str, environment: str, error: Callable[[str], str], *, retryable: bool
+) -> RunResult:
     pipeline = load_pipeline(pipeline_text)
     first, *rest = pipeline.steps
-    error = WarehouseUnreachableError(pipeline.name, first.name)
-    failed = StepReport(first.name, StepStatus.FAILED, error=str(error), retryable=True)
+    failed = StepReport(first.name, StepStatus.FAILED, error=error(first.name), retryable=retryable)
     skipped = (StepReport(step.name, StepStatus.SKIPPED) for step in rest)
     return RunResult(pipeline.name, environment, (failed, *skipped))
 
@@ -610,6 +769,9 @@ def result_output(result: RunResult) -> list[OutputLine]:
         if step.status is StepStatus.DEFERRED:
             lines.append(OutputLine(f"step {step.name}: deferred to stage"))
             continue
+        if step.status is StepStatus.UNCHANGED:
+            lines.append(OutputLine(f"step {step.name}: unchanged in {result.environment}"))
+            continue
         status = f"step {step.name}: {step.status}" + (f" — {rows}" if rows else "")
         lines.append(OutputLine(status))
         lines += (OutputLine(f"  {note}") for note in step.notes)
@@ -634,6 +796,8 @@ def _summary_lines(result: RunResult) -> list[OutputLine]:
     if all(step.status is StepStatus.DEFERRED for step in result.steps):
         unchanged = f"Nothing changed since stage's last run; {environment} uses stage."
         lines.append(OutputLine(unchanged))
+    if all(step.status is StepStatus.UNCHANGED for step in result.steps):
+        lines.append(OutputLine(f"Pipeline {pipeline} unchanged, nothing rerun in {environment}."))
     lines.append(OutputLine(f"Pipeline {pipeline} passed in Environment {environment}."))
     return lines
 

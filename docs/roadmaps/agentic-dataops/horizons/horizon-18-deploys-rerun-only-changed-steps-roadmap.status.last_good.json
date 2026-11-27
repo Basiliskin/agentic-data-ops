@@ -2,7 +2,7 @@
   "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-18-deploys-rerun-only-changed-steps-roadmap.json",
   "roadmapTask": "rerun only Changed Steps on stage and prod deploys (MAP #18 part 2, per next-horizon-brief.md)",
   "createdAt": "2026-11-27T10:15:09Z",
-  "updatedAt": "2026-11-27T13:40:45Z",
+  "updatedAt": "2026-11-27T16:19:14Z",
   "roadmapRevision": 0,
   "phases": [
     {
@@ -99,12 +99,12 @@
     },
     {
       "phaseId": "run-pipeline-deploy-path",
-      "status": "awaiting-verification",
+      "status": "done",
       "attempts": 1,
       "startedAt": "2026-11-27T13:33:32Z",
       "baseRef": "d4859469b194695cb2cccd3288e4f121da84b3cc",
       "baseDirty": true,
-      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/horizons/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.status.json.last_good.json,docs/roadmaps/agentic-dataops/state.md,src/adops/application/ports.py,src/adops/domain/branch_environment.py,src/adops/infrastructure/release_folders.py,src/adops/infrastructure/step_fingerprint_store.py,tests/unit/domain/test_branch_environment.py,tests/unit/infrastructure/test_release_folders.py,docs/roadmaps/agentic-dataops/archive/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.status.json.last_good.json,docs/roadmaps/agentic-dataops/horizons/horizon-18-deploys-rerun-only-changed-steps-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-18-deploys-rerun-only-changed-steps-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-18-deploys-rerun-only-changed-steps-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-18-deploys-rerun-only-changed-steps-roadmap.status.last_good.json,src/adops/domain/deploy_rerun.py,tests/unit/domain/test_deploy_rerun.py | changed: src/adops/application/ports.py (already dirty; StepStatus.UNCHANGED in SUCCEEDED, DeployStateStore Protocol), src/adops/application/run_pipeline.py (DeployRun, deploy= param: start None -> all UNCHANGED, index k -> Steps before k UNCHANGED; seen records saved only after a passing from-step/full run, save error fails the last Step with type only; branch+deploy refused), tests/unit/application/fakes.py (FakeDeployStateStore), tests/unit/application/test_run_pipeline.py (10 new tests incl. prod saves fingerprints), tests/unit/application/test_alerts.py (unplanned: alert skips UNCHANGED Steps). Amendment 1: DeployRun carries no record ids; they come from records filtered by Pipeline.",
+      "notes": "already dirty at start: docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/horizons/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.status.json.last_good.json,docs/roadmaps/agentic-dataops/state.md,src/adops/application/ports.py,src/adops/domain/branch_environment.py,src/adops/infrastructure/release_folders.py,src/adops/infrastructure/step_fingerprint_store.py,tests/unit/domain/test_branch_environment.py,tests/unit/infrastructure/test_release_folders.py,docs/roadmaps/agentic-dataops/archive/horizon-16-run-stage-and-prod-locally-on-mac-roadmap.status.json.last_good.json,docs/roadmaps/agentic-dataops/horizons/horizon-18-deploys-rerun-only-changed-steps-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-18-deploys-rerun-only-changed-steps-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-18-deploys-rerun-only-changed-steps-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-18-deploys-rerun-only-changed-steps-roadmap.status.last_good.json,src/adops/domain/deploy_rerun.py,tests/unit/domain/test_deploy_rerun.py | changed: src/adops/application/ports.py (already dirty; StepStatus.UNCHANGED in SUCCEEDED, DeployStateStore Protocol), src/adops/application/run_pipeline.py (DeployRun, deploy= param: start None -> all UNCHANGED, index k -> Steps before k UNCHANGED; seen records saved only after a passing from-step/full run, save error fails the last Step with type only; branch+deploy refused), tests/unit/application/fakes.py (FakeDeployStateStore), tests/unit/application/test_run_pipeline.py (10 new tests incl. prod saves fingerprints), tests/unit/application/test_alerts.py (unplanned: alert skips UNCHANGED Steps). Amendment 1: DeployRun carries no record ids; they come from records filtered by Pipeline. | grader note: with fingerprinting on, the last Step fingerprint is saved before a failing seen-records save; safe because the unsaved records stay unseen and force a full rerun next deploy.",
       "amendments": [
         {
           "at": "2026-11-27T13:33:32Z",
@@ -137,22 +137,176 @@
           "resolvedBy": "gate-fix",
           "resolution": "reran with ADOPS_TEST_POSTGRES_DSN pointing at the running adops-test-pg container (port 55432); no code change"
         }
-      ]
+      ],
+      "completedAt": "2026-11-27T13:56:32Z",
+      "gradeResult": {
+        "phaseId": "run-pipeline-deploy-path",
+        "dimensionScores": [
+          {
+            "dimensionId": "unchanged-status-distinct",
+            "score": 10,
+            "pass": true,
+            "evidence": "UNCHANGED in SUCCEEDED; unchanged and from-step (stage+prod) tests; DEFERRED only via _deferred on the non-deploy path. 10: alert test and retryable/succeeded parametrized test over UNCHANGED exist."
+          },
+          {
+            "dimensionId": "seen-records-after-pass-only",
+            "score": 10,
+            "pass": true,
+            "evidence": "save reached only via `deploy is not None and result.succeeded` after execute; failing-Step, sanitized failing-save and two-Pipeline filter tests. 10: all three named tests exist, plus retryable and load() checks."
+          },
+          {
+            "dimensionId": "branch-path-untouched",
+            "score": 10,
+            "pass": true,
+            "evidence": "test_run_pipeline.py diff is additions only; tests/unit/application 236 passed; keyword-only deploy=None; _deferred/stage_environment unedited. 10: branch+deploy refusal test."
+          },
+          {
+            "dimensionId": "port-protocol-only",
+            "score": 10,
+            "pass": true,
+            "evidence": "runtime_checkable Protocol with load/save_seen_records/save_marker returning domain DeployState; no infrastructure import in run_pipeline.py. 10: isinstance test of the fake against the Protocol."
+          },
+          {
+            "dimensionId": "prod-saves-fingerprints",
+            "score": 9,
+            "pass": true,
+            "evidence": "Truth table prod/stage True, dev/Branch False; prod run_pipeline test asserts saved Step names and values. 9: rows carry no Environment, checked only via result.environment."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": "ruff check: pass; pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass, 2167 passed, 100%; pytest tests/e2e -m e2e: pass, 13 passed"
     },
     {
       "phaseId": "warehouse-deploy-state-store",
-      "status": "not-started",
-      "attempts": 0
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-27T15:19:33Z",
+      "baseRef": "cf0a12ee5514eac84c6320523fc5bbda77df2ddd",
+      "baseDirty": false,
+      "notes": "Files: src/adops/infrastructure/deploy_state_store.py (new), tests/unit/infrastructure/test_deploy_state_store.py (new). WarehouseDeployStateStore keeps the Settings Marker (one row, delete+insert in a transaction) and seen record ids (ON CONFLICT DO NOTHING per pipeline+id) in adops._adops_deploy_state; load() on a missing table returns DeployState(None). The step_fingerprint_store.py docstring change was already in 6b47e40, so that file is unchanged. Gates: ruff check green; unit suite 2197 passed, 100% coverage (tests/unit/test_package.py first failed on a stale 0.1.0 venv install, also failing at HEAD; fixed with uv sync --reinstall-package adops). Compensation known: remove the adapter and drop adops._adops_deploy_state; a missing table makes the next deploy run in full.",
+      "failures": [
+        {
+          "at": "2026-11-27T15:27:08Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "tests/unit/test_package.py::test_version_matches_installed_distribution: assert 0.2.0 == 0.1.0 — local venv held the 0.1.0 build; also red at HEAD cf0a12e, not caused by this phase",
+          "resolvedBy": "gate-fix",
+          "resolution": "uv sync --reinstall-package adops; the test passes. No repo change."
+        }
+      ],
+      "completedAt": "2026-11-27T15:42:29Z",
+      "gradeResult": {
+        "phaseId": "warehouse-deploy-state-store",
+        "dimensionScores": [
+          {
+            "dimensionId": "state-roundtrip-and-defaults",
+            "score": 10,
+            "pass": true,
+            "evidence": "Empty load, schema-without-table, marker round trip, seen ids across Pipelines, and duplicate-id count=1 are each tested on DuckDB+Postgres. 10 over 9: test_load_from_an_existing_empty_table_is_the_empty_state and test_saving_a_marker_again_overwrites_its_one_row (SQL count of one marker row)."
+          },
+          {
+            "dimensionId": "environment-isolation",
+            "score": 9,
+            "pass": true,
+            "evidence": "test_another_environments_warehouse_sees_none_of_the_state uses separate stage/prod DuckDB files; grep for _adops_applied_records finds nothing; test_saving_leaves_the_applied_records_table_untouched. Not 10: the applied-records check is a separate test, not part of the isolation test."
+          },
+          {
+            "dimensionId": "adapter-sanitized-and-confined",
+            "score": 10,
+            "pass": true,
+            "evidence": "All values bound as %s parameters; f-strings only for the qualified table name; has_dataset/create_dataset plus CREATE TABLE IF NOT EXISTS; WarehouseUnreachable raised with no driver text; purity tests pass. 10 over 9: test_quotes_in_values_are_stored_as_values round-trips mar'ker, sh'op, rec'ord on both Warehouses."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": "ruff check: pass; pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass, 2197 passed, 100% after venv reinstall; pytest tests/e2e -m e2e: pass"
     },
     {
       "phaseId": "adops-run-changed-flag",
-      "status": "not-started",
-      "attempts": 0
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-27T15:43:36Z",
+      "baseRef": "cf0a12ee5514eac84c6320523fc5bbda77df2ddd",
+      "baseDirty": true,
+      "notes": "Already dirty at start (phase 4 uncommitted): src/adops/infrastructure/deploy_state_store.py, tests/unit/infrastructure/test_deploy_state_store.py, the two ledger files. Files: src/adops/interface/run_command.py, tests/unit/interface/test_run_command.py, tests/e2e/test_demo_sync.py, tests/unit/interface/test_server.py (unplanned: its fake run_pipeline now accepts deploy=). Adds `adops run --all --changed --env stage|prod`: refusals in run(), Deploy Plan made inside the Warehouse lock in run_in_environment, Settings Marker saved once after every Pipeline passed under a second lock, unchanged lines via result_output. The --changed help test lives in test_run_command.py, so test_cli.py is unchanged. Compensation: drop the --changed option and its wiring; deploys then run every Step as before.",
+      "unplannedFiles": [
+        "tests/unit/interface/test_server.py"
+      ],
+      "completedAt": "2026-11-27T16:11:24Z",
+      "gradeResult": {
+        "phaseId": "adops-run-changed-flag",
+        "dimensionScores": [
+          {
+            "dimensionId": "changed-flag-refusals",
+            "score": 10,
+            "pass": true,
+            "evidence": "Five separate CliRunner refusal tests; every message names --changed, the conflicting part and the allowed form (the 10 bar); two tests show plain --all reruns every Step."
+          },
+          {
+            "dimensionId": "unchanged-wording",
+            "score": 9,
+            "pass": true,
+            "evidence": "'unchanged in {result.environment}' and the 'nothing rerun' summary come only from result_output; tests compare Run Log to stdout for unchanged-prod and from-step-stage runs. Not 10: from-step Run Log check is on stage, not prod."
+          },
+          {
+            "dimensionId": "marker-saved-after-all-pass",
+            "score": 9,
+            "pass": true,
+            "evidence": "Marker saved once after the loop under its own lock; lock-event test shows plan inside the lock; two-Pipeline failure test shows no save; next run after a failure reruns in full. Not 10: that next-run proof uses one Pipeline."
+          },
+          {
+            "dimensionId": "interface-wiring-only",
+            "score": 9,
+            "pass": true,
+            "evidence": "No rule logic grep hits; mcp_server.py unchanged; store load/save errors show only the type; another Pipeline's record leaves this one unchanged. Not 10: no test through the MCP entry point."
+          },
+          {
+            "dimensionId": "e2e-changed-only-proof",
+            "score": 9,
+            "pass": true,
+            "evidence": "One postgres-only case adds a Schedule, asserts sync unchanged + transform passed after the model edit, and a third run 'nothing rerun'. Graded before the full e2e run finished; that run later passed, 14 tests in 15:22."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": [
+        "ruff check: pass",
+        "pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN set): pass, 2217 tests, 100% coverage",
+        "pytest tests/e2e -m e2e: pass, 14 tests in 15:22 (under 20 min)"
+      ],
+      "failures": [
+        {
+          "kind": "gate",
+          "gate": "uv run pytest tests/unit --cov",
+          "detail": "Coverage failure: total of 99 is less than fail-under=100 (run_command.py:191, build_deploy_state_store); also test_server fake run_pipeline rejected deploy=",
+          "at": "2026-11-27T16:11:24Z",
+          "resolvedBy": "gate-fix",
+          "resolution": "Added a test of the real build_deploy_state_store factory; test_server fake now accepts deploy="
+        }
+      ]
     },
     {
       "phaseId": "deploy-workflows-run-changed",
-      "status": "not-started",
-      "attempts": 0
+      "status": "awaiting-verification",
+      "attempts": 1,
+      "startedAt": "2026-11-27T16:12:38Z",
+      "baseRef": "cf0a12ee5514eac84c6320523fc5bbda77df2ddd",
+      "baseDirty": true,
+      "notes": "Already dirty at start (phases 4-5, uncommitted): ledger files, src/adops/interface/run_command.py, src/adops/infrastructure/deploy_state_store.py, tests/e2e/test_demo_sync.py, tests/unit/interface/test_run_command.py, tests/unit/interface/test_server.py, tests/unit/infrastructure/test_deploy_state_store.py | Changed: src/adops/templates/github/workflows/adops-stage.yml, adops-prod.yml (run line -> adops run --all --changed --env <env> --project /project/current, step names and header comments), tests/unit/interface/test_init_command.py (needle + exact run string), docs/adr/0006, 0014, 0016 (2026-11-27 clarifications), docs/playbooks/promotion.md (rows 19-20, changed-only note, first-prod-deploy tables, manual full rerun), decisions.md (2 horizon-18 lines). No unplanned files.",
+      "unplannedFiles": [],
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-27T16:16:45Z",
+          "gate": "uv run pytest tests/unit --cov --cov-report=term-missing",
+          "detail": "64 [postgres] tests errored at setup: ADOPS_TEST_POSTGRES_DSN is not set",
+          "resolvedBy": "gate-fix",
+          "resolution": "Not a code fault: reran with ADOPS_TEST_POSTGRES_DSN pointing at the already-running test Postgres on 55432; 2217 passed, 100% coverage"
+        }
+      ]
     }
   ]
 }

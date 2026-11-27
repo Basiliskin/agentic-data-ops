@@ -4,8 +4,8 @@
 # link (docs/playbooks/promotion.md, "One-time move to release folders"). First point the prod
 # Environment in adops.yaml at that machine: in a demo Project, edit its host, port and database;
 # in a plain Project, uncomment the prod block. The deploy copies the validated release into
-# releases/<commit>, points current at it, reloads the Server and runs every Pipeline from current.
-# A failing validate changes no file on the Server.
+# releases/<commit>, points current at it, reloads the Server and reruns, from current, only the
+# Steps that changed since prod's last run. A failing validate changes no file on the Server.
 name: adops prod
 
 on:
@@ -59,10 +59,10 @@ jobs:
               exit 1
             fi
           done
-      - name: Run every Pipeline in prod
+      - name: Rerun the Changed Steps in prod
         run: >-
           docker compose --project-directory "$ADOPS_SERVER_DIR" --profile server run --rm --no-deps -T
-          dagster_daemon adops run --all --env prod --project /project/current
+          dagster_daemon adops run --all --changed --env prod --project /project/current
       - name: Give the checkout back to the runner user
         if: always()
         run: >-

@@ -30,3 +30,8 @@ The original text named a single `env_<branch>` schema created by CI and dropped
 ## Clarification (2026-11-23)
 
 - **The `--branch` known gap is closed.** `adops accept-schema <pipeline> <table> --branch <branch>` accepts a table's current shape as that Branch Environment's baseline in `br_<name>__adops`, under stage's Warehouse lock, and writes no accepted-change record. It cannot be combined with `--env` and is CLI only: the Assistant's `accept_schema` tool stays dev only. A committed accepted-change record is still applied by Branch runs as it is by stage (ADR-0015).
+
+## Clarification (2026-11-27)
+
+- **prod saves fingerprints too.** stage and prod both save a Step's Step Fingerprint in their own `adops._adops_step_fingerprints` after its Checks pass, so a deploy to either can rerun only its Changed Steps (ADR-0014 clarification of 2026-11-27). Branch Environments still compare against stage's fingerprints only and still never write them.
+- **Each deploy also saves a Deploy State** in that Environment's `adops._adops_deploy_state`: a Settings Marker (a hash of that Environment's block in `adops.yaml`, the time zone and the alert webhook setting) and the Accepted-Change Record ids it has already run with. Fingerprint rows of Steps that no longer exist are ignored, not deleted.
