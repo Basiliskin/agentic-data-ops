@@ -1,12 +1,54 @@
-# adops — Agentic DataOps
+# adops — open-source, self-hosted ELT pipelines with an AI assistant
 
-Copy data from your app's database into a warehouse, turn it into useful tables with SQL, and send
-the results back to your app, with checks that stop bad data before it spreads. You run it on your
-own machines and drive it by talking to your AI assistant (such as Claude Code).
+[![PyPI](https://img.shields.io/pypi/v/adops)](https://pypi.org/project/adops/)
+[![Python](https://img.shields.io/pypi/pyversions/adops)](https://pypi.org/project/adops/)
+[![CI](https://github.com/Basiliskin/agentic-data-ops/actions/workflows/ci.yml/badge.svg)](https://github.com/Basiliskin/agentic-data-ops/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/Basiliskin/agentic-data-ops/blob/main/LICENSE)
+
+**adops** is an open-source **ELT / ETL tool** for data engineering that you run on your own
+machines. It copies data from your app's Postgres database into a **data warehouse** (Postgres or
+DuckDB), transforms it with **dbt**, runs **data quality checks** that stop bad data before it
+spreads, and sends the results back into your app (**reverse ETL**). Pipelines are YAML files in
+Git, scheduled by **Dagster**, promoted from dev to stage to prod through pull requests, and you can
+build them by talking to your AI assistant (such as Claude Code, over **MCP**).
+
+One `uv tool install adops` gives you the whole data pipeline: extract and load, transform, test,
+schedule, deploy and reverse sync, already wired together. You don't have to connect a loader (such
+as Airbyte), dbt, an orchestrator (such as Airflow) and a reverse-ETL service yourself.
 
 > **Status: early (0.3).** Works end to end on the demo shop, in dev, stage and prod. Promotion
 > through GitHub (pull request → stage → release → prod) is proven on real self-hosted runners.
 > Starting your own Project from scratch is still thin (see [below](#start-your-own-project)).
+
+## Why adops
+
+- **The whole ELT pipeline in one tool.** Extract and load with [dlt](https://dlthub.com)
+  (full refresh or incremental by cursor), transform with plain [dbt](https://www.getdbt.com)
+  models, reverse ETL back into Postgres, and schedules on [Dagster](https://dagster.io).
+- **Data quality checks built in.** Unique keys, not-null, accepted values, minimum row counts,
+  freshness, no row loss, and a max-change guard on reverse sync. A failed check stops the run, so
+  later steps never see bad data.
+- **Schema change detection.** When a source table drops or changes a column (schema drift), adops
+  stops before loading anything. You accept intended changes with one command, and that acceptance
+  reaches stage and prod through Git.
+- **CI/CD for data (DataOps).** Separate dev, stage and prod environments, plus a disposable
+  **branch environment for every pull request** that rebuilds only the changed steps. Deploys rerun
+  only what changed.
+- **Self-hosted, secrets stay with you.** No hosted data service to sign up for: it runs on your
+  machines, with GitHub only for pull requests and deploys. Warehouse passwords stay in each
+  machine's `.env` and never go to GitHub or to the AI model.
+- **An AI data engineering assistant that can't touch prod.** Claude Code (or any MCP client) builds
+  and tests pipelines in dev. Changes reach stage and prod only through a reviewed pull request.
+- **Postgres or DuckDB warehouse.** Use DuckDB for a local data warehouse in a single file, with no
+  setup.
+
+### Is it a fit?
+
+**Good fit:** a small team or startup whose app runs on Postgres and wants an analytics warehouse,
+dbt models and synced-back results, with tests and environments, without running a data platform.
+
+**Not a fit yet:** you need many SaaS connectors (Sources are Postgres today), a Snowflake, BigQuery
+or Redshift warehouse, or a managed cloud service.
 
 ## What you need
 

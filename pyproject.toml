@@ -1,11 +1,15 @@
 [project]
 name = "adops"
 dynamic = ["version"]
-description = "Self-hosted data pipelines: sync, transform and check data into a Postgres or DuckDB warehouse."
+description = "Open-source, self-hosted ELT/ETL pipelines: sync Postgres into a Postgres or DuckDB warehouse, transform with dbt, run data quality checks and reverse ETL, with an AI assistant over MCP."
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "Dimitry Katz" }]
-keywords = ["data-pipelines", "dataops", "dbt", "dagster", "dlt", "mcp", "warehouse"]
+keywords = [
+    "etl", "elt", "reverse-etl", "data-engineering", "data-pipeline", "data-pipelines", "dataops",
+    "data-quality", "data-warehouse", "schema-drift", "dbt", "dagster", "dlt", "postgres", "duckdb",
+    "mcp", "ai-agent", "claude-code",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -15,6 +19,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Information Analysis",
 ]
 license = "Apache-2.0"
 license-files = ["LICENSE"]
