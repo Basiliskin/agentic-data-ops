@@ -51,7 +51,7 @@ The analytical database where synced and transformed data lives.
 _Avoid_: destination (ambiguous with Reverse Sync targets), DWH, cache
 
 **Sync**:
-Copying selected tables/streams from a Source into the Warehouse (through dlt for Verified Sources, PyAirbyte for Community Sources).
+Copying selected tables/streams from a Source into the Warehouse (through dlt for Verified Sources, PyAirbyte for Community Sources). A document database's collection counts as a table; its nested fields become columns and its lists become child tables.
 _Avoid_: ingestion run, extract, load, import
 
 **Incremental Sync**:
@@ -66,8 +66,16 @@ _Avoid_: reload, snapshot sync
 A Sync that reads the Source database's own change log, so it also captures deletes.
 _Avoid_: replication, streaming sync
 
+**Heavy read**:
+A Sync table read larger than the Project's limit (by default more than 1 million rows or documents, or 1 GB), from any Source (ADR-0018). It runs only when its Pipeline entry carries a written approval reason, committed through Git and recording the size it was approved for. The approval must be renewed once the table grows past three times that size. Only one runs per Server at a time, and a Branch Environment reads only a slice of it. Any run over the limit, including an unplanned big Incremental Sync, is written batch by batch into a hidden copy that replaces the visible table only once every batch has passed; only a Full Refresh or a first run needs the approval.
+_Avoid_: big sync, large load, expensive query
+
+**Child table**:
+The Warehouse table made from a list inside a document collection's documents (for example `orders__items`), one row per list item. Its key is the parent document's key plus the item's position in the list, unless the Pipeline names its own key (such as the parent key plus `sku`).
+_Avoid_: nested table, sub-table, array table
+
 **Breaking Change**:
-A change to a Source table's shape (renamed or dropped column, changed type) since the last successful run. It halts the whole Sync Step before any table loads, and every later Step, until resolved. In dev it is resolved by running `accept-schema` by hand; in stage, prod and Branch Environments, by a committed Accepted-change record, which dev's `accept-schema` writes. A Branch Environment can also be hand-accepted with `accept-schema --branch <name>`, which writes no record. An added column is not a Breaking Change.
+A change to a Source table's shape (renamed or dropped column, changed type) since the last successful run. It halts the whole Sync Step before any Warehouse table changes, and every later Step, until resolved. In dev it is resolved by running `accept-schema` by hand; in stage, prod and Branch Environments, by a committed Accepted-change record, which dev's `accept-schema` writes. A Branch Environment can also be hand-accepted with `accept-schema --branch <name>`, which writes no record. An added column is not a Breaking Change. For a document database, a field seen with a new type is always a Breaking Change, but a field missing from the documents read counts as dropped only on a Full Refresh; a field present in only some documents is never one.
 _Avoid_: schema drift (covers harmless changes too), schema error
 
 **Accepted-change record**:

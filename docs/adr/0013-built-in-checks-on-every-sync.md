@@ -5,3 +5,5 @@ Every flow must be guarded by fixed rules, not by the user remembering to add th
 Breaking Change detection (schema snapshot vs the last successful run) and user-declared Checks (not_null, accepted_values, min_rows, freshness) build on this and come next.
 
 **Considered Options:** user-declared checks only (new flows would run unguarded); built-in Checks that can never be skipped (a Source that deletes rows on purpose would fail every run).
+
+**Amended by ADR-0017 (2026-11-28):** an Incremental Sync from a document Source gets one more built-in Check, which fails when documents lack the cursor field. Child tables get the key Checks and "rows written equal list items read" instead of "no row loss" and "row count matches the Source", which a normal edit of a list would fail or the Source cannot measure.
