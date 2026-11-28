@@ -2,7 +2,7 @@
   "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-19-real-runner-trial-of-changed-only-deploys-roadmap.json",
   "roadmapTask": "Real-runner trial of changed-only deploys, plus first-run fixes (MAP #19)",
   "createdAt": "2026-11-28T06:17:05Z",
-  "updatedAt": "2026-11-28T07:09:42Z",
+  "updatedAt": "2026-11-28T07:43:35Z",
   "roadmapRevision": 0,
   "phases": [
     {
@@ -152,7 +152,7 @@
     },
     {
       "phaseId": "deploy-forgets-fingerprints-of-rerun-steps",
-      "status": "awaiting-verification",
+      "status": "done",
       "attempts": 1,
       "startedAt": "2026-11-28T07:03:48Z",
       "baseRef": "11039ddbd3fd4447ebdd1c4303569edc7699d1d4",
@@ -171,12 +171,62 @@
           "resolution": "Shortened the docstring and wrapped the monkeypatch call"
         }
       ],
-      "gateRun": "uv run ruff check: pass; ADOPS_TEST_POSTGRES_DSN=... uv run pytest tests/unit --cov --cov-report=term-missing: pass (2250 passed, 100% line+branch)"
+      "gateRun": "uv run ruff check: pass; ADOPS_TEST_POSTGRES_DSN=... uv run pytest tests/unit --cov --cov-report=term-missing: pass (2250 passed, 100% line+branch)",
+      "completedAt": "2026-11-28T07:10:51Z",
+      "gradeResult": {
+        "phaseId": "deploy-forgets-fingerprints-of-rerun-steps",
+        "dimensionScores": [
+          {
+            "dimensionId": "failed-step-counts-as-changed",
+            "score": 10,
+            "pass": true,
+            "evidence": "forget before task, save after; 4-step failure test checks load order; 10 earned: first-Step failure test shows a single forget only when reached, and full-pass test starts from shuffled saved order"
+          },
+          {
+            "dimensionId": "branch-run-forgets-nothing",
+            "score": 9,
+            "pass": true,
+            "evidence": "wrapper applied only when saves_stage_fingerprint; branch test asserts zero forget calls; branch after failed stage run rebuilds from index 2"
+          },
+          {
+            "dimensionId": "warehouse-store-forget-is-scoped",
+            "score": 9,
+            "pass": true,
+            "evidence": "bound-param DELETE scoped to pipeline+steps; duckdb+Postgres tests for scoping, order after failure, removed-Step rows survive; replay is by hand, no empty-steps guard (unreachable)"
+          },
+          {
+            "dimensionId": "cli-deploy-recovers-from-partial-failure",
+            "score": 9,
+            "pass": true,
+            "evidence": "CLI test asserts exit 1, transform_shop saved, push_stats absent, marker+seen unchanged, next deploy starts at push_stats"
+          },
+          {
+            "dimensionId": "port-adapter-layering",
+            "score": 9,
+            "pass": true,
+            "evidence": "four def forget found; no new application imports; run_pipeline never names WarehouseFingerprintStore"
+          }
+        ],
+        "overallPass": true
+      }
     },
     {
       "phaseId": "real-runner-trial-of-changed-only-deploys",
-      "status": "not-started",
-      "attempts": 0
+      "status": "awaiting-verification",
+      "attempts": 1,
+      "startedAt": "2026-11-28T07:26:48Z",
+      "baseRef": "dbfb6b863f33002bb5fcbfa3e9a536cc0a1bb55d",
+      "baseDirty": true,
+      "notes": "pre-existing dirty: assets/ (untracked, not this phase). Changed: docs/playbooks/promotion.md (new 2026-11-28 Recorded trials row + closing paragraph), docs/playbooks/run-stage-and-prod-on-a-mac.md (wheel build-arg example 0.1.0 -> 0.3.1). Trial in Basiliskin/adops-trial-h19 (private) from wheel of dbfb6b8; GitHub run ids: first push 46121370437 (deploy skipped), PR1 branch 46121512207, stage 46121580123, 46121700512, failed 46121796799, fix 46121894565, prod v0.1.0 46121962496, v0.2.0 46122096762.",
+      "unplannedFiles": [],
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-28T07:43:35Z",
+          "gate": "uv run pytest tests/e2e -m e2e",
+          "detail": "14 errors: docker compose up --wait for adops-e2e project returned exit 1 while the trial Server containers were still running"
+        }
+      ]
     }
   ]
 }

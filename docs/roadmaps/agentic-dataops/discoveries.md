@@ -252,3 +252,4 @@
 - 2026-11-28 | horizon 19 | guard g9: Run Log equals CLI text: First-run Branch result flows through result_lines/_summary_lines (run_command.py:760-803); no DEFERRED Steps means no 'Nothing changed' line.
 - 2026-11-28 | horizon 19 | guard g10: no tags: .github/workflows/release.yml publishes to PyPI on a v* tag in this repo.
 - 2026-11-28 | horizon 19 | guard g11 (missing from inventory): Skill byte-identity: test_demo_and_plain_ship_byte_identical_skills (test_assistant_skills.py:134-140) requires demo and plain Skills byte-identical.
+- 2026-11-28 | horizon 19 | the e2e gate fails at docker compose up while a demo Server (trial or local) holds ports 15432-15434; stop it before running tests/e2e

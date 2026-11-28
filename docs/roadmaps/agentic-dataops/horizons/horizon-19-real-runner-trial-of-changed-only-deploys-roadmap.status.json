@@ -2,7 +2,7 @@
   "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-19-real-runner-trial-of-changed-only-deploys-roadmap.json",
   "roadmapTask": "Real-runner trial of changed-only deploys, plus first-run fixes (MAP #19)",
   "createdAt": "2026-11-28T06:17:05Z",
-  "updatedAt": "2026-11-28T07:10:51Z",
+  "updatedAt": "2026-11-28T07:59:34Z",
   "roadmapRevision": 0,
   "phases": [
     {
@@ -212,8 +212,62 @@
     },
     {
       "phaseId": "real-runner-trial-of-changed-only-deploys",
-      "status": "not-started",
-      "attempts": 0
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-28T07:26:48Z",
+      "baseRef": "dbfb6b863f33002bb5fcbfa3e9a536cc0a1bb55d",
+      "baseDirty": true,
+      "notes": "pre-existing dirty: assets/ (untracked, not this phase). Changed: docs/playbooks/promotion.md (new 2026-11-28 Recorded trials row + closing paragraph), docs/playbooks/run-stage-and-prod-on-a-mac.md (wheel build-arg example 0.1.0 -> 0.3.1). Trial in Basiliskin/adops-trial-h19 (private) from wheel of dbfb6b8; GitHub run ids: first push 46121370437 (deploy skipped), PR1 branch 46121512207, stage 46121580123, 46121700512, failed 46121796799, fix 46121894565, prod v0.1.0 46121962496, v0.2.0 46122096762. Compensation: trial Server containers/images/volumes removed and runner unregistered 2026-11-28; private trial repo Basiliskin/adops-trial-h19 deletion left to the user.",
+      "unplannedFiles": [],
+      "failures": [
+        {
+          "kind": "gate",
+          "at": "2026-11-28T07:43:35Z",
+          "gate": "uv run pytest tests/e2e -m e2e",
+          "detail": "14 errors: docker compose up --wait for adops-e2e project returned exit 1 while the trial Server containers were still running",
+          "resolvedBy": "gate-fix",
+          "resolution": "Tore down the trial Server containers holding ports 15432-15434, reran e2e: 14 passed"
+        }
+      ],
+      "completedAt": "2026-11-28T07:59:34Z",
+      "gateRun": "ruff: pass; unit+cov: pass (2250, 100%); e2e: red (port clash with trial Server) then pass (14) after teardown",
+      "gradeResult": {
+        "phaseId": "real-runner-trial-of-changed-only-deploys",
+        "dimensionScores": [
+          {
+            "dimensionId": "trial-used-this-horizons-build",
+            "score": 9,
+            "pass": true,
+            "evidence": "Row names adops-0.3.1 wheel, commit dbfb6b8 (ancestor of HEAD, h19 phases 1-3) and the build-arg; trial root commit has the first-push if:; no new tags."
+          },
+          {
+            "dimensionId": "first-run-scenarios-recorded",
+            "score": 9,
+            "pass": true,
+            "evidence": "Row says repo created empty, first-push deploy skipped (run 46121370437), first PR rebuilt all three Steps and passed in 23 s (run 46121512207)."
+          },
+          {
+            "dimensionId": "changed-only-stage-and-prod-recorded",
+            "score": 9,
+            "pass": true,
+            "evidence": "Row quotes unchanged in stage (46121700512) and unchanged in prod for v0.2.0 (46122096762) after ADOPS_ENVIRONMENT=prod; grep count 1 -> 2."
+          },
+          {
+            "dimensionId": "failed-then-fixed-deploy-recorded",
+            "score": 9,
+            "pass": true,
+            "evidence": "Failure in transform_shop after unchanged sync_shop, job failed (46121796799); fix reran from transform_shop, green (46121894565)."
+          },
+          {
+            "dimensionId": "row-matches-playbook-style",
+            "score": 9,
+            "pass": true,
+            "evidence": "Bold lead, per-scenario timings, Not tried part; closing paragraph rewritten; Mac playbook shows 0.3.1."
+          }
+        ],
+        "overallPass": true,
+        "summary": "Every claim in the 2026-11-28 row matches the trial repo runs; all dimensions pass at 9."
+      }
     }
   ]
 }

@@ -85,8 +85,10 @@ build **both** Server services this way. A plain `up` without `--no-build` would
 webserver without the wheel and fail:
 
 ```sh
-docker compose --profile server build --build-arg ADOPS_PACKAGE=/build/adops-0.1.0-py3-none-any.whl
+docker compose --profile server build --build-arg ADOPS_PACKAGE=/build/adops-0.3.1-py3-none-any.whl
 ```
+
+Use the file name `uv build --wheel` printed: the 2026-11-28 trial built `adops-0.3.1-py3-none-any.whl`.
 
 Check that the container sees the same `current` as the Mac. The two commands must print the same
 `releases/local`, and again after any later switch of the link (a Promotion deploy switches it to

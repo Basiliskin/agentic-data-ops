@@ -5,6 +5,8 @@
 [![CI](https://github.com/Basiliskin/agentic-data-ops/actions/workflows/ci.yml/badge.svg)](https://github.com/Basiliskin/agentic-data-ops/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/Basiliskin/agentic-data-ops/blob/main/LICENSE)
 
+![adops overview: Sources flow through dlt extract and load, dbt transform, Dagster orchestration, data quality checks and reverse ETL, with an AI assistant on top](https://raw.githubusercontent.com/Basiliskin/agentic-data-ops/main/assets/agentic-dataops-platform-overview.png)
+
 **adops** is an open-source **ELT / ETL tool** for data engineering that you run on your own
 machines. It copies data from your app's Postgres database into a **data warehouse** (Postgres or
 DuckDB), transforms it with **dbt**, runs **data quality checks** that stop bad data before it

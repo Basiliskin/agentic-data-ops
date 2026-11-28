@@ -38,3 +38,4 @@
 - 2026-11-27 | horizon 18 | planned | 6 phases | gate pass (1 major fixed, 0 debt)
 - 2026-11-27 | horizon 18 | completed | 6 phases done; 1 amendment, 0 overrides; stage and prod deploys run `adops run --all --changed`, rerunning only Changed Steps
 - 2026-11-28 | horizon 19 | planned | 4 phases (first Branch run rebuilds every Step, stage workflow skips first push, forget fingerprints before rerun, real-runner trial on Mac host); gate passed after heal (0 blockers, 1 major)
+- 2026-11-28 | horizon 19 | completed | 4 phases | 1 amendment | real-runner trial passed: first push skipped, first PR full rebuild, changed-only stage+prod, failed-then-fixed reran from failed Step
