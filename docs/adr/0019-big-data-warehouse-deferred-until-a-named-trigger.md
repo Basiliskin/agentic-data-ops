@@ -1,0 +1,9 @@
+# A big-data Warehouse is deferred until a named trigger, and Postgres column storage is tried before ClickHouse
+
+Postgres and DuckDB (ADR-0004) cover the self-hosted single team (ADR-0001) up to roughly a few hundred million rows. Nobody needs more yet, so no third Warehouse is built now. ClickHouse would be far more than one more Warehouse: it has no transactions, so the batch-by-batch hidden-copy swap (ADR-0018) would need its own `EXCHANGE TABLES` logic; the Warehouse lock relies on Postgres advisory locks or a DuckDB lock file, and ClickHouse has neither; it does not enforce unique keys and applies updates and deletes in the background, so "primary key is unique" and the Reverse Sync Diff could read stale rows; and the tool's own records (schema baselines, Step Fingerprints, deploy state) assume reliable updates.
+
+**Trigger:** the question is reopened when any one of these happens in a real Project, not a test: a Transform takes more than 1 hour on Postgres; one Warehouse table passes 500 million rows, or the Warehouse passes 500 GB; or 3 separate users or issues ask for a big-data Warehouse.
+
+**Order when it triggers:** first, column storage inside Postgres (extensions such as pg_duckdb or pg_mooncake), which keeps transactions, advisory locks, enforced keys, Reverse Sync and the tool's own records unchanged. ClickHouse is considered only if that cannot meet the trigger's target, for example getting a 1-hour dbt run under 10 minutes.
+
+**Considered Options:** adding ClickHouse now (several horizons of work for no current user; ADR-0004's original reason for rejecting it, no Docker-free PyAirbyte load, no longer applies since ADR-0012, but these new reasons do); replacing DuckDB (nothing else gives zero setup); no big-data plan at all (the question would keep coming back with nothing to decide it).
