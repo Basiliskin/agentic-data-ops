@@ -1,0 +1,410 @@
+# Horizon 19 — Real-runner trial of changed-only deploys, plus first-run fixes
+
+## Executive Summary
+
+**🎯 What are we trying to achieve?** A new adops repo's first push and first pull request should just work: the first push no longer starts a stage deploy before any runner exists, and the first pull request's Branch run (the PR's own copy of the Pipeline in `br_<branch>__` schemas) rebuilds every Step and goes green instead of failing with "stage has no Step Fingerprints". A deploy that fails partway must be retried from the failed Step next time. Then all of this, plus horizon 18's "deploys rerun only Changed Steps", is proven by hand on your own self-hosted runner on the Mac.
+
+**🧠 Why does this change need to happen?** Today every new repo shows unexplained red runs on day one. Separately, a Step Fingerprint (the saved hash that tells a deploy a Step is unchanged) is only saved after a Step passes, so a failed Step keeps its *old* fingerprint and the next deploy can wrongly think it is unchanged. The real database hides this only by an accident of how it orders rows. And horizon 18's changed-only deploys have never run on a real runner.
+
+**At a glance**
+- Phases: 4 (3 code phases, then a by-hand trial)
+- Complexity: Medium — small code changes, but the forget rule touches how every stage/prod run saves fingerprints, and the trial needs your time and a real GitHub repo
+- Main risk: the forget rule shuffling saved fingerprint order — healed at the gate by forgetting a Step *and every later Step* just before it runs
+- Testing focus: unit tests that pin which fingerprints are saved, and in what order, after a failure; YAML-parsing tests of the generated workflow; the real-runner trial row
+
+## Implementation plan
+
+### Order of work
+```
+Phase 1 — Change first Branch run to rebuild every Step
+        ↓  (reuses phase 1's first-run wording in the same Skill files)
+Phase 2 — Change stage workflow to skip the first push
+        ↓  (independent of phase 2; edits files phase 1 also touches, so run after it)
+Phase 3 — Change deploys to forget fingerprints before rerunning Steps
+        ↓  (the trial needs all three code changes in its wheel)
+Phase 4 — Run real-runner trial of changed-only deploys
+```
+
+```mermaid
+graph TD
+  branch_run_rebuilds_everything_when_stage_never_ran["Change first Branch run to rebuild every Step (branch-run-rebuilds-everything-when-stage-never-ran)"]
+  stage_workflow_skips_first_push["Change stage workflow to skip the first push (stage-workflow-skips-first-push)"]
+  deploy_forgets_fingerprints_of_rerun_steps["Change deploys to forget fingerprints before rerunning Steps (deploy-forgets-fingerprints-of-rerun-steps)"]
+  real_runner_trial_of_changed_only_deploys["Run real-runner trial of changed-only deploys (real-runner-trial-of-changed-only-deploys)"]
+  branch_run_rebuilds_everything_when_stage_never_ran --> stage_workflow_skips_first_push
+  branch_run_rebuilds_everything_when_stage_never_ran --> real_runner_trial_of_changed_only_deploys
+  stage_workflow_skips_first_push --> real_runner_trial_of_changed_only_deploys
+  deploy_forgets_fingerprints_of_rerun_steps --> real_runner_trial_of_changed_only_deploys
+```
+
+### Phase 1 — Change first Branch run to rebuild every Step
+
+Technical ID: `branch-run-rebuilds-everything-when-stage-never-ran` · Branch Environment · cross-cutting · medium
+
+**Goal** — When stage has no saved Step Fingerprints for a Pipeline, a Branch run (`adops run --branch`, which builds a pull request's work in its own br_<branch>__ Warehouse schemas) rebuilds every Step of that Pipeline and succeeds, instead of refusing with StageNotRunError. Every user-facing text that described the refusal now describes the rebuild.
+
+**Why** — A new repo's first pull request runs before stage has ever deployed, so today its Branch run always fails with 'stage has no Step Fingerprints'. Discovery showed the domain already handles an empty stage (first_changed_step returns 0, so every Step counts as changed), so the work is removing the guard and fixing the tests and texts that mention it. This is one small slice across layers: the application rule, the CLI error mapping, tests and docs, about 9 files, and no other phase consumes its pieces.
+
+**Changes**
+- Delete the StageNotRunError class (run_pipeline.py:174-178) and its raise in plan_branch_run (run_pipeline.py:644-655), so an empty fingerprinting.store.load(pipeline.name) builds BranchRun(env, {}, first) with first = 0 and nothing deferred to stage.
+- Remove StageNotRunError from the import (run_command.py:35) and from RUN_ERRORS (run_command.py:102-109); the MCP server and Server use RUN_ERRORS and need no code change.
+- Change the `adops run` docstring (run_command.py:271-272) so --help says --branch rebuilds the Steps that differ from stage's last successful run, or every Step when stage has never run the Pipeline.
+- Replace the refusal test in test_run_pipeline.py (:71 import, :1725-1729) with a first-run test: empty stage fingerprints -> every Step PASSED (none DEFERRED), no fingerprint saved, Reverse Sync applied nothing and produced a Preview, only br_<branch>__ schemas written.
+- Keep a test pinning that BranchSourcesNotParameterizedError (the fail-fast when dbt sources do not read the branch's raw schema) still fires on a first-run Branch with empty stage fingerprints.
+- Replace the CLI refusal test (test_run_command.py:1159-1166) with one asserting the printed first-run output, and assert the Run Log text equals that printed output (shared result_lines).
+- Replace the MCP refusal test (test_mcp_server.py:477-482) with one asserting the tool call succeeds with every Step rebuilt.
+- Append a dated '## Clarification (2026-11-28)' section to ADR-0006 (do not edit the original text): with no saved stage fingerprints every Step counts as changed, so the first Branch run rebuilds the whole Pipeline from the real Source; a Pipeline whose first Step is a Transform still reads stage's raw_<source> schema, which may not exist yet.
+- Rewrite the refusal paragraph in BOTH adops-share SKILL.md files (around lines 100-105) with byte-identical text: a first Branch run rebuilds every Step and may take as long as loading the full Source.
+- Rewrite docs/try-the-assistant.md:94-96 to describe the first-run rebuild instead of the refusal.
+- Run the unit gate with ADOPS_TEST_POSTGRES_DSN=postgresql://postgres:adops@localhost:55432/postgres and confirm 100% line+branch coverage, plus ruff and types.
+
+**Files / areas**
+- `src/adops/application/run_pipeline.py`
+- `src/adops/interface/run_command.py`
+- `tests/unit/application/test_run_pipeline.py`
+- `tests/unit/interface/test_run_command.py`
+- `tests/unit/interface/test_mcp_server.py`
+- `docs/adr/0006-branch-environments-as-warehouse-schemas.md`
+- `src/adops/templates/demo/.claude/skills/adops-share/SKILL.md`
+- `src/adops/templates/plain/.claude/skills/adops-share/SKILL.md`
+- `docs/try-the-assistant.md`
+
+**How to verify**
+- **Empty-stage Branch run rebuilds every Step** — `grep -rn StageNotRunError src/ tests/` returns nothing.
+- **Existing Branch rules still hold** — A test in test_run_pipeline.py asserts BranchSourcesNotParameterizedError is raised for a first-run Branch (empty stage fingerprints) whose dbt sources do not read the branch's raw schema.
+- **CLI and MCP show the rebuild** — A test in tests/unit/interface/test_run_command.py runs `adops run --branch` on an empty stage, asserts exit code 0 and one rebuilt line per Step, and asserts the Run Log text equals the printed text.
+- **Docs and Skills describe the rebuild** — `grep -rniE 'no Step Fingerprints|has never run|refus' docs/try-the-assistant.md src/adops/templates/*/.claude/skills/adops-share/SKILL.md` finds no sentence saying a Branch run refuses or fails when stage never ran.
+- **Application layer stays framework-free** — `git diff src/adops/application/run_pipeline.py` adds no import of typer, dlt, dagster, os, psycopg or any adops.interface / adops.infrastructure module.
+
+**Done when** — A unit test in tests/unit/application/test_run_pipeline.py shows a Branch run with no saved stage Step Fingerprints passing every Step, deferring none and saving no fingerprints, with the full unit gate green at 100% coverage. And every check under *How to verify* passes its bar.
+
+**Depends on** — nothing — can start immediately
+
+**Guards**
+- g2: the removed raise drops its branch; every new branch is covered by the rewritten tests, and the gate runs with ADOPS_TEST_POSTGRES_DSN set.
+- g3: only existing template files change; they keep shipping in the wheel.
+- g5: no pragma: no cover is added.
+- g6: run_pipeline.py keeps importing only ports and domain code; no framework import is added.
+- g8: the new Skill text says 'stage first runs when a pull request is merged' and quotes no banned command (no --env stage/prod, git add -A, gh release).
+- g9: the first-run result goes through the shared result_lines, and the CLI test asserts the Run Log equals the printed text.
+- g11: both adops-share SKILL.md files are edited in this phase with identical text, so test_demo_and_plain_ship_byte_identical_skills stays green.
+- g4: no e2e change; tests/e2e/test_demo_sync.py never asserted the refusal.
+
+<details><summary>Reference — full rubric</summary>
+
+| Dimension | Rule | Pass criteria | Failure examples | minScore |
+|---|---|---|---|---|
+| first-branch-run-rebuilds-all-steps | A Branch run of a Pipeline with no saved stage Step Fingerprints runs every Step in br_<branch>__ schemas, defers none to stage, saves no fingerprint and succeeds. | `grep -rn StageNotRunError src/ tests/` returns nothing.<br>A test in tests/unit/application/test_run_pipeline.py starts a Branch run with an empty fingerprint store and asserts every Step result is PASSED and none is DEFERRED.<br>The same test asserts the fingerprint store is still empty after the run, Reverse Sync applied nothing and produced a Preview, and every Warehouse write went to a br_<branch>__ schema.<br>`ADOPS_TEST_POSTGRES_DSN=postgresql://postgres:adops@localhost:55432/postgres uv run pytest tests/unit/application/test_run_pipeline.py -k branch` passes.<br>Score 10 only if the test also uses a Pipeline with at least one Sync Step and one Transform Step and asserts the Sync Step read the real Source (not a stage schema). | The raise is removed, but the new test only checks the run did not raise and never asserts that no Step was DEFERRED or that no fingerprint was saved.<br>StageNotRunError is caught in run_command.py and turned into a warning, so the application still refuses and the CLI prints a softened error.<br>A Branch run with an empty store saves fingerprints because the empty case goes down the stage path. | 8 |
+| partial-stage-and-failfast-still-hold | Removing the guard does not weaken the BranchSourcesNotParameterizedError fail-fast or the rule that a partial set of stage fingerprints defers only the unchanged prefix. | A test in test_run_pipeline.py asserts BranchSourcesNotParameterizedError is raised for a first-run Branch (empty stage fingerprints) whose dbt sources do not read the branch's raw schema.<br>The existing tests for a Branch run with a partial or full set of stage fingerprints (deferring unchanged Steps) still pass without changes to what they assert: `git diff tests/unit/application/test_run_pipeline.py` shows no removed DEFERRED assertions outside the replaced refusal test. | The fail-fast check sat after the deleted guard and was removed with it, so a first Branch run silently reads stage's raw schema.<br>The refusal test is deleted and replaced, but an unrelated deferral test is also loosened to make the suite pass. | 8 |
+| cli-and-mcp-report-the-rebuild | `adops run --branch` and the MCP run tool both succeed on an empty stage and report every Step rebuilt; the Run Log text matches the printed output; --help describes the first-run rebuild. | A test in tests/unit/interface/test_run_command.py runs `adops run --branch` on an empty stage, asserts exit code 0 and one rebuilt line per Step, and asserts the Run Log text equals the printed text.<br>A test in tests/unit/interface/test_mcp_server.py asserts the run tool call returns success with every Step rebuilt, not an error.<br>`uv run adops run --help` mentions that --branch rebuilds every Step when stage has never run the Pipeline.<br>`grep -n StageNotRunError src/adops/interface/run_command.py` returns nothing. | The CLI test asserts only exit code 0 and never compares the Run Log with the printed output.<br>The MCP refusal test is deleted rather than replaced, so nothing pins MCP behaviour on an empty stage.<br>The --help docstring still says --branch needs stage to have run. | 8 |
+| user-texts-describe-rebuild | Every user-facing text that described the refusal now describes the first-run rebuild, and the ADR gains a dated clarification without its original text changing. | `grep -rniE 'no Step Fingerprints\|has never run\|refus' docs/try-the-assistant.md src/adops/templates/*/.claude/skills/adops-share/SKILL.md` finds no sentence saying a Branch run refuses or fails when stage never ran.<br>`cmp src/adops/templates/demo/.claude/skills/adops-share/SKILL.md src/adops/templates/plain/.claude/skills/adops-share/SKILL.md` prints nothing.<br>`git diff docs/adr/0006-branch-environments-as-warehouse-schemas.md` shows only added lines, ending in a '## Clarification (2026-11-28)' section that covers the full rebuild and the Transform-first Pipeline reading stage's raw_<source> schema.<br>Both Skill files say a first Branch run rebuilds every Step and may take as long as loading the full Source, and quote no banned command (the g8 Skill text test passes). | The Skill files are rewritten but docs/try-the-assistant.md:94-96 still explains the refusal.<br>The ADR's original Decision paragraph is edited in place instead of adding a Clarification section.<br>The clarification leaves out the Transform-first caveat. | 7 |
+| layer-respected | The rule change lives in the application layer, error mapping stays in the interface layer, and run_pipeline.py gains no outward dependency. | `git diff src/adops/application/run_pipeline.py` adds no import of typer, dlt, dagster, os, psycopg or any adops.interface / adops.infrastructure module.<br>`grep -n 'from adops.interface\\|from adops.infrastructure' src/adops/application/run_pipeline.py` returns nothing.<br>RUN_ERRORS in run_command.py is the only place the removed error was mapped, and the MCP server code is unchanged (`git diff --stat` shows no change to the MCP server source). | The empty-stage check is moved into run_command.py, which now reads the fingerprint store directly and decides the rebuild in the interface layer.<br>run_pipeline.py imports a CLI message helper to build the first-run text. | 8 |
+
+Healer hint: The most likely miss is a first-run test that only checks 'no exception', so add explicit assertions that no Step is DEFERRED, the fingerprint store stays empty and every write went to a br_<branch>__ schema, and check that both SKILL.md files still match with cmp.
+</details>
+
+### Phase 2 — Change stage workflow to skip the first push
+
+Technical ID: `stage-workflow-skips-first-push` · Promotion · interface · small
+
+**Goal** — The generated adops-stage.yml GitHub workflow does not start a stage deploy on the repo's very first push to main, and still deploys every later push; the playbook and Skill explain that stage first runs on the first merge.
+
+**Why** — On a brand-new repo the first push to main starts adops-stage before any self-hosted runner or Server folder exists, so it hangs or fails and confuses the user. GitHub marks that push with github.event.before set to 40 zeros, so a job-level condition can skip it. Only adops-stage.yml changes; adops-prod.yml (release published) and adops-pull-request.yml are not affected by a push.
+
+**Changes**
+- Add a job-level `if:` to the deploy job in adops-stage.yml that compares github.event.before with the 40-zero string using only `!=` (and `&&` / `==` if more terms are needed), with no `||`, `!` or true/false, so the test evaluate() helper (test_init_command.py:662-679) can check it.
+- Update the adops-stage.yml header comment (lines 1-6) to say every merge to main deploys to stage except the repo's very first push.
+- Split test_deploy_validates_the_checkout_before_switching_the_server_release (test_init_command.py:894-911): the stage case asserts the job `if` equals the first-push condition; the prod case still asserts no job-level `if`.
+- Add a push_context(before) helper next to pull_request_context (test_init_command.py:656) and a test that evaluates the parsed stage condition: false for before = 40 zeros, true for a normal commit SHA.
+- Rewrite the first-push sentence in BOTH adops-share SKILL.md files (lines 118-120) with byte-identical text: the first push of main starts no stage deploy; stage first runs when a pull request is merged.
+- Rewrite the Step 7 intro of promotion.md (about lines 255-259, the 'cancel and re-run' note): the first push starts no stage deploy; the first pull request's Branch run rebuilds every Step; stage first runs on the first merge; a repo created on GitHub with a README and then pushed is not a first push and may still start adops-stage.
+
+**Files / areas**
+- `src/adops/templates/github/workflows/adops-stage.yml`
+- `tests/unit/interface/test_init_command.py`
+- `src/adops/templates/demo/.claude/skills/adops-share/SKILL.md`
+- `src/adops/templates/plain/.claude/skills/adops-share/SKILL.md`
+- `docs/playbooks/promotion.md`
+
+**How to verify**
+- **Stage deploy condition skips only the first push** — A test in tests/unit/interface/test_init_command.py loads the generated adops-stage.yml with a YAML parser, takes the deploy job's `if`, and evaluates it with the evaluate() helper through a push_context(before) helper.
+- **Prod and pull-request workflows unchanged** — The split test in test_init_command.py asserts the parsed adops-prod.yml deploy job has no `if` key.
+- **Playbook and Skill explain the first run** — `grep -n 'cancel and re-run' docs/playbooks/promotion.md` returns nothing in the Step 7 intro.
+- **Change stays in templates and tests** — `git diff --stat -- 'src/adops/**/*.py'` shows no changed Python files for this phase.
+
+**Done when** — A unit test in tests/unit/interface/test_init_command.py parses the generated adops-stage.yml and shows its deploy job condition is false for a push whose before is 40 zeros and true for a normal push, while adops-prod.yml still has no job-level if. And every check under *How to verify* passes its bar.
+
+**Depends on** — Change first Branch run to rebuild every Step
+
+**Guards**
+- g2: the change is YAML and tests only; no package code branch is added, so coverage stays 100%.
+- g3: adops-stage.yml stays under src/adops/templates and ships in the wheel; no packaging change.
+- g5: no pragma: no cover is added.
+- g7: the new condition is verified by parsing the generated YAML and evaluating it in a unit test, not by reading the template text.
+- g8: the new Skill sentence names no stage command, only 'when a pull request is merged'.
+- g11: both SKILL.md files get the same edit in this phase, keeping them byte-identical.
+
+<details><summary>Reference — full rubric</summary>
+
+| Dimension | Rule | Pass criteria | Failure examples | minScore |
+|---|---|---|---|---|
+| stage-condition-evaluates-correctly | The parsed adops-stage.yml deploy job has a job-level `if` that evaluates false when github.event.before is 40 zeros and true for a normal commit SHA. | A test in tests/unit/interface/test_init_command.py loads the generated adops-stage.yml with a YAML parser, takes the deploy job's `if`, and evaluates it with the evaluate() helper through a push_context(before) helper.<br>That test asserts false for before='0000000000000000000000000000000000000000' and true for a real-looking 40-hex SHA.<br>`uv run pytest tests/unit/interface/test_init_command.py -k stage` passes.<br>Score 10 only if the test also checks that a 39- or 41-zero string or an empty before still deploys, showing the comparison is exact. | The test asserts the template text contains '0000000000' with a substring check instead of parsing and evaluating the condition.<br>The condition uses `github.event.created == false`, which evaluate() cannot parse, so the test stubs the evaluation.<br>The condition uses `!(...)` or `\|\|`, which GitHub accepts but the helper cannot evaluate, and the test was weakened to skip evaluation. | 8 |
+| other-workflows-untouched | Only adops-stage.yml gains a job-level condition; adops-prod.yml still has no job-level `if` and adops-pull-request.yml is unchanged. | The split test in test_init_command.py asserts the parsed adops-prod.yml deploy job has no `if` key.<br>`git diff --stat src/adops/templates/github/workflows/` lists only adops-stage.yml.<br>The adops-stage.yml header comment says every merge to main deploys to stage except the repo's very first push. | The shared parametrized test is deleted rather than split, so nothing now forbids a job-level `if` on prod.<br>The same condition is copied onto adops-prod.yml 'for consistency'. | 8 |
+| first-run-guidance-is-accurate | promotion.md Step 7 and both adops-share Skills say the first push starts no stage deploy, the first PR's Branch run rebuilds every Step, and stage first runs on the first merge, including the README-created-repo caveat in the playbook. | `grep -n 'cancel and re-run' docs/playbooks/promotion.md` returns nothing in the Step 7 intro.<br>Step 7 of docs/playbooks/promotion.md names all four points: the first push starts no stage deploy, the first PR's Branch run rebuilds every Step, stage first runs on the first merge, and a repo created on GitHub with a README and then pushed may still start adops-stage.<br>`cmp src/adops/templates/demo/.claude/skills/adops-share/SKILL.md src/adops/templates/plain/.claude/skills/adops-share/SKILL.md` prints nothing, and both say stage first runs when a pull request is merged.<br>The g8 Skill text test passes: the new sentence quotes no --env stage/prod, git add -A or gh release. | promotion.md is updated but leaves out the README-created-repo caveat, so a user who created the repo with a README is surprised by a stage run.<br>Only the demo SKILL.md is edited, and the byte-identical Skill test fails. | 7 |
+| interface-layer-only | The phase touches only the workflow template, its tests and the docs/Skill texts; no adops package Python code changes. | `git diff --stat -- 'src/adops/**/*.py'` shows no changed Python files for this phase.<br>The new condition reads only GitHub event context (github.event.before) and needs no new adops CLI flag or environment variable. | A new `adops run --skip-first-push` flag is added to the CLI to detect the first push at runtime instead of using a job condition. | 8 |
+
+Healer hint: The most likely failure is a condition the test's evaluate() helper cannot parse (using ||, ! or github.event.created), so rewrite it as `github.event.before != '0000000000000000000000000000000000000000'` and evaluate the parsed YAML in the test.
+</details>
+
+### Phase 3 — Change deploys to forget fingerprints before rerunning Steps
+
+Technical ID: `deploy-forgets-fingerprints-of-rerun-steps` · Promotion · cross-cutting · medium
+
+**Goal** — In a run that saves Step Fingerprints (a stage or prod run, either full or a Changed-only deploy rerunning from Step k), just before each Step runs it forgets (deletes) the saved fingerprints of that Step and every later Step, and saves the new one only after its Checks pass. So after a failure the saved fingerprints are exactly the Steps that passed, still in Step order, and the next deploy (and any Branch run) reruns exactly from the failed Step.
+
+**Why** — Discovery found a Partial failure bug: a failed Step keeps its old saved fingerprint, so the next deploy can wrongly treat it as unchanged (the in-memory fakes skip it; the real Warehouse store reruns from an earlier Step only by an accident of row ordering). The user decided the fix: just before a Step runs, forget it and every later Step. Forgetting only the one Step would not work, because the real store gives a re-saved row the next saved_order and Steps are compared by position, so the saved order would be shuffled after a failure. This is one small slice across layers: one new port method, its Warehouse adapter and two fakes, one wiring call in run_pipeline and the tests, with no piece consumed by another phase.
+
+**Changes**
+- Add a forget method to the StepFingerprintStore port (ports.py:176) that deletes the saved fingerprints of the named Steps of one Pipeline.
+- Implement forget in WarehouseFingerprintStore (step_fingerprint_store.py) as a DELETE of those Steps' rows in the Environment's adops schema table, and add a test in test_step_fingerprint_store.py (runs against the local Postgres) showing forgotten Steps disappear from load while other Steps stay.
+- Add a test in test_step_fingerprint_store.py against the local Postgres: save A,B,C,D, then replay a full run that fails at C (forget A..D, save A, forget B..D, save B, forget C..D), and assert load returns A,B in order and first_changed_step on the current A,B,C,D returns C's index.
+- Implement forget in FakeFingerprintStore (tests/unit/application/fakes.py:416) and InMemoryFingerprintStore (tests/unit/interface/test_run_command.py:213).
+- In run_pipeline where fingerprinting is set up (near run_pipeline.py:616, only when saves_stage_fingerprint(env) is true), make the fingerprint-saving Step wrapper (FingerprintSavingStep, run_pipeline.py:225-247) call forget for its own Step AND every later Step of the Pipeline just before the Step runs; nothing is forgotten until the run reaches a Step, and a Branch run never calls forget.
+- Add application tests in test_run_pipeline.py: a stage run of A,B,C,D that fails at C leaves exactly A and B saved, in that order, with their new fingerprints, and no saved fingerprint for C or D; a from-B deploy failing at C leaves A and B saved in order; a Branch run forgets nothing; a Branch run after that failure defers A and B and rebuilds from C.
+- Add a CLI test in the deploy section of test_run_command.py (about lines 2192-2310, using deploy_project with the scheduled DEPLOY_PIPELINE and helpers deployed(), edit_model(), invoke_changed(), step_lines()): edit the dbt model, make push_stats fail, then assert transform_shop's new fingerprint is saved, push_stats has no saved fingerprint, the Settings Marker and the seen Accepted-Change Record ids are unchanged, and the next `adops run --all --changed` starts at push_stats.
+- Keep the h18 rule that saved rows of Steps a Pipeline no longer has are never pruned; forget only touches Steps being rerun.
+- Run the unit gate with ADOPS_TEST_POSTGRES_DSN set and confirm 100% line+branch coverage.
+
+**Files / areas**
+- `src/adops/application/ports.py`
+- `src/adops/application/run_pipeline.py`
+- `src/adops/infrastructure/step_fingerprint_store.py`
+- `tests/unit/application/fakes.py`
+- `tests/unit/application/test_run_pipeline.py`
+- `tests/unit/infrastructure/test_step_fingerprint_store.py`
+- `tests/unit/interface/test_run_command.py`
+
+**How to verify**
+- **Failed Step loses its saved fingerprint** — A test in tests/unit/application/test_run_pipeline.py runs a stage Pipeline A,B,C,D where C fails, then asserts load returns exactly A and B, in that order, with their new fingerprints, and nothing for C or D.
+- **Branch runs never forget** — A test in test_run_pipeline.py runs a Branch run and asserts the fake store recorded zero forget calls and its contents are unchanged.
+- **Real store deletes only the named Steps** — A test in tests/unit/infrastructure/test_step_fingerprint_store.py, run against the local Postgres, saves fingerprints for Steps X,Y,Z of Pipeline P and for a Step of Pipeline Q, forgets Y and Z in P, and asserts load(P) returns only X and load(Q) is unchanged; a second test replays a run failing at C and asserts load returns A,B in order.
+- **Next Changed-only deploy starts at the failed Step** — A test in the deploy section of tests/unit/interface/test_run_command.py edits the dbt model, makes push_stats fail, runs `adops run --all --changed`, and asserts a non-zero exit code.
+- **forget sits on the port, implemented in infrastructure** — `grep -n 'def forget' src/adops/application/ports.py src/adops/infrastructure/step_fingerprint_store.py tests/unit/application/fakes.py tests/unit/interface/test_run_command.py` finds all four definitions.
+
+**Done when** — A CLI unit test in tests/unit/interface/test_run_command.py shows that after a Changed-only deploy whose push_stats Step fails, transform_shop's new fingerprint is saved, push_stats has no saved fingerprint, the Deploy State is unchanged, and the next `adops run --all --changed` starts at push_stats. And every check under *How to verify* passes its bar.
+
+**Depends on** — nothing — can start immediately
+
+**Guards**
+- g2: each new branch (forget on the real store, the stage/prod-only call, the Branch no-call path) has a unit test; the gate runs with ADOPS_TEST_POSTGRES_DSN set.
+- g5: no pragma: no cover is added.
+- g6: the forget method is declared on the application port and implemented in infrastructure; run_pipeline.py imports no database driver.
+- g4: no new Docker e2e case, as the user chose, so the 20-minute e2e job is unaffected.
+
+<details><summary>Reference — full rubric</summary>
+
+| Dimension | Rule | Pass criteria | Failure examples | minScore |
+|---|---|---|---|---|
+| failed-step-counts-as-changed | In a stage or prod run, just before a Step runs it deletes the saved fingerprints of itself and every later Step and saves its new one only after its Checks pass, so after a failure exactly the passed Steps are saved, in Step order. | A test in tests/unit/application/test_run_pipeline.py runs a stage Pipeline A,B,C,D where C fails, then asserts load returns exactly A and B, in that order, with their new fingerprints, and nothing for C or D.<br>A test asserts the order of store calls for one Step is forget(that Step and every later Step), then run, then save(that Step), for example with a recording fake.<br>`ADOPS_TEST_POSTGRES_DSN=postgresql://postgres:adops@localhost:55432/postgres uv run pytest tests/unit/application/test_run_pipeline.py -k forget` passes.<br>Score 10 only if a test also shows that a run whose very first Step fails leaves the Steps it never reached untouched until that point (forget happens only when a Step is reached), and that a full run that passes leaves every Step saved in Step order. | Only the Step about to run is forgotten, so re-saves get the next saved_order and the saved order is shuffled (for example D,A,B after a failure at C), and the next deploy reruns from Step 0.<br>forget is called after the Step fails instead of before it runs, so a crash in the Step leaves the old fingerprint behind.<br>The test uses a dict fake that keeps insertion order and never checks the order load returns. | 8 |
+| branch-run-forgets-nothing | forget is called only when the run saves stage fingerprints; a Branch run never calls it, and a Branch run after a failed stage deploy rebuilds from the failed Step. | A test in test_run_pipeline.py runs a Branch run and asserts the fake store recorded zero forget calls and its contents are unchanged.<br>A test runs a stage deploy that fails at C, then a Branch run, and asserts the Branch run defers A and B and rebuilds from C, not from Step 0. | The forget call is put in the generic Step wrapper, so a Branch run deletes stage's saved fingerprints.<br>There is no test of the Branch run after a failed stage deploy, so whether it rebuilds from C or from Step 0 is never checked. | 8 |
+| warehouse-store-forget-is-scoped | WarehouseFingerprintStore.forget deletes only the named Steps' rows of one Pipeline in the Environment's adops schema and leaves other Steps, other Pipelines and stale rows of removed Steps alone. | A test in tests/unit/infrastructure/test_step_fingerprint_store.py, run against the local Postgres, saves fingerprints for Steps X,Y,Z of Pipeline P and for a Step of Pipeline Q, forgets Y and Z in P, and asserts load(P) returns only X and load(Q) is unchanged; a second test replays a run failing at C and asserts load returns A,B in order.<br>The same or another test shows a saved row for a Step the Pipeline no longer has survives a deploy, so the h18 rule that such rows are never pruned still holds.<br>The DELETE uses bound parameters for the Pipeline and Step names, with no string-formatted values. | forget deletes every row of the Pipeline, and the test only checks that the forgotten Step is gone.<br>forget is implemented in the fakes only, and WarehouseFingerprintStore raises NotImplementedError, which coverage hides with a pragma. | 8 |
+| cli-deploy-recovers-from-partial-failure | Through the CLI, after a Changed-only deploy whose push_stats fails, the new transform_shop fingerprint is saved, push_stats has none, the Deploy State is unchanged, and the next `adops run --all --changed` starts at push_stats. | A test in the deploy section of tests/unit/interface/test_run_command.py edits the dbt model, makes push_stats fail, runs `adops run --all --changed`, and asserts a non-zero exit code.<br>It then asserts transform_shop's saved fingerprint equals the new one, push_stats has no saved fingerprint, and the Settings Marker and seen Accepted-Change Record ids equal their values from before the run.<br>It then fixes push_stats, runs `adops run --all --changed` again, and asserts from step_lines() that the Steps before push_stats print 'unchanged in stage' and push_stats is the first Step that runs. | The test asserts the second deploy succeeds but never checks which Step it started from.<br>The Deploy State is not asserted, so a regression that advances the Settings Marker on partial failure would go unnoticed. | 8 |
+| port-adapter-layering | forget is declared on the StepFingerprintStore port in the application layer and implemented in infrastructure and the fakes; run_pipeline.py calls only the port. | `grep -n 'def forget' src/adops/application/ports.py src/adops/infrastructure/step_fingerprint_store.py tests/unit/application/fakes.py tests/unit/interface/test_run_command.py` finds all four definitions.<br>`git diff src/adops/application/` adds no import of psycopg, sqlalchemy, dlt, dagster, typer, os or any adops.infrastructure module.<br>run_pipeline.py does not reference WarehouseFingerprintStore by name. | run_pipeline.py checks `isinstance(store, WarehouseFingerprintStore)` before calling forget.<br>forget is added to WarehouseFingerprintStore but not to the port, and run_pipeline calls it via getattr. | 8 |
+
+Healer hint: The most likely failure is forgetting only the Step about to run, which lets re-saves shuffle the saved order, so forget that Step and every later Step just before it runs and add the real-Postgres test that a run failing at C leaves exactly A,B saved in order.
+</details>
+
+### Phase 4 — Run real-runner trial of changed-only deploys
+
+Technical ID: `real-runner-trial-of-changed-only-deploys` · Promotion · cross-cutting · small
+
+**Goal** — Prove on the user's self-hosted GitHub runner on the Mac host, with this horizon's adops build, that a new repo's First run explains itself, that merge -> stage and release -> prod rerun only Changed Steps, and that the deploy after a failed one reruns from the failed Step; record the results in the playbook.
+
+**Why** — Unit tests and YAML parsing cannot prove how GitHub fires the push event or how a real runner and Server behave, so the user asked for a manual trial as the last phase. It is executed by hand by the user with the executor guiding, and its rubric is the recorded results.
+
+**Changes**
+- Measure free disk on the Mac host before building any image; use no OrbStack VMs.
+- Build a wheel of this repo (uv build --wheel --out-dir dist), copy it into the trial Project and build the Server image with --build-arg ADOPS_PACKAGE=/build/adops-<ver>-py3-none-any.whl, then up --no-build, using a Postgres Warehouse and the release-folder layout from promotion.md 'One-time move to release folders'.
+- Create the trial Project with `adops init` run from the locally built wheel (not PyPI) and confirm its .github/workflows/adops-stage.yml contains the new first-push condition and its adops-share Skill has the new text before the first push.
+- Create the trial repo on GitHub EMPTY (no README, license or .gitignore) so the first push from the Mac is a real first push.
+- In that fresh private trial repo with a self-hosted runner started with ./run.sh: confirm the first push to main starts no deploy — an adops-stage workflow run may appear, but its deploy job shows skipped and nothing runs on the self-hosted runner; that counts as the pass.
+- Open the first pull request and confirm its Branch run rebuilds every Step and goes green.
+- Merge it and confirm stage deploys; then change one Step, merge, and confirm only Changed Steps rerun and the rest print 'unchanged in stage'.
+- Switch the Server's ADOPS_ENVIRONMENT to prod, publish a release in the trial repo only, and confirm prod reruns only Changed Steps and prints 'unchanged in prod' for the rest.
+- Deploy a change that fails in a Step after a passing Step (for example a failing dbt test after a Sync), then deploy the fix and confirm it reruns from the failed Step.
+- Add a dated row to the 'Recorded trials' table in promotion.md (line ~401) in the same style as the 2026-11-26 and 2026-11-27 rows (bold result lead, timings, 'Not tried:'), and update the closing paragraph that says no release-folder deploy trial is recorded yet.
+- Update the wheel version notes in run-stage-and-prod-on-a-mac.md only if the built wheel version or commands differ from what it says.
+- Never create or push a tag in this repo; releases are made only in the trial repo.
+
+**Files / areas**
+- `docs/playbooks/promotion.md`
+- `docs/playbooks/run-stage-and-prod-on-a-mac.md`
+
+**How to verify**
+- **Trial ran this horizon's wheel and adops init** — The new 'Recorded trials' row in docs/playbooks/promotion.md names the local wheel file (adops-<ver>-py3-none-any.whl) and the commit it was built from; `git merge-base --is-ancestor <that commit> HEAD` succeeds and that commit contains the three code phases.
+- **First push and first PR recorded** — Under '## Recorded trials' in docs/playbooks/promotion.md there is a new row whose Date is the trial's own date (later than 2026-11-27); `grep -n '| <trial date> |' docs/playbooks/promotion.md` finds it.
+- **Changed-only deploys in stage and prod** — The new row names the changed Step and quotes or cites output showing 'unchanged in stage' for the other Steps on the second merge.
+- **Partial failure recovery on the real runner** — The new row names the Step that passed, the Step that failed (for example a failing dbt test after a Sync) and says the fix deploy reported the earlier Step as 'unchanged in stage' and reran from the failed Step.
+- **Row is complete and in house style** — The new row has a bold result lead, timings for each scenario and a 'Not tried:' part, like the 2026-11-26 and 2026-11-27 rows.
+
+**Done when** — A new dated row under 'Recorded trials' in docs/playbooks/promotion.md recording the first push, first pull request, stage and prod Changed-only deploys and the failed-then-fixed deploy results. And every check under *How to verify* passes its bar.
+
+**Depends on** — Change first Branch run to rebuild every Step, Change stage workflow to skip the first push, Change deploys to forget fingerprints before rerunning Steps
+
+**Guards**
+- g10: no v* tag is created or pushed in this repo; adops comes from a local wheel and releases are published only in the trial repo.
+- g4: the trial is manual and adds no e2e case.
+
+**Rollback** — After recording results, stop and remove the trial Server containers and images, stop and unregister the self-hosted runner, and delete the private trial repo; nothing in this repo or on PyPI needs undoing.
+
+<details><summary>Reference — full rubric</summary>
+
+| Dimension | Rule | Pass criteria | Failure examples | minScore |
+|---|---|---|---|---|
+| trial-used-this-horizons-build | The trial Server image and the trial Project both came from a wheel built locally from this repo with all three code phases, not from PyPI. | The new 'Recorded trials' row in docs/playbooks/promotion.md names the local wheel file (adops-<ver>-py3-none-any.whl) and the commit it was built from; `git merge-base --is-ancestor <that commit> HEAD` succeeds and that commit contains the three code phases.<br>The row says the Project was created with `adops init` run from that wheel, and that its .github/workflows/adops-stage.yml held the first-push condition before the first push.<br>The row or the output it cites shows the Server image built with --build-arg ADOPS_PACKAGE=/build/adops-<ver>-py3-none-any.whl.<br>`git tag --points-at HEAD` and `git ls-remote --tags origin` show no new v* tag created by this phase. | The Server was built from the 0.3.1 wheel on PyPI, so the trial ran h18 code without the first-run, first-push or forget changes.<br>The wheel was local, but the trial Project was an old one created before this horizon, so its adops-stage.yml had no first-push condition. | 8 |
+| first-run-scenarios-recorded | The trial records that the first push to an empty repo started no deploy and that the first pull request's Branch run rebuilt every Step and went green. | Under '## Recorded trials' in docs/playbooks/promotion.md there is a new row whose Date is the trial's own date (later than 2026-11-27); `grep -n '\| <trial date> \|' docs/playbooks/promotion.md` finds it.<br>That row says the repo was created empty and the first push's adops-stage deploy job was skipped (or no run started), with nothing run on the self-hosted runner.<br>That row says the first PR's Branch run rebuilt every Step and passed, with its timing. | The trial repo was created with a README, so the push was not a first push, yet the row reports the skip as a pass.<br>The row says 'first PR green' without saying every Step was rebuilt rather than deferred. | 8 |
+| changed-only-stage-and-prod-recorded | The trial records that a merge and a release each reran only Changed Steps on the real runner and printed 'unchanged in stage' / 'unchanged in prod' for the rest. | The new row names the changed Step and quotes or cites output showing 'unchanged in stage' for the other Steps on the second merge.<br>The row says the Server's ADOPS_ENVIRONMENT was switched to prod, a release was published in the trial repo, and quotes or cites 'unchanged in prod' for unchanged Steps.<br>`grep -c 'unchanged in stage\\|unchanged in prod' docs/playbooks/promotion.md` is higher than before this phase, or the row links captured command output containing both strings. | Only the stage merge is recorded and the prod release is listed under 'Not tried:' without a blocker reason.<br>The row says 'prod deploy worked' but the release deployed every Step because the changed Step was the first one, so nothing showed 'unchanged in prod'. | 8 |
+| failed-then-fixed-deploy-recorded | The trial records a deploy that failed in a Step after a passing Step, followed by a fix deploy that reran from the failed Step. | The new row names the Step that passed, the Step that failed (for example a failing dbt test after a Sync) and says the fix deploy reported the earlier Step as 'unchanged in stage' and reran from the failed Step.<br>The row or its cited output shows the failing deploy's job as failed and the fix deploy's job as green. | The failure was put in the first Step, so 'reran from the failed Step' is the same as a full rerun and proves nothing.<br>The fix deploy is recorded as green but the row does not say which Step it started from. | 8 |
+| row-matches-playbook-style | The row follows the 2026-11-26 and 2026-11-27 style and the playbook no longer says no release-folder deploy trial is recorded. | The new row has a bold result lead, timings for each scenario and a 'Not tried:' part, like the 2026-11-26 and 2026-11-27 rows.<br>`grep -n 'no release-folder deploy trial' docs/playbooks/promotion.md` returns nothing, or the closing paragraph now points to the new row.<br>If the wheel version or commands differ from docs/playbooks/run-stage-and-prod-on-a-mac.md, that file is updated to match (`grep` for the built wheel version finds it). | The row is a free-text paragraph with no timings and no 'Not tried:' part.<br>The closing paragraph still says no release-folder deploy trial is recorded. | 7 |
+
+Healer hint: The most likely failure is a trial run against the PyPI wheel or a repo created with a README, so rebuild the wheel from HEAD, rerun `adops init` from it into a GitHub repo created empty, and record the wheel file name and commit in the row.
+</details>
+
+## Discovery Findings
+
+| Area | Finding | File | Implication |
+|---|---|---|---|
+| needs: StageNotRunError raise site | present. Class at run_pipeline.py:174-178; raised only in plan_branch_run (run_pipeline.py:644-655) when fingerprinting.store.load(pipeline.name) is empty. | `src/adops/application/run_pipeline.py` | Remove the raise and delete the class; plan_branch_run then builds BranchRun(env, {}, first). |
+| needs: Branch run with nothing deferred | present. first_changed_step (domain/branch_environment.py:128-139) returns 0 when stage is {}; run_pipeline then builds every Step, as it already does when the first Sync changed (test_run_command.py:1102). | `src/adops/domain/branch_environment.py` | No new domain logic for the first-run Branch; the work is removing the guard, tests and text. |
+| needs: Branch saves no fingerprints / Reverse Sync previews | present. Fingerprints saved only when saves_stage_fingerprint(env) (run_pipeline.py:616; stage/prod only, branch_environment.py:12,50). Reverse Sync writes only if writes_allowed(env) (reverse_sync_diff.py:43); Branch gets a Preview. | `src/adops/application/run_pipeline.py` | Unit tests for the first-run Branch assert no fingerprint saves, no reverse_sync applied, preview present, every Step PASSED (none DEFERRED). |
+| needs: BranchSourcesNotParameterizedError on first run | present. With first=0, _ensure_sources_parameterized runs over every Step (run_pipeline.py:653-654,674-683). Demo sources.yml uses adops_raw_schema_shop; the plain template ships no sources.yml with the var. | `src/adops/application/run_pipeline.py` | The fail-fast can now fire on a repo's first PR if dbt sources are not parameterized; Skill and promotion.md text mention it; keep a test pinning it with empty stage fingerprints. |
+| conflict: Transform-first Pipeline on first Branch run | read_layout (branch_environment.py:88-107) points a Transform at stage's raw_<source> when no earlier Sync in the Branch rebuilt it; with stage never run that schema may not exist. | `src/adops/domain/branch_environment.py` | Not fixed; stated as an expectation in the ADR Clarification and Skill text. |
+| needs: StageNotRunError CLI/MCP/Server mapping | present. Imported at run_command.py:35, listed in RUN_ERRORS run_command.py:102-109; RUN_ERRORS used by mcp_server.py:73,519 and server.py:22,82. | `src/adops/interface/run_command.py` | Remove from import and RUN_ERRORS; MCP and Server need no code change. |
+| needs: tests referencing StageNotRunError | present. test_run_pipeline.py:71 import and :1725-1729; test_run_command.py:1159-1166 (exact text); test_mcp_server.py:477-482. | `tests/unit/interface/test_mcp_server.py` | Rewrite all three as first-run-rebuild tests (application, CLI output, MCP result). |
+| needs: docs and Skill text on refusal | present. Refusal text in demo and plain adops-share SKILL.md:100-105 (byte-identical), docs try-the-assistant.md:94-96, promotion.md:255-259. | `src/adops/templates/demo/.claude/skills/adops-share/SKILL.md` | Edit both SKILL.md identically (test_assistant_skills.py:134) and rewrite the docs. |
+| conflict: Skill first-push sentence | Both adops-share SKILL.md:118-120 say the first push of main starts its stage update. | `src/adops/templates/plain/.claude/skills/adops-share/SKILL.md` | Rewrite: the first push starts no stage deploy; stage first runs on the first merge. |
+| conflict: run --help docstring | adops run docstring run_command.py:271-272 says --branch rebuilds only Steps differing from stage's last successful run. | `src/adops/interface/run_command.py` | Add 'or every Step when stage has never run the Pipeline'. |
+| needs: ADR-0006 Clarification format | present at docs/adr/0006-branch-environments-as-warehouse-schemas.md; dated '## Clarification (YYYY-MM-DD)' bullet sections appended at the end (latest 2026-11-27, line 34). Consequences line 5 says it rebuilds only changed Steps and downstream. | `docs/adr/0006-branch-environments-as-warehouse-schemas.md` | Append a dated Clarification; do not edit original text. |
+| needs: adops-stage.yml trigger/jobs | present. on: push: branches: [main]; one job deploy with no if:; header comment lines 1-6 'Every merge to main deploys'. | `src/adops/templates/github/workflows/adops-stage.yml` | Add a job-level if: skipping before == 40 zeros and update the header comment. |
+| guard g7: existing test forbids job-level if | test_deploy_validates_the_checkout_before_switching_the_server_release (test_init_command.py:894-911), parametrized stage/prod, asserts 'if' not in job. | `tests/unit/interface/test_init_command.py` | Split: stage's job if equals the first-push guard, prod has none; add a test evaluating the condition for first and normal pushes. |
+| guard g7: evaluate() helper limits | evaluate(condition, context) (test_init_command.py:662-679) supports only A == B / A != B joined by ' && ', quoted strings or dotted context paths; no \|\|, !, or true/false. | `tests/unit/interface/test_init_command.py` | Write the guard with &&/!= and string compares (github.event.before != '0000…0'); add a push_context(before) helper like pull_request_context (line 656). |
+| needs: adops-prod.yml / pull-request on first push | present. adops-prod.yml triggers on release published; adops-pull-request.yml only on pull_request events. | `src/adops/templates/github/workflows/adops-prod.yml` | Only adops-stage.yml changes. |
+| needs: plan_deploy domain + wiring | present. plan_deploy domain/deploy_rerun.py:67-86: FULL if marker changed, unseen records, no schedule, or no fingerprints; else first_changed_step over saved rows filtered to current Step names. Wired via run_command._deploy_run (555-579). | `src/adops/domain/deploy_rerun.py` | Partial-failure test fits at CLI level (test_run_command deploy section ~2192-2310). |
+| conflict: a failed Step keeps its old fingerprint | WarehouseFingerprintStore._save sets saved_order=max+1 on conflict (step_fingerprint_store.py:92-102); load is ORDER BY saved_order (pinned test_step_fingerprint_store.py:104). Fakes (fakes.py:416 FakeFingerprintStore, test_run_command.py:213 InMemoryFingerprintStore) update in place. A deploy rerunning B,C where C fails leaves C's old fingerprint; first_changed_step compares positionally, so the real store reruns from B by accident of ordering and the fakes would report UNCHANGED (C never retried). | `src/adops/infrastructure/step_fingerprint_store.py` | USER DECISION: before a run that saves fingerprints (stage/prod) reruns Steps from index k on, it forgets (deletes) the saved fingerprints of those Steps, so a failed Step always counts as changed and the next deploy reruns exactly from it. Needs a store forget/delete method on the port, real store + fakes. |
+| needs: where fingerprints / marker / seen ids are saved | present. FingerprintSavingStep saves after task success (run_pipeline.py:225-247). Seen records saved only if deploy and result.succeeded (run_pipeline.py:622-623). Settings Marker saved after every Pipeline passed (run_command.py:297-298,319-330). | `src/adops/application/run_pipeline.py` | Test must use a scheduled Pipeline (DEPLOY_PIPELINE) or plan_deploy returns FULL. |
+| needs: existing failure-then-rerun tests | partial. test_a_failed_deploy_saves_no_marker_so_the_next_one_reruns_in_full (test_run_command.py:2292); test_a_failed_check_saves_the_earlier_steps_fingerprint_only (test_run_pipeline.py:1617); test_a_failed_deploy_step_marks_no_record_seen (:1908). No from-step deploy that fails mid-way then reruns. | `tests/unit/interface/test_run_command.py` | Add the test with helpers deployed(), edit_model(), invoke_changed(), step_lines(). |
+| needs: CLI deploy test fakes | present. InMemoryDeployStateStore (test_run_command.py:2034); deploy_project fixture with DEPLOY_SETTINGS + DEPLOY_PIPELINE (scheduled); DEPLOY_STEPS = sync_shop, transform_shop, push_stats. | `tests/unit/interface/test_run_command.py` | Edit the model, make push_stats fail; assert transform_shop saved, push_stats forgotten, marker and seen unchanged, next run starts at push_stats. |
+| needs: e2e Branch refusal assertion | present (none). tests/e2e/test_demo_sync.py:404 runs stage first and never asserts the refusal. | `tests/e2e/test_demo_sync.py` | No e2e change (g4). |
+| needs: promotion.md Recorded trials format | present. '## Recorded trials' at line 401: table \| Date \| Where \| Result \| with rows 2026-11-26 (Mac host, ./run.sh, wheel) and 2026-11-27 (AWS prod), bold result lead, timings, 'Not tried:'; a closing paragraph says no release-folder deploy trial recorded yet. | `docs/playbooks/promotion.md` | Add a dated row in the same style and update that paragraph. |
+| needs: promotion.md cancel-and-re-run note | present at promotion.md:255-259 (Step 7 intro): Branch run stops with 'stage has no Step Fingerprints' until stage runs; cancel adops stage if no runner exists. | `docs/playbooks/promotion.md` | Rewrite: first push starts no stage deploy; first PR's Branch rebuilds everything; stage first runs on first merge; README-created repo caveat. |
+| needs: Mac trial wheel build | present. run-stage-and-prod-on-a-mac.md:83-88,148-170: uv build --wheel --out-dir dist, copy wheel into the Project, docker compose --profile server build --build-arg ADOPS_PACKAGE=/build/adops-<ver>-py3-none-any.whl, up --no-build. Package is 0.3.1. | `docs/playbooks/run-stage-and-prod-on-a-mac.md` | Trial phase uses these commands with this horizon's build and the release-folder layout (promotion.md 'One-time move to release folders'). |
+| guard g2/g5: coverage | present. Removing the raise removes its branch; new branches (forget method, YAML) need tests, no pragma. | `pyproject.toml` | Every new branch gets a unit test. |
+| guard g8: Skill banned commands | test_assistant_skills.py checks Skill text for banned commands (--env stage/prod, git add -A, gh release) even in warnings. | `tests/unit/interface/test_assistant_skills.py` | New Skill text says 'stage first runs when a pull request is merged', never a stage command. |
+| guard g9: Run Log equals CLI text | First-run Branch result flows through result_lines/_summary_lines (run_command.py:760-803); no DEFERRED Steps means no 'Nothing changed' line. | `src/adops/interface/run_command.py` | Any new note goes through result_output; assert the Run Log equals output. |
+| guard g10: no tags | .github/workflows/release.yml publishes to PyPI on a v* tag in this repo. | `.github/workflows/release.yml` | Trial creates releases only in the separate trial repo; adops comes from a local wheel. |
+| guard g11 (missing from inventory): Skill byte-identity | test_demo_and_plain_ship_byte_identical_skills (test_assistant_skills.py:134-140) requires demo and plain Skills byte-identical. | `tests/unit/interface/test_assistant_skills.py` | Edit both SKILL.md files identically, in one phase. |
+
+## Repo guards this plan works under
+
+| Id | What it enforces | When | Defined in | Phases |
+|---|---|---|---|---|
+| g1 | ruff check passes (E,F,W,I,B,UP, line length 100) | on pull request / push | `.github/workflows/ci.yml` | all (repo-wide) |
+| g2 | unit tests pass with 100% line+branch coverage of the adops package | on pull request / push | `.github/workflows/ci.yml + pyproject.toml [tool.coverage]` | 1, 2, 3 |
+| g3 | project templates ship in the built wheel | on pull request / push | `.github/workflows/ci.yml` | 1, 2 |
+| g4 | demo Project end to end in Docker passes within the 20-minute e2e job | on pull request / push | `.github/workflows/ci.yml` | 1, 3, 4 |
+| g5 | no pragma: no cover except TYPE_CHECKING | on review | `docs/roadmaps/agentic-dataops/decisions.md (horizon 1)` | 1, 2, 3 |
+| g6 | domain and application layers import no framework (dlt, dagster, typer, os.environ); engines sit behind ports | on review | `docs/roadmaps/agentic-dataops/decisions.md (horizon 1)` | 1, 3 |
+| g7 | generated workflows are verified by parsing the generated YAML in unit tests | on review | `docs/roadmaps/agentic-dataops/decisions.md (horizon 8)` | 2 |
+| g8 | Skills never quote a banned command (git add -A, --env stage/prod, gh release), even inside a warning | on test run | `docs/roadmaps/agentic-dataops/decisions.md (horizon 15) + tests/unit Skill text checks` | 1, 2 |
+| g9 | Run Log text equals the CLI's printed text through one shared result_lines, masked with Secret values; store/driver errors report only the error type | on review | `docs/roadmaps/agentic-dataops/decisions.md (horizon 11)` | 1 |
+| g10 | pushing a v* tag publishes the adops package to PyPI; phases must not create or push tags | push of a v* tag | `.github/workflows/release.yml` | 4 |
+| g11 | demo and plain templates ship byte-identical Skills | unit tests | `tests/unit/interface/test_assistant_skills.py:134` | 1, 2 |
+
+## Out of Scope
+
+- Trial on OrbStack, Linux VMs or Docker Desktop: user said Mac host only.
+- DuckDB-Warehouse Server trial: DuckDB Servers must be Linux.
+- Changing the h18 deploy rerun rules: binding decisions; this horizon proves them.
+- Freshness alerts (MAP #20): next horizon.
+- Automatic drop-branch in CI, fork-PR policy: earlier deferred decisions.
+- A prod approval step for private repos without Enterprise (h8 blocker).
+- New Docker e2e case for Partial failure or the first-run Branch run — gate 1 (user chose unit test plus manual trial).
+- Fix for a Transform-first Pipeline whose first Branch run reads a stage raw_<source> schema that may not exist — gate 2 (stated as an expectation in the ADR-0006 Clarification and Skill text).
+- Pruning saved fingerprint rows of Steps a Pipeline no longer has — gate 1 (h18 decision keeps them).
+- Rollback command — gate 2 (this horizon only produces its inputs).
+- Upgrading existing Projects' generated adops-stage.yml and Skills — gate 2 (MAP #24).
+- Fixing scheduled-run overlap or first-prod-deploy side effects if seen in the trial — gate 1 (observed and recorded only).
+
+## Required Materials
+
+| Name | Kind | Why needed | How to get it |
+|---|---|---|---|
+| Fresh empty private GitHub trial repo with a self-hosted runner and a prod environment | tool | Only real GitHub push, pull request and release events on a real self-hosted runner show whether the first-push skip, the first Branch run and the changed-only deploys work. | The user creates it on GitHub (empty: no README/license/.gitignore) and registers a runner on the Mac host with ./run.sh. |
+| The user's time on the Mac host with Docker and enough free disk | knowledge | The merges, the release, the Server switch to prod and the deliberately failing deploy are done by hand. | Hand-run trial; measure free disk first. |
+
+## Success Criteria
+
+- All of these hold. (1) Branch rule: when stage has no saved Step Fingerprints for a Pipeline, `adops run --branch` no longer raises StageNotRunError (src/adops/application/run_pipeline.py:174-178). Instead it rebuilds every Step of that Pipeline in its own br_<branch>__ schemas, defers nothing to stage, writes no stage fingerprints and no Reverse Sync rows (Reverse Sync still makes only a Preview), and succeeds. The Branch rule with saved fingerprints (defer unchanged Steps, rebuild from the first Changed Step) is unchanged. Unit tests pin both cases and coverage stays at 100% line+branch. (2) ADR-0006 gets a dated Clarification describing the new first-run rule. The adops-share Skill text in both src/adops/templates/demo and src/adops/templates/plain (.claude/skills/adops-share/SKILL.md, around line 100) no longer describes a refusal; it explains that a first Branch run rebuilds everything. Every user-facing mention of 'stage has no Step Fingerprints' is updated or removed (try-the-assistant.md, promotion.md, tests/unit/interface/test_run_command.py). (3) First push: the generated src/adops/templates/github/workflows/adops-stage.yml skips the repo's very first push to main (github.event.before equal to 40 zeros) and still deploys every later push. This is checked by the existing parse-the-generated-YAML workflow tests. The 'cancel and re-run' note in promotion.md (line ~259) is rewritten to match. (4) Partial failure: a unit test sets up a changed-only deploy in which a rerun Step fails after earlier Steps passed. It shows that the earlier Steps' fingerprints were saved and the failed Step's were not, that the Settings Marker and the seen Accepted-Change Record ids were not advanced, and that the next `plan_deploy` / `adops run --all --changed` reruns from the failed Step. No new Docker e2e case is added and the e2e job stays under its 20-minute limit. (5) A manual real-runner trial on the Mac host (no OrbStack VMs, free disk checked first, Postgres Warehouse) uses this horizon's adops build and covers four things. (a) A fresh repo's first push does not start adops-stage. (b) Its first PR gets a green Branch run. (c) merge -> stage and release -> prod each rerun only Changed Steps, printing 'unchanged in <env>' for the rest. (d) One deliberately failing deploy, followed by a fixed one that reruns from the failed Step. Results go in a dated row under 'Recorded trials' in docs/playbooks/promotion.md (and in run-stage-and-prod-on-a-mac.md where relevant). (6) The repo's unit gate passes (with ADOPS_TEST_POSTGRES_DSN set), as do lint, types and the existing e2e.
+- Change first Branch run to rebuild every Step: A unit test in tests/unit/application/test_run_pipeline.py shows a Branch run with no saved stage Step Fingerprints passing every Step, deferring none and saving no fingerprints, with the full unit gate green at 100% coverage.
+- Change stage workflow to skip the first push: A unit test in tests/unit/interface/test_init_command.py parses the generated adops-stage.yml and shows its deploy job condition is false for a push whose before is 40 zeros and true for a normal push, while adops-prod.yml still has no job-level if.
+- Change deploys to forget fingerprints before rerunning Steps: A CLI unit test in tests/unit/interface/test_run_command.py shows that after a Changed-only deploy whose push_stats Step fails, transform_shop's new fingerprint is saved, push_stats has no saved fingerprint, the Deploy State is unchanged, and the next `adops run --all --changed` starts at push_stats.
+- Run real-runner trial of changed-only deploys: A new dated row under 'Recorded trials' in docs/playbooks/promotion.md recording the first push, first pull request, stage and prod Changed-only deploys and the failed-then-fixed deploy results.
+
+## Alignment Preview
+
+Four concerns were raised and all were accepted as fixes, with no redirect. (1) Forget a Step's fingerprint just before it runs, not all of them up front; the gate later widened this to "that Step and every later Step". (2) The trial Project is created with `adops init` from the local wheel. (3) The trial repo is created empty. (4) On the first push, an `adops-stage` run whose deploy job is skipped counts as a pass.
+
+## Quality Gate
+
+Full path, one gate iteration. The critic raised 0 blockers, 1 major and 10 minor/passing issues. **Healed (major, user-approved):** `grounded-in-discovery`. Forgetting only the one Step about to run would let re-saves (each given the next `saved_order`) shuffle the saved order after a failure, so the next deploy could rerun from Step 0. Phase 3 now forgets that Step and every later Step just before it runs, and adds a real-Postgres test that a run failing at C leaves exactly A,B saved in order. The orchestrator applied this heal against the named issue, with no healer Agent call. **Minor fixes applied:** removed duplicate deferred entries; gave each required material its own reason; changed success criterion (3) to say `github.event.before`; replaced the trial rubric's `grep '2026-1'` with a check for the trial's own date. **Accepted debt (minor):** phases 1 and 3 both edit `run_pipeline.py`, `test_run_pipeline.py` and `test_run_command.py` with no dependency between them. That is harmless because EXECUTE runs one phase at a time, but run them in order. No verification call was needed. Verdict: **passed after heal**.
+
+## Cost
+
+Agent calls: 6 against a budget of 7–9. They were analysis, discovery, phase breakdown, preview concerns, rubrics and critic. There were 0 patch calls, no verify call, and no healer call (the heal was applied directly). Stage 3.5 was skipped because nothing was size-cut to the next horizon.
+
+## Full analysis
+
+**Domain shape:** business — The parts that matter change and prove DataOps rules a data engineer recognizes: the Branch Environment first-run rule (ADR-0006), how Promotion deploys pick Changed Steps by Step Fingerprint, and how a failed deploy resumes.
+
+| Term | Meaning |
+|---|---|
+| Changed Step | A Step whose Step Fingerprint differs from the one saved by the Environment's last successful run (or has none), so it and later Steps rerun. |
+| Step Fingerprint | Hash of a Step's definition, saved per Step only after its Checks pass, only in stage and prod, never by a Branch run. |
+| Branch run | `adops run --branch` for a PR, building in br_<branch>__ schemas; defers unchanged Steps to stage, or rebuilds every Step when stage has never run that Pipeline. |
+| First run | A new repo's first push and first PR, when no runner or Server folder may exist yet and stage has no saved Step Fingerprints. |
+| Changed-only deploy | `adops run --all --changed` in the stage and prod workflows, rerunning only Changed Steps and printing 'unchanged in <env>' for the rest. |
+| Partial failure | A changed-only deploy in which a rerun Step fails after earlier Steps passed; the next deploy must rerun from the failed Step. |
+| Real-runner trial | The manual, dated test of Promotion on the user's self-hosted runner on the Mac host, recorded under Recorded trials in the playbook. |
+| Deploy State | An Environment's Settings Marker and seen Accepted-Change Record ids in adops._adops_deploy_state, advanced only when the deploy succeeds. |
+
+**Assumptions**
+- The h18 deploy rules are binding as they stand: new record -> full Pipeline, adops.yaml Settings Marker change -> every Pipeline, no Schedule -> full, no saved fingerprints -> full, else from the first Changed Step. Step Fingerprints are saved per Step only after its Checks pass. This horizon proves those rules and does not change them.
+- The Settings Marker is saved only after every Pipeline passed (src/adops/interface/run_command.py:320). Seen record ids are marked only after the Pipeline passes (run_pipeline.py:582). So the partial-failure behaviour is believed correct already and needs a pinning test, not a fix. If the test shows otherwise, fixing it is in scope.
+- 'Stage has never run' means no saved Step Fingerprints for that Pipeline in stage. A partial set of saved fingerprints keeps the existing rule: a Step without a saved fingerprint counts as changed.
+- When nothing is deferred, a Branch run reads the real Source for its Sync Steps, as it already does today when a Sync Step changed. The BranchSourcesNotParameterizedError fail-fast still applies.
+- 'Very first push' is detected from the push event (created: true or before = 40 zeros). A repo created on GitHub with a README and then pushed is not a first push and may still start adops-stage; promotion.md says so.
+- Skipping the first push means stage first runs on the first merge; before that, stage has no fingerprints, which the new Branch rule covers.
+- The trial uses a Postgres Warehouse, runs the runner with ./run.sh on the Mac host, and builds the Server image from a wheel of this horizon's adops, not from PyPI.
+- One Server per machine (h16): release -> prod happens after switching the Server's ADOPS_ENVIRONMENT.
+- The trial is the last phase and depends on the code phases; it is verified by the recorded results in the guide.
+- confirmed: first PR Branch run with no saved stage fingerprints rebuilds every Step (ADR-0006 clarification)
+- confirmed: adops-stage.yml skips the repo first push to main
+- confirmed: partial failure proven by a unit test plus one failing deploy in the trial; no new e2e case
+- confirmed: real-runner trial is the last phase, Mac host, recorded in the guide
+- confirmed: before a fingerprint-saving run (stage/prod, full or from-step) reruns Steps from index k on, it forgets their saved fingerprints, so a failed Step always counts as changed; this clarifies the h18 never-pruned decision (stale rows of removed Steps are still never pruned)
+- confirmed: just before a Step runs in stage/prod, it and every later Step are forgotten (gate heal, user-approved); nothing is forgotten until the run reaches a Step
+- confirmed: trial Project is created with adops init from the local wheel; trial repo is created empty; a skipped deploy job on first push counts as the pass
+- confirmed: a Transform-first Pipeline on a first Branch run still reads stage raw schema; documented, not fixed
+- confirmed: blockers MAP.md lists as already answered are marked resolved at memory write
+
+**Risks**
+- A first Branch run's full rebuild loads the full Source into br_<branch>__raw_<source> on the stage Warehouse; for a large Source that is slow and may hit the 30-minute lock or the MCP tool-call timeout. The Skill text should set that expectation.
+- The new Branch path must not save stage fingerprints, must not write Reverse Sync rows, and drop-branch must still remove exactly br_<branch>__ schemas. Tests must assert all three.
+- ADR-0006 and vision criterion 5 say Branch Environments 'rebuild only changed Steps + dependents'; the full first-run rebuild must be a dated Clarification (with nothing saved, every Step counts as changed), not a silent contradiction.
+- The github.event.before/created guard may misfire on force-push, a recreated main, or a repo whose first commit came from GitHub's web UI; YAML-parsing tests cannot prove GitHub behaviour, only the trial can.
+- Skipping the first push could hide a misconfiguration on a repo whose runner was set up beforehand; promotion.md must say stage first runs on the first merge.
+- Trial disk usage on the Mac host: measure free disk before building Server images.
+- The trial needs a fresh private GitHub repo, a self-hosted runner, a GitHub prod environment and the user's time; it can stall while code phases are done.
+- The deliberately failing deploy must fail in a Step after at least one passing Step (e.g. a failing dbt test after a Sync).
+- The open h17 scheduled-run-overlap question may surface in the trial; not in scope to fix.
+- Removing StageNotRunError requires updating every test and doc that references it, or gates fail.

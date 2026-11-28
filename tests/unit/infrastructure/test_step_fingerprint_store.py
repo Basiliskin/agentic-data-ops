@@ -11,7 +11,11 @@ from adops.application.ports import (
     StepFingerprintStore,
     WarehouseUnreachable,
 )
-from adops.domain.branch_environment import canonical_step_json, step_fingerprint
+from adops.domain.branch_environment import (
+    canonical_step_json,
+    first_changed_step,
+    step_fingerprint,
+)
 from adops.domain.transform import TransformStep
 from adops.infrastructure.step_fingerprint_store import (
     ProjectTree,
@@ -124,12 +128,69 @@ def test_pipelines_are_kept_apart(warehouses):
     assert store.load("billing") == {}
 
 
+def test_forget_deletes_only_the_named_steps_of_one_pipeline(warehouses):
+    store = warehouses.store()
+    for step in ("x", "y", "z"):
+        store.save("p", step, f"{step}-fp")
+    store.save("q", "y", "q-fp")
+
+    store.forget("p", ("y", "z"))
+
+    assert store.load("p") == {"x": "x-fp"}
+    assert store.load("q") == {"y": "q-fp"}
+
+
+def replay_run(store: WarehouseFingerprintStore, steps: list[str], passing: int) -> None:
+    """As a stage run does: each reached Step forgets itself and later ones, then saves on pass."""
+    for index, step in enumerate(steps[: passing + 1]):
+        store.forget("shop", steps[index:])
+        if index < passing:
+            store.save("shop", step, f"{step}-new")
+
+
+def test_a_run_failing_at_a_step_leaves_the_passed_steps_saved_in_step_order(warehouses):
+    store = warehouses.store()
+    steps = ["a", "b", "c", "d"]
+    for step in steps:
+        store.save("shop", step, f"{step}-old")
+
+    replay_run(store, steps, passing=2)
+
+    loaded = store.load("shop")
+    assert list(loaded.items()) == [("a", "a-new"), ("b", "b-new")]
+    current = [(step, f"{step}-new") for step in steps]
+    assert first_changed_step(current, loaded) == 2
+
+
+def test_a_rerun_keeps_the_rows_of_steps_the_pipeline_no_longer_has(warehouses):
+    store = warehouses.store()
+    for step in ("removed", "a", "b"):
+        store.save("shop", step, f"{step}-old")
+
+    replay_run(store, ["a", "b"], passing=2)
+
+    assert list(store.load("shop").items()) == [
+        ("removed", "removed-old"),
+        ("a", "a-new"),
+        ("b", "b-new"),
+    ]
+
+
+def test_forget_on_an_empty_warehouse_creates_nothing(warehouses):
+    warehouses.store().forget("shop", ("load",))
+
+    assert warehouses.rows(TABLE_EXISTS) == [(0,)]
+    assert warehouses.rows(ADOPS_SCHEMA_EXISTS) == [(0,)]
+
+
 def test_quotes_in_values_are_stored_as_values(warehouses):
     store = warehouses.store()
 
     store.save("sh'op", "st'ep", "f'p")
+    store.save("sh'op", "other", "fp")
+    store.forget("sh'op", ("st'ep",))
 
-    assert store.load("sh'op") == {"st'ep": "f'p"}
+    assert store.load("sh'op") == {"other": "fp"}
     assert store.load("shop") == {}
 
 
@@ -174,15 +235,21 @@ def assert_holds_no_driver_text(error: Exception) -> None:
             assert leak not in text
 
 
-@pytest.mark.parametrize("call", ["save", "load"])
+def call_store(store: WarehouseFingerprintStore, call: str) -> None:
+    if call == "save":
+        store.save("shop", "load", "fp")
+    elif call == "forget":
+        store.forget("shop", ("load",))
+    else:
+        store.load("shop")
+
+
+@pytest.mark.parametrize("call", ["save", "load", "forget"])
 def test_an_unreachable_postgres_raises_warehouse_unreachable_without_driver_text(tmp_path, call):
     store = WarehouseFingerprintStore(tmp_path, "postgres", UNREACHABLE, environment="stage")
 
     with pytest.raises(WarehouseUnreachable) as raised:
-        if call == "save":
-            store.save("shop", "load", "fp")
-        else:
-            store.load("shop")
+        call_store(store, call)
 
     assert_holds_no_driver_text(raised.value)
 
@@ -204,7 +271,7 @@ def test_a_failing_statement_raises_warehouse_unreachable_without_driver_text(
     assert_holds_no_driver_text(raised.value)
 
 
-@pytest.mark.parametrize("call", ["save", "load"])
+@pytest.mark.parametrize("call", ["save", "load", "forget"])
 def test_a_duckdb_file_locked_by_another_process_is_unreachable(
     tmp_path, duckdb_held_by_another_process, call
 ):
@@ -216,10 +283,7 @@ def test_a_duckdb_file_locked_by_another_process_is_unreachable(
         duckdb_held_by_another_process(warehouse.path),
         pytest.raises(WarehouseUnreachable) as raised,
     ):
-        if call == "save":
-            store.save("shop", "load", "fp")
-        else:
-            store.load("shop")
+        call_store(store, call)
 
     assert_holds_no_driver_text(raised.value)
 

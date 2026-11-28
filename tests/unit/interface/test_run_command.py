@@ -1,7 +1,7 @@
 import os
 import re
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn
@@ -219,6 +219,10 @@ class InMemoryFingerprintStore:
 
     def save(self, pipeline: str, step: str, fingerprint: str) -> None:
         self.saved.setdefault(pipeline, {})[step] = fingerprint
+
+    def forget(self, pipeline: str, steps: Collection[str]) -> None:
+        for step in steps:
+            self.saved.get(pipeline, {}).pop(step, None)
 
 
 @pytest.fixture(autouse=True)
@@ -1153,14 +1157,24 @@ def test_branch_matching_stage_defers_every_step_and_exits_zero(
     assert branch_project.transform == [] and branch_project.reverse_sync == []
 
 
-def test_branch_before_any_stage_run_asks_for_a_stage_run(project, branch_project):
+def test_branch_before_any_stage_run_rebuilds_every_step(
+    project, branch_project, fingerprint_store
+):
     result = invoke(project, "--branch", "feat")
 
-    assert_clean_failure(result)
+    assert result.exit_code == 0, result.output
     assert_no_secret(result)
-    assert result.output.strip() == (
-        "Pipeline shop_sync: stage has no Step Fingerprints; run the Pipeline in stage first"
-    )
+    lines = result.output.splitlines()
+    assert [line for line in lines if line.startswith("step ")] == [
+        "step sync_shop: passed — customers 20 rows, orders 2 rows",
+        "step transform_shop: passed",
+        "step push_stats: passed",
+    ]
+    assert lines[-1] == "Pipeline shop_sync passed in Environment br_feat."
+    assert "deferred to stage" not in result.output
+    assert branch_project.sync == [("br_feat", "postgres", SchemaLayout.for_branch("br_feat"))]
+    assert fingerprint_store.saved == {}
+    assert the_run_log(project, "br_feat") == result.output
 
 
 @pytest.mark.usefixtures("sync", "orchestrator")
@@ -1559,7 +1573,7 @@ def test_a_branch_run_reads_stages_fingerprints_inside_the_lock(
 
     monkeypatch.setattr(fingerprint_store, "load", load)
 
-    assert_clean_failure(invoke(project, "--branch", "feat"))
+    assert invoke(project, "--branch", "feat").exit_code == 0
     assert lock.events == [("enter", "stage"), ("load fingerprints",), ("exit", "stage")]
 
 
@@ -1747,6 +1761,9 @@ def test_a_branch_run_logs_under_its_branch_environment(project, branch_project,
 
 
 def test_a_failed_branch_run_logs_under_its_branch_environment(project, branch_project):
+    hard_coded = "sources:\n  - name: shop\n    schema: raw_shop\n"
+    (project / "dbt" / "models" / "sources.yml").write_text(hard_coded)
+
     result = invoke(project, "--branch", "feat")
 
     assert_clean_failure(result)
@@ -2304,6 +2321,39 @@ def test_a_failed_deploy_saves_no_marker_so_the_next_one_reruns_in_full(
     assert next_deploy.exit_code == 0, next_deploy.output
     assert step_lines(next_deploy)[0].startswith("step sync_shop: passed")
     assert deploy_store.markers_saved == [marker_for("stage")]
+
+
+def test_a_deploy_failing_at_push_stats_forgets_it_so_the_next_deploy_starts_there(
+    deploy_project, fingerprint_store, deploy_store, monkeypatch
+):
+    deployed(deploy_project, fingerprint_store, deploy_store, "stage")
+    deploy_store.seen = {"shop_sync": {"r0"}}
+    edit_model(deploy_project)
+    current = stage_fingerprints(deploy_project, DEPLOY_PIPELINE)
+    monkeypatch.setattr(
+        run_command, "build_reverse_sync", lambda *_, **__: FakeReverseSync(null_keys=1)
+    )
+
+    failed = invoke_changed(deploy_project, "--env", "stage")
+
+    assert failed.exit_code == 1
+    assert list(fingerprint_store.saved["shop_sync"].items()) == [
+        ("sync_shop", current["sync_shop"]),
+        ("transform_shop", current["transform_shop"]),
+    ]
+    assert deploy_store.marker == marker_for("stage") and deploy_store.markers_saved == []
+    assert deploy_store.seen == {"shop_sync": {"r0"}}
+
+    monkeypatch.setattr(run_command, "build_reverse_sync", lambda *_, **__: FakeReverseSync())
+    next_deploy = invoke_changed(deploy_project, "--env", "stage")
+
+    assert next_deploy.exit_code == 0, next_deploy.output
+    assert step_lines(next_deploy)[:2] == [
+        "step sync_shop: unchanged in stage",
+        "step transform_shop: unchanged in stage",
+    ]
+    assert step_lines(next_deploy)[2].startswith("step push_stats: passed")
+    assert fingerprint_store.saved["shop_sync"] == current
 
 
 def test_one_failing_pipeline_of_all_saves_no_marker(project, run_project_calls, deploy_store):

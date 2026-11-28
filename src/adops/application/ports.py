@@ -180,6 +180,10 @@ class StepFingerprintStore(Protocol):
 
     def save(self, pipeline: str, step: str, fingerprint: str) -> None: ...
 
+    def forget(self, pipeline: str, steps: Collection[str]) -> None:
+        """Delete the saved fingerprints of these Steps; other Steps keep theirs."""
+        ...
+
 
 @runtime_checkable
 class DeployStateStore(Protocol):

@@ -91,9 +91,9 @@ it, not in the tool's repository. In the same Claude Code session, say `share it
 What to expect today, on a demo with no stage Server:
 
 - The Assistant uses `git` and `gh` through Bash; that is expected (ADR-0011).
-- It tries the Branch run **before** pushing. It is refused because stage has never run
-  `shop_sync` ("stage has no Step Fingerprints"); the Assistant explains this and asks whether
-  to open the pull request anyway.
+- It tries the Branch run **before** pushing. stage has not run `shop_sync` yet, so the Branch
+  run rebuilds every Step from the demo source into the Branch's own schemas, which may take as
+  long as a full load; the Assistant says so and then reports the result.
 - Before creating the repository it says the checks need a self-hosted runner; after pushing
   it reports that no runner labelled `adops-stage` exists.
 - The pull request holds only the change (the model and `schema.yml`), because `adops init`

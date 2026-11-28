@@ -252,11 +252,12 @@ lines at the prod machine before the first release, and merge that change. The p
 
 ## Step 7 — Try it
 
-Stage must have run once before a pull request can get a Branch run: until then the Branch run
-stops with "stage has no Step Fingerprints; run the Pipeline in stage first" and the check is red,
-even for a correct change. The first push to `main` after the runner and Server are ready gives
-stage that run. (Pushing a new repository starts `adops stage` at once; if no runner exists yet,
-cancel that run under **Actions**, then re-run it when step 3 is done.)
+The first push of a new repository to `main` starts no `adops stage` deploy, so it needs no runner
+yet. Until stage has run once, a pull request's Branch run has nothing in stage to compare with and
+rebuilds every Step of each Pipeline. Stage first runs when that first pull request is merged; from
+then on a Branch run rebuilds only the Steps that changed. A repository created on GitHub with a
+README and then pushed to is not a first push: that push may still start `adops stage`, so if no
+runner exists yet, cancel that run under **Actions**.
 
 1. Open a pull request from a branch in your repository. `adops pull request` runs on the stage
    Server; its log shows each Pipeline's Branch run.

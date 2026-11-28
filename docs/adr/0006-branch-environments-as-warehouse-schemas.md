@@ -35,3 +35,8 @@ The original text named a single `env_<branch>` schema created by CI and dropped
 
 - **prod saves fingerprints too.** stage and prod both save a Step's Step Fingerprint in their own `adops._adops_step_fingerprints` after its Checks pass, so a deploy to either can rerun only its Changed Steps (ADR-0014 clarification of 2026-11-27). Branch Environments still compare against stage's fingerprints only and still never write them.
 - **Each deploy also saves a Deploy State** in that Environment's `adops._adops_deploy_state`: a Settings Marker (a hash of that Environment's block in `adops.yaml`, the time zone and the alert webhook setting) and the Accepted-Change Record ids it has already run with. Fingerprint rows of Steps that no longer exist are ignored, not deleted.
+
+## Clarification (2026-11-28)
+
+- **A first Branch run rebuilds the whole Pipeline.** When stage has no saved Step Fingerprints for a Pipeline (stage has never run it), every Step counts as changed: the Branch run rebuilds every Step into its own `br_<name>__` schemas, loading each Sync Step from the real Source, instead of refusing. It still saves no fingerprint, and a Reverse Sync still only previews. The fail-fast for dbt sources that do not read the Branch's raw schema now applies to that first run too.
+- **A Pipeline whose first Step is a Transform still reads stage.** With no Sync Step before it in the Branch, that Transform reads stage's `raw_<source>` schema, which may not exist yet before stage's first run, so such a first Branch run can fail on a missing schema.

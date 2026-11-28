@@ -1,0 +1,219 @@
+{
+  "roadmapFile": "docs/roadmaps/agentic-dataops/horizons/horizon-19-real-runner-trial-of-changed-only-deploys-roadmap.json",
+  "roadmapTask": "Real-runner trial of changed-only deploys, plus first-run fixes (MAP #19)",
+  "createdAt": "2026-11-28T06:17:05Z",
+  "updatedAt": "2026-11-28T07:10:51Z",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "branch-run-rebuilds-everything-when-stage-never-ran",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-28T06:17:05Z",
+      "baseRef": "24a8a38bdd086ad6ec3dc402a2e836284c1672ca",
+      "baseDirty": true,
+      "notes": "Already dirty at start: GLOSSARY.md, docs/roadmaps/agentic-dataops/{MAP,blockers,decisions,discoveries,state}.md, assets/, docs/adr/0017-*.md, horizon-19 roadmap .json/.md. Changed: src/adops/application/run_pipeline.py (StageNotRunError class + raise removed), src/adops/interface/run_command.py (import, RUN_ERRORS, --help docstring), tests/unit/application/test_run_pipeline.py (first-run rebuild test + first-run fail-fast test), tests/unit/interface/test_run_command.py (CLI first-run test with Run Log == output; two tests that used the refusal as a failure now use hard-coded sources / expect exit 0), tests/unit/interface/test_mcp_server.py (MCP first-run test), ADR-0006 Clarification (2026-11-28), both adops-share SKILL.md (identical), docs/playbooks/try-the-assistant.md. Amendment 1: try-the-assistant path. No type checker configured in repo/CI, so no types gate exists.",
+      "amendments": [
+        {
+          "at": "2026-11-28T06:23:51Z",
+          "by": "execute",
+          "reason": "filesAffected named docs/try-the-assistant.md; the file is at docs/playbooks/try-the-assistant.md (lines 94-96 hold the refusal text). Same goal, path only.",
+          "grounding": "find . -name try-the-assistant.md -> ./docs/playbooks/try-the-assistant.md",
+          "before": {
+            "filesAffected": [
+              "src/adops/application/run_pipeline.py",
+              "src/adops/interface/run_command.py",
+              "tests/unit/application/test_run_pipeline.py",
+              "tests/unit/interface/test_run_command.py",
+              "tests/unit/interface/test_mcp_server.py",
+              "docs/adr/0006-branch-environments-as-warehouse-schemas.md",
+              "src/adops/templates/demo/.claude/skills/adops-share/SKILL.md",
+              "src/adops/templates/plain/.claude/skills/adops-share/SKILL.md",
+              "docs/try-the-assistant.md"
+            ]
+          },
+          "after": {
+            "filesAffected": [
+              "src/adops/application/run_pipeline.py",
+              "src/adops/interface/run_command.py",
+              "tests/unit/application/test_run_pipeline.py",
+              "tests/unit/interface/test_run_command.py",
+              "tests/unit/interface/test_mcp_server.py",
+              "docs/adr/0006-branch-environments-as-warehouse-schemas.md",
+              "src/adops/templates/demo/.claude/skills/adops-share/SKILL.md",
+              "src/adops/templates/plain/.claude/skills/adops-share/SKILL.md",
+              "docs/playbooks/try-the-assistant.md"
+            ]
+          }
+        }
+      ],
+      "unplannedFiles": [],
+      "failures": [
+        {
+          "at": "2026-11-28T06:24:14Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run ruff check",
+          "detail": "E501 Line too long (101 > 100) at tests/unit/application/test_run_pipeline.py:1739 and :1755",
+          "resolvedBy": "gate-fix",
+          "resolution": "Split the two long assert/call lines into a local variable each; ruff check exit 0."
+        }
+      ],
+      "completedAt": "2026-11-28T06:40:27Z",
+      "gradeResult": {
+        "phaseId": "branch-run-rebuilds-everything-when-stage-never-ran",
+        "dimensionScores": [
+          {
+            "dimensionId": "first-branch-run-rebuilds-all-steps",
+            "score": 9,
+            "pass": true,
+            "evidence": "Asserts BranchRun(BRANCH,{},0), all PASSED, no saves, Preview written False, real shop source; not 10: br_ write check partly computed via read_layout in the test."
+          },
+          {
+            "dimensionId": "partial-stage-and-failfast-still-hold",
+            "score": 9,
+            "pass": true,
+            "evidence": "New first-run fail-fast test; no DEFERRED assertion removed outside the replaced refusal test."
+          },
+          {
+            "dimensionId": "cli-and-mcp-report-the-rebuild",
+            "score": 9,
+            "pass": true,
+            "evidence": "CLI test asserts exit 0, step lines, Run Log == output; MCP test asserts success; --help text updated."
+          },
+          {
+            "dimensionId": "user-texts-describe-rebuild",
+            "score": 9,
+            "pass": true,
+            "evidence": "Skills byte-identical, ADR-0006 additive Clarification with Transform-first caveat, playbook rewritten."
+          },
+          {
+            "dimensionId": "layer-respected",
+            "score": 9,
+            "pass": true,
+            "evidence": "run_pipeline.py diff deletions only; mcp_server.py unchanged; rule stays in plan_branch_run."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": "ruff check: pass (after E501 fix); pytest tests/unit --cov (ADOPS_TEST_POSTGRES_DSN local): 2218 passed, 100% coverage; uv build --wheel: templates incl. both adops-share SKILL.md present; pytest tests/e2e -m e2e: 14 passed (16m); no type checker configured"
+    },
+    {
+      "phaseId": "stage-workflow-skips-first-push",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-28T06:42:29Z",
+      "baseRef": "24a8a38bdd086ad6ec3dc402a2e836284c1672ca",
+      "baseDirty": true,
+      "notes": "Already dirty at start: GLOSSARY.md,docs/adr/0006-branch-environments-as-warehouse-schemas.md,docs/playbooks/try-the-assistant.md,docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/run_pipeline.py,src/adops/interface/run_command.py,src/adops/templates/demo/.claude/skills/adops-share/SKILL.md,src/adops/templates/plain/.claude/skills/adops-share/SKILL.md,tests/unit/application/test_run_pipeline.py,tests/unit/interface/test_mcp_server.py,tests/unit/interface/test_run_command.py,assets/,docs/adr/0017-mongodb-verified-source-flattened-through-dlt.md,docs/roadmaps/agentic-dataops/horizons/horizon-19-real-runner-trial-of-changed-only-deploys-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-19-real-runner-trial-of-changed-only-deploys-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-19-real-runner-trial-of-changed-only-deploys-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-19-real-runner-trial-of-changed-only-deploys-roadmap.status.last_good.json | Changed: src/adops/templates/github/workflows/adops-stage.yml (job if: github.event.before != 40 zeros + header comment), tests/unit/interface/test_init_command.py (push_context helper; job-if assertion moved out of the stage/prod parametrized test into a stage condition test, an evaluate() test over first/normal/39-/41-zero/empty before, and a prod no-if test), both adops-share SKILL.md (first-push sentence; files were already dirty from phase 1), docs/playbooks/promotion.md (Step 7 intro). No unplanned files.",
+      "completedAt": "2026-11-28T07:01:23Z",
+      "gradeResult": {
+        "phaseId": "stage-workflow-skips-first-push",
+        "dimensions": [
+          {
+            "dimensionId": "stage-condition-evaluates-correctly",
+            "score": 10,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "Parsed stage if evaluated via evaluate()/push_context: false for 40 zeros, true for a real SHA; 10 earned by 39-/41-zero and empty before cases proving exact comparison."
+          },
+          {
+            "dimensionId": "other-workflows-untouched",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "Shared test split not deleted; test_prod_deploy_has_no_job_condition; diff stat lists only adops-stage.yml; header comment updated."
+          },
+          {
+            "dimensionId": "first-run-guidance-is-accurate",
+            "score": 9,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "No cancel-and-re-run note; Step 7 names all four points incl. README caveat; SKILL.md files byte-identical; Skill tests pass."
+          },
+          {
+            "dimensionId": "interface-layer-only",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "No .py under src/adops touched by this phase; condition reads only github.event.before."
+          }
+        ],
+        "overallPass": true,
+        "summary": "Stage workflow skips only an all-zero-before push, proven by parse-and-evaluate tests; prod has no job condition; docs and Skills accurate."
+      },
+      "gateRun": [
+        "ruff check: pass",
+        "pytest tests/unit --cov: pass (2232, 100%)",
+        "uv build --wheel + adops-stage.yml in wheel: pass",
+        "pytest tests/e2e -m e2e: pass (14)"
+      ]
+    },
+    {
+      "phaseId": "deploy-forgets-fingerprints-of-rerun-steps",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-11-28T07:03:48Z",
+      "baseRef": "11039ddbd3fd4447ebdd1c4303569edc7699d1d4",
+      "baseDirty": true,
+      "notes": "Already dirty at start (phases 1-2 uncommitted + memory files): docs/adr/0006-branch-environments-as-warehouse-schemas.md,docs/playbooks/promotion.md,docs/playbooks/try-the-assistant.md,docs/roadmaps/agentic-dataops/MAP.md,docs/roadmaps/agentic-dataops/blockers.md,docs/roadmaps/agentic-dataops/decisions.md,docs/roadmaps/agentic-dataops/discoveries.md,docs/roadmaps/agentic-dataops/state.md,src/adops/application/run_pipeline.py,src/adops/interface/run_command.py,src/adops/templates/demo/.claude/skills/adops-share/SKILL.md,src/adops/templates/github/workflows/adops-stage.yml,src/adops/templates/plain/.claude/skills/adops-share/SKILL.md,tests/unit/application/test_run_pipeline.py,tests/unit/interface/test_init_command.py,tests/unit/interface/test_mcp_server.py,tests/unit/interface/test_run_command.py,assets/,docs/roadmaps/agentic-dataops/horizons/horizon-19-real-runner-trial-of-changed-only-deploys-roadmap.json,docs/roadmaps/agentic-dataops/horizons/horizon-19-real-runner-trial-of-changed-only-deploys-roadmap.md,docs/roadmaps/agentic-dataops/horizons/horizon-19-real-runner-trial-of-changed-only-deploys-roadmap.status.json,docs/roadmaps/agentic-dataops/horizons/horizon-19-real-runner-trial-of-changed-only-deploys-roadmap.status.last_good.json || Changed (all within filesAffected): ports.py, run_pipeline.py, step_fingerprint_store.py, fakes.py, test_run_pipeline.py, test_step_fingerprint_store.py, test_run_command.py. StepFingerprintStore.forget(pipeline, steps) added; WarehouseFingerprintStore DELETEs the named Steps with bound params (no-op when the table is missing); FingerprintSavingStep forgets itself + every later Step just before running and saves after it passes; only wrapped when saves_stage_fingerprint(env), so Branch/dev never forget. Phase diff for dirty files taken against a start-of-phase snapshot, not baseRef.",
+      "unplannedFiles": [],
+      "failures": [
+        {
+          "at": "2026-11-28T07:09:42Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "gate": "uv run ruff check",
+          "detail": "E501 Line too long in two new test lines (test_step_fingerprint_store.py replay_run docstring, test_run_command.py monkeypatch line)",
+          "resolvedBy": "gate-fix",
+          "resolution": "Shortened the docstring and wrapped the monkeypatch call"
+        }
+      ],
+      "gateRun": "uv run ruff check: pass; ADOPS_TEST_POSTGRES_DSN=... uv run pytest tests/unit --cov --cov-report=term-missing: pass (2250 passed, 100% line+branch)",
+      "completedAt": "2026-11-28T07:10:51Z",
+      "gradeResult": {
+        "phaseId": "deploy-forgets-fingerprints-of-rerun-steps",
+        "dimensionScores": [
+          {
+            "dimensionId": "failed-step-counts-as-changed",
+            "score": 10,
+            "pass": true,
+            "evidence": "forget before task, save after; 4-step failure test checks load order; 10 earned: first-Step failure test shows a single forget only when reached, and full-pass test starts from shuffled saved order"
+          },
+          {
+            "dimensionId": "branch-run-forgets-nothing",
+            "score": 9,
+            "pass": true,
+            "evidence": "wrapper applied only when saves_stage_fingerprint; branch test asserts zero forget calls; branch after failed stage run rebuilds from index 2"
+          },
+          {
+            "dimensionId": "warehouse-store-forget-is-scoped",
+            "score": 9,
+            "pass": true,
+            "evidence": "bound-param DELETE scoped to pipeline+steps; duckdb+Postgres tests for scoping, order after failure, removed-Step rows survive; replay is by hand, no empty-steps guard (unreachable)"
+          },
+          {
+            "dimensionId": "cli-deploy-recovers-from-partial-failure",
+            "score": 9,
+            "pass": true,
+            "evidence": "CLI test asserts exit 1, transform_shop saved, push_stats absent, marker+seen unchanged, next deploy starts at push_stats"
+          },
+          {
+            "dimensionId": "port-adapter-layering",
+            "score": 9,
+            "pass": true,
+            "evidence": "four def forget found; no new application imports; run_pipeline never names WarehouseFingerprintStore"
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "real-runner-trial-of-changed-only-deploys",
+      "status": "not-started",
+      "attempts": 0
+    }
+  ]
+}

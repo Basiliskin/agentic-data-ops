@@ -171,13 +171,6 @@ class BreakingChangeError(StepError):
         )
 
 
-class StageNotRunError(Exception):
-    def __init__(self, pipeline: str) -> None:
-        super().__init__(
-            f"Pipeline {pipeline}: stage has no Step Fingerprints; run the Pipeline in stage first"
-        )
-
-
 class BranchSourcesNotParameterizedError(PipelineValidationError):
     def __init__(self, transform_step: str, source: str) -> None:
         self.source = source
@@ -223,22 +216,32 @@ class DeployRun:
 
 @dataclass(frozen=True)
 class FingerprintSavingStep:
-    """Saves the Step's fingerprint once the Step, Checks included, has passed."""
+    """Saves the Step's fingerprint once the Step, Checks included, has passed.
+
+    Just before the Step runs, it forgets the saved fingerprints of itself and every later Step,
+    so after a failure exactly the passed Steps stay saved, still in Step order.
+    """
 
     task: StepTask
     pipeline: str
     fingerprint: str
     store: StepFingerprintStore
+    rerun: tuple[str, ...]
 
     @property
     def name(self) -> str:
         return self.task.name
 
     def __call__(self, sync: Sync) -> StepOutcome:
+        self._in_store(lambda: self.store.forget(self.pipeline, self.rerun))
         outcome = self.task(sync)
+        self._in_store(lambda: self.store.save(self.pipeline, self.name, self.fingerprint))
+        return outcome
+
+    def _in_store(self, work: Callable[[], None]) -> None:
         try:
-            self.store.save(self.pipeline, self.name, self.fingerprint)
-            return outcome
+            work()
+            return
         except Exception as error:
             # Only the type: the store's error text may hold a Warehouse secret.
             failure = SyncFailedError(
@@ -646,8 +649,6 @@ def plan_branch_run(
 ) -> BranchRun:
     pipeline = load_pipeline(pipeline_text)
     stage = fingerprinting.store.load(pipeline.name)
-    if not stage:
-        raise StageNotRunError(pipeline.name)
     current = current_fingerprints(pipeline.steps, fingerprinting.files)
     first = first_changed_step(current, stage)
     if first is not None:
@@ -687,8 +688,15 @@ def _saving_fingerprints(
     plan: RunPlan, pipeline: Pipeline, fingerprinting: StepFingerprinting
 ) -> RunPlan:
     fingerprints = dict(current_fingerprints(pipeline.steps, fingerprinting.files))
+    names = [step.name for step in pipeline.steps]
     steps = tuple(
-        FingerprintSavingStep(task, pipeline.name, fingerprints[task.name], fingerprinting.store)
+        FingerprintSavingStep(
+            task,
+            pipeline.name,
+            fingerprints[task.name],
+            fingerprinting.store,
+            tuple(names[names.index(task.name) :]),
+        )
         for task in plan.steps
     )
     return RunPlan(plan.pipeline, plan.environment, steps)

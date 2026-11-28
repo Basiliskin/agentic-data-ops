@@ -68,7 +68,6 @@ from adops.application.run_pipeline import (
     ReverseSyncTargetUnreachableError,
     ReverseSyncWriteFailedError,
     SourceUnreachableError,
-    StageNotRunError,
     StepError,
     StepFingerprinting,
     SyncFailedError,
@@ -82,7 +81,7 @@ from adops.application.run_pipeline import (
 )
 from adops.application.secrets import MissingSecretError
 from adops.domain.accepted_change_record import AcceptedChangeRecord, parse_change
-from adops.domain.branch_environment import STAGE
+from adops.domain.branch_environment import STAGE, SchemaLayout, read_layout
 from adops.domain.checks import CheckName, CheckResult, CheckStatus, SourceFacts
 from adops.domain.errors import PipelineValidationError
 from adops.domain.loader import load_pipeline, load_project_settings
@@ -1722,11 +1721,43 @@ def test_a_failed_step_after_a_deferred_one_fails_the_run():
     assert not result.succeeded
 
 
-def test_a_branch_before_any_stage_run_is_told_to_run_stage_first():
-    with pytest.raises(StageNotRunError, match="run the Pipeline in stage first"):
-        plan_branch_run(
-            BRANCH_PIPELINE, BRANCH, StepFingerprinting(FakeFingerprintStore(), dbt_files())
-        )
+def test_a_branch_before_any_stage_run_rebuilds_every_step_from_the_real_source():
+    store, files = FakeFingerprintStore(), dbt_files()
+    sync, orchestrator, engine = RecordingSync(), CountingOrchestrator(), FakeReverseSync()
+
+    branch = plan_branch_run(BRANCH_PIPELINE, BRANCH, StepFingerprinting(store, files))
+    result = run_branch(store, files, sync, orchestrator, engine)
+
+    assert branch == BranchRun(BRANCH, {}, 0)
+    assert statuses(result) == [(name, StepStatus.PASSED) for name in STEP_NAMES]
+    assert result.succeeded
+    assert store.saves == [] and store.fingerprints == {}
+    [plan] = orchestrator.plans
+    sync_task, transform_task, reverse_task = plan.steps
+    assert plan.environment == BRANCH
+    assert isinstance(sync_task, PlannedStep) and sync_task.environment == BRANCH
+    source = ResolvedConnection("localhost", 5432, "shop", "shop", SOURCE_PASSWORD)
+    assert sync_task.source == source
+    assert sync.calls == [("preflight", "customers"), ("sync", "customers")]
+    assert isinstance(transform_task, PlannedTransformStep)
+    assert isinstance(reverse_task, PlannedReverseSyncStep) and reverse_task.environment == BRANCH
+    reads = read_layout(SchemaLayout.for_branch(BRANCH), 0, load_pipeline(BRANCH_PIPELINE).steps)
+    assert reads["build"].raw == {"shop": "br_feat__raw_shop"}
+    assert reads["push_stats"].analytics == "br_feat__analytics"
+    assert engine.applied == []
+    preview = result.steps[-1].preview
+    assert preview is not None and preview.written is False
+
+
+def test_a_first_branch_run_with_hard_coded_dbt_sources_fails_before_any_step_runs():
+    files = dbt_files(sources=HARD_CODED_SOURCES)
+    sync, orchestrator = RecordingSync(), CountingOrchestrator()
+
+    with pytest.raises(BranchSourcesNotParameterizedError) as raised:
+        run_branch(FakeFingerprintStore(), files, sync, orchestrator)
+
+    assert raised.value.source == "shop"
+    assert orchestrator.plans == [] and sync.calls == []
 
 
 def test_a_branch_run_without_a_stage_environment_is_rejected_by_name():
@@ -2315,3 +2346,167 @@ def test_an_applied_ids_read_error_is_redacted_and_names_the_store():
     error = result.steps[1].error or ""
     assert error.startswith("Step orders: schema snapshot store: RuntimeError: ")
     assert_no_secret_in(error)
+
+
+FOUR_STEP_PIPELINE = BRANCH_PIPELINE + "  - {name: report, type: transform, project: dbt}\n"
+FOUR_STEP_NAMES = [*STEP_NAMES, "report"]
+
+
+def four_step_fingerprints(files: ProjectFiles) -> dict[str, str]:
+    return dict(current_fingerprints(load_pipeline(FOUR_STEP_PIPELINE).steps, files))
+
+
+def run_four_steps(
+    store: FakeFingerprintStore,
+    files: FakeProjectFiles,
+    environment: str = STAGE,
+    engine: FakeReverseSync | None = None,
+    transform: FakeTransform | None = None,
+    sync: RecordingSync | None = None,
+    branch: BranchRun | None = None,
+    deploy: DeployRun | None = None,
+) -> RunResult:
+    return run_pipeline(
+        FOUR_STEP_PIPELINE,
+        PROD_SETTINGS,
+        environment,
+        BRANCH_ENV,
+        sync or RecordingSync(),
+        FakeSnapshotStore(),
+        FixedClock(),
+        None,
+        transform or FakeTransform(),
+        engine or FakeReverseSync(),
+        StepFingerprinting(store, files),
+        branch,
+        deploy=deploy,
+    )
+
+
+def failing_push_stats() -> FakeReverseSync:
+    return FakeReverseSync(null_keys=1)
+
+
+@dataclass
+class JournalingTransform(FakeTransform):
+    journal: list[tuple[str, ...]] = field(default_factory=list)
+
+    def run(self, step, warehouse) -> TransformResult:
+        self.journal.append(("run", step.name))
+        return super().run(step, warehouse)
+
+
+def test_a_stage_run_failing_at_a_step_forgets_it_and_keeps_the_passed_steps_in_step_order():
+    files = dbt_files()
+    store = FakeFingerprintStore({"shop": dict.fromkeys(FOUR_STEP_NAMES, "old")})
+
+    result = run_four_steps(store, files, engine=failing_push_stats())
+
+    assert statuses(result) == [
+        ("customers", StepStatus.PASSED),
+        ("build", StepStatus.PASSED),
+        ("push_stats", StepStatus.CHECK_FAILED),
+        ("report", StepStatus.SKIPPED),
+    ]
+    current = four_step_fingerprints(files)
+    assert list(store.load("shop").items()) == [
+        ("customers", current["customers"]),
+        ("build", current["build"]),
+    ]
+
+
+def test_each_step_forgets_itself_and_every_later_step_before_it_runs_then_saves():
+    files = dbt_files()
+    store = FakeFingerprintStore({"shop": {"push_stats": "old", "customers": "old", "build": "x"}})
+    transform = JournalingTransform(journal=store.calls)
+
+    result = run_with_fingerprints(store, files, transform=transform)
+
+    assert result.succeeded
+    assert store.calls == [
+        ("forget", "customers", "build", "push_stats"),
+        ("save", "customers"),
+        ("forget", "build", "push_stats"),
+        ("run", "build"),
+        ("save", "build"),
+        ("forget", "push_stats"),
+        ("save", "push_stats"),
+    ]
+    assert list(store.load("shop").items()) == list(fingerprints_of(files).items())
+
+
+def test_a_failing_first_step_forgets_only_once_it_is_reached():
+    files = dbt_files()
+    store = FakeFingerprintStore({"shop": dict.fromkeys(STEP_NAMES, "old")})
+    sync = RecordingSync(fail_preflight_of={"customers": RuntimeError("boom")})
+
+    result = run_four_steps(store, files, sync=sync)
+
+    assert statuses(result)[0] == ("customers", StepStatus.FAILED)
+    assert store.calls == [("forget", *FOUR_STEP_NAMES)]
+    assert store.load("shop") == {}
+
+
+def test_a_from_step_deploy_forgets_nothing_before_its_start_step():
+    files = dbt_files()
+    store = FakeFingerprintStore({"shop": dict.fromkeys(FOUR_STEP_NAMES, "old")})
+    store.fingerprints["shop"]["customers"] = "customers-saved"
+    deploy = DeployRun(1, FakeDeployStateStore())
+
+    result = run_four_steps(store, files, engine=failing_push_stats(), deploy=deploy)
+
+    assert statuses(result)[:3] == [
+        ("customers", StepStatus.UNCHANGED),
+        ("build", StepStatus.PASSED),
+        ("push_stats", StepStatus.CHECK_FAILED),
+    ]
+    assert store.calls[0] == ("forget", "build", "push_stats", "report")
+    assert list(store.load("shop").items()) == [
+        ("customers", "customers-saved"),
+        ("build", four_step_fingerprints(files)["build"]),
+    ]
+    assert deploy.store.seen_saves == []
+
+
+def test_a_branch_run_forgets_nothing():
+    files = dbt_files()
+    store = store_matching(files, build="old")
+    before = store.load("shop")
+
+    result = run_branch(store, files)
+
+    assert result.succeeded
+    assert store.calls == []
+    assert list(store.load("shop").items()) == list(before.items())
+
+
+def test_a_branch_run_after_a_failed_stage_run_forgets_nothing_and_rebuilds_from_the_failed_step():
+    files = dbt_files()
+    store = FakeFingerprintStore({"shop": dict.fromkeys(FOUR_STEP_NAMES, "old")})
+    run_four_steps(store, files, engine=failing_push_stats())
+    stage_calls = list(store.calls)
+
+    fingerprinting = StepFingerprinting(store, files)
+    branch = plan_branch_run(FOUR_STEP_PIPELINE, BRANCH, fingerprinting)
+    result = run_four_steps(store, files, BRANCH, branch=branch)
+
+    assert branch.first_changed == 2
+    assert statuses(result) == [
+        ("customers", StepStatus.DEFERRED),
+        ("build", StepStatus.DEFERRED),
+        ("push_stats", StepStatus.PASSED),
+        ("report", StepStatus.PASSED),
+    ]
+    assert store.calls == stage_calls
+
+
+def test_a_fingerprint_store_failure_to_forget_fails_the_step_before_it_runs():
+    store = FakeFingerprintStore(fail_forget=RuntimeError(f"connect {WAREHOUSE_PASSWORD}"))
+    sync = RecordingSync()
+
+    result = run_four_steps(store, dbt_files(), sync=sync)
+
+    assert statuses(result)[:2] == [("customers", StepStatus.FAILED), ("build", StepStatus.SKIPPED)]
+    assert result.steps[0].error == "Step customers: step fingerprint store: RuntimeError"
+    assert sync.calls == []
+    assert_no_secret_in(repr(result))

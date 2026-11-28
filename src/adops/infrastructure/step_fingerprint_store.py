@@ -1,4 +1,4 @@
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -45,6 +45,9 @@ class WarehouseFingerprintStore:
     def save(self, pipeline: str, step: str, fingerprint: str) -> None:
         self._in_warehouse(lambda client: _save(client, pipeline, step, fingerprint))
 
+    def forget(self, pipeline: str, steps: Collection[str]) -> None:
+        self._in_warehouse(lambda client: _forget(client, pipeline, steps))
+
     def _in_warehouse[T](self, work: Callable[[SqlClientBase[Any]], T]) -> T:
         try:
             with warehouse_client(self._pipeline()) as client:
@@ -63,14 +66,18 @@ class WarehouseFingerprintStore:
         )
 
 
-def _load(client: SqlClientBase[Any], pipeline: str) -> dict[str, str]:
+def _table_exists(client: SqlClientBase[Any]) -> bool:
     exists = client.execute_sql(
         "SELECT count(*) FROM information_schema.tables "
         "WHERE table_schema = %s AND table_name = %s",
         client.dataset_name,
         FINGERPRINT_TABLE,
     )
-    if not exists[0][0]:
+    return bool(exists[0][0])
+
+
+def _load(client: SqlClientBase[Any], pipeline: str) -> dict[str, str]:
+    if not _table_exists(client):
         return {}
     rows = client.execute_sql(
         f"SELECT step, fingerprint FROM {client.make_qualified_table_name(FINGERPRINT_TABLE)} "
@@ -99,6 +106,18 @@ def _save(client: SqlClientBase[Any], pipeline: str, step: str, fingerprint: str
         step,
         fingerprint,
         pipeline,
+    )
+
+
+def _forget(client: SqlClientBase[Any], pipeline: str, steps: Collection[str]) -> None:
+    if not _table_exists(client):
+        return
+    placeholders = ", ".join(["%s"] * len(steps))
+    client.execute_sql(
+        f"DELETE FROM {client.make_qualified_table_name(FINGERPRINT_TABLE)} "
+        f"WHERE pipeline = %s AND step IN ({placeholders})",
+        pipeline,
+        *steps,
     )
 
 

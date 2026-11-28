@@ -474,12 +474,17 @@ async def test_a_branch_run_without_stages_secret_names_the_secret_reference(pro
     assert locks.events == []
 
 
-async def test_a_branch_run_before_stage_ran_says_so(project, seams, locks):
+async def test_a_branch_run_before_stage_ran_rebuilds_every_step(project, seams, locks):
     seams.fingerprints.saved.clear()
 
     result = await run_tool(project, pipeline="shop_sync", branch="feat")
 
-    assert "run the Pipeline in stage first" in error_text(result)
+    assert not result.isError
+    assert result.structuredContent["environment"] == "br_feat"
+    assert [step["status"] for step in result.structuredContent["steps"]] == ["passed"]
+    [plan] = seams.orchestrator.plans
+    assert [task.name for task in plan.steps] == ["sync_shop"]
+    assert seams.fingerprints.saved == {}
 
 
 async def test_invalid_adops_yaml_returns_the_validation_lines(project, seams, locks):

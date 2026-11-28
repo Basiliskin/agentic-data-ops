@@ -37,3 +37,4 @@
 - 2026-11-27 | horizon 17 | completed | 5 phases | 1 amendment (e2e Run Log evidence → Dagster step metadata, scheduled runs write no Run Log) | deploys switch release folders; held run keeps its folder (e2e)
 - 2026-11-27 | horizon 18 | planned | 6 phases | gate pass (1 major fixed, 0 debt)
 - 2026-11-27 | horizon 18 | completed | 6 phases done; 1 amendment, 0 overrides; stage and prod deploys run `adops run --all --changed`, rerunning only Changed Steps
+- 2026-11-28 | horizon 19 | planned | 4 phases (first Branch run rebuilds every Step, stage workflow skips first push, forget fingerprints before rerun, real-runner trial on Mac host); gate passed after heal (0 blockers, 1 major)

@@ -32,7 +32,6 @@ from adops.application.ports import (
 )
 from adops.application.run_pipeline import (
     DeployRun,
-    StageNotRunError,
     StepFingerprinting,
     WarehouseUnreachableError,
     current_fingerprints,
@@ -104,7 +103,6 @@ RUN_ERRORS = (
     ProjectFileError,
     MissingSecretError,
     JobCompileError,
-    StageNotRunError,
     WarehouseLocked,
 )
 
@@ -269,7 +267,8 @@ def run(
     Environment prints a Preview of what would change.
 
     With --branch, only the Steps that differ from stage's last successful run are rebuilt, into
-    the Branch's own schemas in stage's Warehouse; earlier Steps are deferred to stage.
+    the Branch's own schemas in stage's Warehouse; earlier Steps are deferred to stage. When stage
+    has never run the Pipeline, every Step is rebuilt.
 
     Variables in the Project's .env are used unless the same name is set in your shell.
     """

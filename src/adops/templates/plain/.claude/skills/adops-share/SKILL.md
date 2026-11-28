@@ -97,12 +97,13 @@ only on this branch's own schemas.
   rows it would insert, update and delete in the target. If not, explain the failed Step's
   `error` and each failed check in plain words, as the adops-test-in-dev Skill does, then fix
   the change, save it again as in step 4 and repeat this step.
-- If the run is refused because stage has no Step Fingerprints, stage has never run this
-  Pipeline, so there is nothing yet for a Branch Environment to compare against. That is not a
-  fault in the change. Explain: "stage has never run this Pipeline, so the change can't be tried
-  in a Branch Environment yet. It can still go to a pull request so someone can review it; once
-  a pull request is merged and stage has run, later changes get their Branch run." Ask whether
-  to go on to the pull request, and stop if they say no.
+- If stage has not run this Pipeline yet, there is nothing for the Branch Environment to compare
+  against, so the Branch run rebuilds every Step from the real Source into the Branch's own
+  schemas. That is not a fault in the change, but a first Branch run may take as long as loading
+  the full Source. Say so before you wait: "stage has not run this Pipeline yet, so this Branch
+  run rebuilds every Step and may take as long as loading the full Source. stage first runs when
+  a pull request is merged; after that, Branch runs rebuild only what changed." Then report the
+  result as above.
 
 ## 6. Make sure GitHub has a copy of the repository
 
@@ -115,9 +116,8 @@ the branch to."
   the stage and prod updates only start once a self-hosted runner is set up for it, which
   someone with admin rights does by hand." Only after they agree, run
   `gh repo create <repository-name> --private --source=. --remote=origin`.
-- If you made the starting save in step 2, send main too: `git push -u origin main`. If a stage
-  Server is already connected to this repository, this first push of main starts its stage
-  update, and it only carries the starting files, so nothing of the change reaches stage.
+- If you made the starting save in step 2, send main too: `git push -u origin main`. This first
+  push of main starts no stage update; stage first runs when a pull request is merged.
 
 ## 7. Send the branch and open the pull request
 

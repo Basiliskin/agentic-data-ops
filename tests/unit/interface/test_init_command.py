@@ -663,6 +663,10 @@ def pull_request_context(head_repo, action):
     return {"github": {"repository": "acme/shop", "event": event}}
 
 
+def push_context(before):
+    return {"github": {"event": {"before": before}}}
+
+
 def evaluate(condition, context):
     def operand(text):
         if text.startswith("'") and text.endswith("'"):
@@ -906,9 +910,38 @@ def test_deploy_validates_the_checkout_before_switching_the_server_release(proje
         f"{SERVER_COMPOSE_RUN} -T dagster_daemon adops run --all --changed --env {environment}"
         f" {RUN_FROM_CURRENT}"
     )
-    assert "if" not in job and "continue-on-error" not in job
+    assert "continue-on-error" not in job
     assert all("continue-on-error" not in step for step in steps)
     assert all("if" not in step for step in steps[: run + 1])
+
+
+FIRST_PUSH_BEFORE = "0" * 40
+
+
+def test_stage_deploy_skips_only_the_repositorys_first_push(project):
+    condition = deploy_job(project, "stage")["if"]
+
+    assert condition == f"github.event.before != '{FIRST_PUSH_BEFORE}'"
+
+
+@pytest.mark.parametrize(
+    ("before", "deploys"),
+    [
+        (FIRST_PUSH_BEFORE, False),
+        ("3f9c2b1e8d7a6f5e4d3c2b1a0f9e8d7c6b5a4f3e", True),
+        ("0" * 39, True),
+        ("0" * 41, True),
+        ("", True),
+    ],
+)
+def test_stage_deploy_condition_is_false_only_for_an_all_zero_before(project, before, deploys):
+    condition = deploy_job(project, "stage")["if"]
+
+    assert evaluate(condition, push_context(before)) is deploys
+
+
+def test_prod_deploy_has_no_job_condition(project):
+    assert "if" not in deploy_job(project, "prod")
 
 
 @pytest.mark.parametrize("environment", ["stage", "prod"])

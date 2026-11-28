@@ -418,7 +418,9 @@ class FakeFingerprintStore:
 
     fingerprints: dict[str, dict[str, str]] = field(default_factory=dict)
     fail_save: Exception | None = None
+    fail_forget: Exception | None = None
     saves: list[tuple[str, str]] = field(default_factory=list)
+    calls: list[tuple[str, ...]] = field(default_factory=list)
 
     def load(self, pipeline: str) -> Mapping[str, str]:
         return dict(self.fingerprints.get(pipeline, {}))
@@ -427,7 +429,16 @@ class FakeFingerprintStore:
         if self.fail_save is not None:
             raise self.fail_save
         self.saves.append((pipeline, step))
+        self.calls.append(("save", step))
         self.fingerprints.setdefault(pipeline, {})[step] = fingerprint
+
+    def forget(self, pipeline: str, steps: Collection[str]) -> None:
+        if self.fail_forget is not None:
+            raise self.fail_forget
+        self.calls.append(("forget", *steps))
+        saved = self.fingerprints.get(pipeline, {})
+        for step in steps:
+            saved.pop(step, None)
 
 
 @dataclass

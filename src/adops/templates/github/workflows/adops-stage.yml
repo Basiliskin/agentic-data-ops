@@ -1,4 +1,5 @@
-# Every merge to main deploys to the stage Server through a self-hosted runner labelled adops-stage.
+# Every merge to main deploys to the stage Server through a self-hosted runner labelled adops-stage,
+# except the repository's very first push to main, which GitHub marks with an all-zero 'before'.
 # Set the repository variable ADOPS_SERVER_DIR to the Server folder on that machine; it must hold
 # releases/ and a 'current' link (docs/playbooks/promotion.md, "One-time move to release folders").
 # The deploy copies the validated version into releases/<commit>, points current at it, reloads the
@@ -15,6 +16,7 @@ permissions:
 
 jobs:
   deploy:
+    if: github.event.before != '0000000000000000000000000000000000000000'
     runs-on: [self-hosted, adops-stage]
     concurrency:
       group: adops-stage
