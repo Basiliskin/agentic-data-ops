@@ -575,16 +575,26 @@ async def test_serve_streams_answers_json_rpc_over_the_given_streams(tmp_path):
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
     ]
-    stdin = io.StringIO("".join(json.dumps(r) + "\n" for r in requests))
     stdout = io.StringIO()
+
+    def reply(request_id: int) -> dict | None:
+        replies = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        return next((r for r in replies if r.get("id") == request_id), None)
+
+    async def stdin():
+        # The server cancels requests still in flight when stdin ends, so hold
+        # stdin open until the tools/list reply is written.
+        for request in requests:
+            yield json.dumps(request) + "\n"
+        while reply(2) is None:
+            await anyio.sleep(0.01)
 
     with anyio.fail_after(10):
         await mcp_server.serve_streams(
-            mcp_server.build_server(tmp_path), anyio.wrap_file(stdin), anyio.wrap_file(stdout)
+            mcp_server.build_server(tmp_path), stdin(), anyio.wrap_file(stdout)
         )
 
-    replies = [json.loads(line) for line in stdout.getvalue().splitlines()]
-    tools = next(r for r in replies if r.get("id") == 2)["result"]["tools"]
+    tools = reply(2)["result"]["tools"]
     assert {tool["name"] for tool in tools} == TOOLS
 
 
